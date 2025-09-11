@@ -1,0 +1,9 @@
+/.git/
+/logs/
+/worktrees/
+/node_modules/
+.DS_Store
+.claude/settings.local.json
+.env
+.env.*
+*.pyc

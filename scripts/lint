@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE="$(realpath "$SCRIPT_DIR/..")"
+cd "$WORKSPACE"
+
+# Find files in workspace
+# ... with no filename extension or a .sh extension
+# ... that have shell shebang (sh/bash/zsh/ksh)
+# ... and run shellcheck on them
+#
+# Disable warnings:
+# - SC1017 => Literal carriage return (ignore Windows line endings)
+#
+# fd regex pattern matches:
+#   ^[^.]+$ - files with no dots (no extension)
+#   \.sh$   - files ending with .sh
+#
+# awk pattern matches only the first line that starts with '#!'
+# and ends with 'sh'
+fd --hidden -t f '(^[^.]+$|\.sh$)' \
+    --exec bash -c "awk 'NR==1 && /^#!/ && /sh$/{exit 0} {exit 1}' '{}' && \
+    shellcheck --check-sourced --external-sources --exclude SC1017 '{}' || true"

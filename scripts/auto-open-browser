@@ -1,0 +1,34 @@
+#!/usr/bin/expect -f
+
+# Set timeout to never expire
+set timeout -1
+
+# Flag to track if we've already opened the browser
+set browser_opened 0
+
+# Main loop to process output
+expect {
+    -re {(?:ready on|Ready on|Listening on|listening on).*?(?:http://)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|::1):([0-9]+)} {
+        # Forward all output to stdout
+        send_user -- "$expect_out(buffer)"
+
+        # Open browser only once
+        if {!$browser_opened} {
+            set browser_opened 1
+            set port $expect_out(1,string)
+            exec scripts/open-browser $port &
+        }
+        
+        exp_continue
+    }
+    -re {.*\n} {
+        # Forward all output to stdout
+        send_user -- "$expect_out(0,string)"
+
+        exp_continue
+    }
+    eof {
+        # Process has ended
+        exit
+    }
+}

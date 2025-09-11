@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+START_TIME=$(date +%s.%N)
+
+echo "Installing build tools ..."
+TOOLS=(direnv git-lfs)
+for tool in "${TOOLS[@]}"; do
+    command -v "$tool" &>/dev/null || brew install "$tool"
+done
+
+# Configure tools
+git lfs install
+"$SCRIPT_DIR/install-git-hooks"
+
+# Make a logs directory that won't get deleted by git clean
+mkdir -p "logs"
+[[ -d "logs/.git" ]] || git init "logs" 1>/dev/null ; rm -f logs/.git/hooks/*.sample
+
+END_TIME=$(date +%s.%N)
+ELAPSED_TIME=$(echo "$END_TIME - $START_TIME" | bc --mathlib | xargs printf "%.2f\n")
+echo "✅ Setup complete in $ELAPSED_TIME seconds."

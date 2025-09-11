@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Open the application in the default browser
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+# Use provided port or default to 8787
+PORT="${1:-8787}"
+URL="http://localhost:$PORT"
+
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS
+    open "$URL"
+elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    # Linux
+    xdg-open "$URL"
+elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
+    # Windows
+    start "$URL"
+else
+    echo "Unable to detect OS type to open browser"
+    echo "Please manually open: $URL"
+    exit 1
+fi
