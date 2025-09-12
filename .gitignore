@@ -7,3 +7,8 @@
 .env
 .env.*
 *.pyc
+
+# Dynamically created files that shouldn't be committed
+guest/home/.claude.json
+guest/home/.gitconfig
+guest/home/.ssh/authorized_keys

@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-exec "$(brew --prefix)/bin/claude" --dangerously-skip-permissions "$@"
+exec "$HOME/node_modules/.bin/claude" --dangerously-skip-permissions "$@"

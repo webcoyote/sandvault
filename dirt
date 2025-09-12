@@ -1,0 +1,544 @@
+#!/usr/bin/env bash
+# Build a sandbox user ("dirtbox") for running commands
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE="$SCRIPT_DIR"
+
+
+###############################################################################
+# Functions
+###############################################################################
+trace () {
+    [[ "${VERBOSE_LEVEL:-0}" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
+}
+debug () {
+    [[ "${VERBOSE_LEVEL:-0}" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
+}
+info () {
+    echo >&2 -e "ℹ️ \033[36m$*\033[0m"
+}
+warn () {
+    echo >&2 -e "⚠️ \033[33m$*\033[0m"
+}
+error () {
+    echo >&2 -e "❌ \033[31m$*\033[0m"
+}
+abort () {
+    error "$*"
+    exit 1
+}
+# heredoc MESSAGE << EOF
+#    your favorite text here
+# EOF
+heredoc(){ IFS=$'\n' read -r -d '' "${1}" || true; }
+
+
+###############################################################################
+# Preconditions
+###############################################################################
+if [[ $OSTYPE != 'darwin'* ]]; then
+    abort "ERROR: this script is for Mac OSX"
+fi
+
+if [[ $EUID -eq 0 ]]; then
+    abort "ERROR: this script should not be run as root"
+fi
+
+
+###############################################################################
+# Resources
+###############################################################################
+VERSION="0.0.1"
+
+SHARED_WORKSPACE="$HOME/dirtbox-shared"
+
+# Create sudoers.d file for passwordless sudo to dirtbox user
+SUDOERS_FILE="/etc/sudoers.d/50-dirtbox-nopasswd-for-$USER"
+
+# Allow this user to login to any host as dirtbox and run any command
+heredoc SUDOERS_CONTENT << EOF
+# Allow only '$USER' to sudo to dirtbox without password
+$USER ALL=(dirtbox) NOPASSWD: ALL
+EOF
+
+SSH_DIR="$HOME/.ssh"
+SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_dirtbox"
+SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
+
+
+###############################################################################
+# Functions
+###############################################################################
+install_tools () {
+    trace "Installing tools..."
+
+    # Install brew
+    if ! command -v brew &> /dev/null ; then
+        trace "Installing brew..."
+        /usr/bin/env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    fi
+
+    local TOOLS=()
+    TOOLS+=("netcat")   # test network connectivity
+    TOOLS+=("node")     # install claude with npm
+    TOOLS+=("python")   # python used for claude hooks
+    TOOLS+=("uv")       # run python scripts with uv
+
+    # Hide output of brew if VERBOSE_LEVEL is <3
+    local QUIET=("--quiet")
+    [[ "${VERBOSE_LEVEL:-0}" -lt 3 ]] || QUIET=()
+
+    for tool in "${TOOLS[@]}"; do
+        if ! command -v "$(basename "$tool")" &>/dev/null ; then
+            trace "Installing $tool"
+            brew install "${QUIET[@]}" "$tool"
+        fi
+    done
+}
+
+show_version() {
+    echo "$(basename "${BASH_SOURCE[0]}") version $VERSION"
+    exit 0
+}
+
+configure_shared_folder_permssions() {
+    local enable="$1"
+
+    # Grant write access to shared workspace
+    local rights1="dirtbox allow read,write,execute,append,delete,file_inherit,directory_inherit"
+    if [[ "$enable" != "false" ]]; then
+        trace "Configuring $SHARED_WORKSPACE: add $rights1"
+        /bin/chmod +a "$rights1" "$SHARED_WORKSPACE"
+    else
+        trace "Configuring $SHARED_WORKSPACE: remove $rights1"
+        /bin/chmod -a "$rights1" "$SHARED_WORKSPACE" 2>/dev/null || true
+    fi
+
+    # Also ensure dirtbox can traverse parent directories to reach the shared workspace,
+    # but not do anything else with this user's files or directories.
+    PARENT_DIR=$(dirname "$SHARED_WORKSPACE")
+    local rights2="dirtbox allow execute"
+    local rights3="dirtbox deny read,write,append,delete"
+    while [[ "$PARENT_DIR" != "/" && "$PARENT_DIR" != "." ]]; do
+        if [[ "$enable" != "false" ]]; then
+            trace "Configuring $PARENT_DIR: add $rights2"
+            /bin/chmod +a "$rights2" "$PARENT_DIR" 2>/dev/null || true
+            trace "Configuring $PARENT_DIR: add $rights3"
+            /bin/chmod +a "$rights3" "$PARENT_DIR" 2>/dev/null || true
+        else
+            trace "Configuring $PARENT_DIR: remove $rights2"
+            /bin/chmod -a "$rights2" "$PARENT_DIR" 2>/dev/null || true
+            trace "Configuring $PARENT_DIR: remove $rights3"
+            /bin/chmod -a "$rights3" "$PARENT_DIR" 2>/dev/null || true
+        fi
+        PARENT_DIR=$(dirname "$PARENT_DIR")
+    done
+
+}
+
+uninstall() {
+    debug "Uninstalling..."
+
+    # Remove the sudoers file first; it's a sentinel for "everything is complete".
+    # By removing it first we force a rebuild if the user wants to run dirt again.
+    sudo rm -rf "$SUDOERS_FILE"
+
+    # Remove shared folder ACLS
+    configure_shared_folder_permssions false
+
+    # Remove user from SSH group BEFORE deleting the user
+    sudo dseditgroup -o edit -d dirtbox -t user com.apple.access_ssh 2>/dev/null || true
+    
+    # Now delete the user and group
+    sudo dscl . -delete "/Users/dirtbox" &>/dev/null || true
+    sudo dscl . -delete "/Groups/dirtbox" &>/dev/null || true
+    sudo rm -rf "/Users/dirtbox"
+
+    # Cleanup SSH
+    rm -rf "$SSH_KEYFILE_PRIV" "$SSH_KEYFILE_PUB"
+
+    # Remove shared workspace
+    rm -f "$SHARED_WORKSPACE/README.md"
+    rmdir "$SHARED_WORKSPACE" 2>/dev/null || true
+    if [[ -d "$SHARED_WORKSPACE" ]]; then
+        info "Keeping $SHARED_WORKSPACE directory: not empty"
+    fi
+}
+
+
+###############################################################################
+# Parse command line
+###############################################################################
+VERBOSE_LEVEL="${VERBOSE_LEVEL:-0}"
+REBUILD=false
+MODE=shell
+
+show_help() {
+    appname=$(basename "${BASH_SOURCE[0]}")
+    echo "Usage: $appname [options] command"
+    echo ""
+    echo "Options:"
+    echo "  -s, --ssh            Use SSH (default: use shell)"
+    echo "  -r, --rebuild        Rebuild all files & configuration"
+    echo "  -v, --verbose        Enable verbose output (repeat for more verbosity)"
+    echo "  -vv                  Set verbosity level 2"
+    echo "  -vvv                 Set verbosity level 3"
+    echo "  -h, --help           Show this help message"
+    echo "  --version            Show version information"
+    echo ""
+    echo "Commands:"
+    echo "  c, claude            Run claude"
+    echo "  r, run               Run claude"
+    echo "  s, shell             Run shell"
+    echo "  uninstall            Remove user & files (but not this repo)"
+    exit 0
+}
+
+# Parse optional arguments
+NEW_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -s|--ssh)
+            MODE=ssh
+            shift
+            ;;
+        -r|--rebuild)
+            REBUILD=true
+            shift
+            ;;
+        -v|--verbose)
+            ((VERBOSE_LEVEL++)) || true
+            shift
+            ;;
+        -vv)
+            ((VERBOSE_LEVEL+=2)) || true
+            shift
+            ;;
+        -vvv)
+            ((VERBOSE_LEVEL+=3)) || true
+            shift
+            ;;
+        -h|--help)
+            show_help
+            ;;
+        --version)
+            show_version
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            NEW_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- "${NEW_ARGS[@]}"
+
+# Parse fixed arguments
+case "${1:-}" in
+    c|claude|r|run)
+        COMMAND=claude
+        ;;
+    s|shell)
+        COMMAND=
+        ;;
+    uninstall)
+        uninstall
+        exit 0
+        ;;
+    *)
+        show_help
+        ;;
+esac
+
+
+###############################################################################
+# Setup
+###############################################################################
+install_tools
+
+
+###############################################################################
+# Determine whether configuration is already complete
+###############################################################################
+if [[ ! -f "$SUDOERS_FILE" ]]; then
+    # Since this is a full rebuild, provide more feedback
+    VERBOSE_LEVEL=$(( VERBOSE_LEVEL > 1 ? VERBOSE_LEVEL : 1 ))
+    info "Installing dirtbox..."
+    REBUILD=true
+# The following command requires sudo, and so it doesn't make sense to run this when
+# we're trying to avoid asking for the password; assume file contents are correct
+#elif ! echo "$SUDOERS_CONTENT" | sudo diff -q "$SUDOERS_FILE" - &>/dev/null; then
+#    REBUILD=true
+fi
+
+if [[ "$REBUILD" != "false" ]]; then
+    sudo "-p Password required to create dirtbox: " true
+fi
+
+
+###############################################################################
+# Create dirtbox user and group
+###############################################################################
+if [[ "$REBUILD" != "false" ]]; then
+    debug "Creating dirtbox user and group..."
+
+    # Check if group exists, create if needed
+    if ! dscl . -read /Groups/dirtbox &>/dev/null 2>&1; then
+        trace "Creating dirtbox group..."
+
+        # Find next available UID/GID starting from 501
+        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+        NEXT_UID=$((NEXT_UID + 1))
+
+        # Create group
+        sudo dscl . -create /Groups/dirtbox
+        GROUP_ID=$NEXT_UID
+    else
+        trace "Group dirtbox already exists"
+        GROUP_ID=$(dscl . -read /Groups/dirtbox PrimaryGroupID 2>/dev/null | awk '{print $2}')
+    fi
+
+    # Ensure group has all required properties (idempotent)
+    if [[ -z "${GROUP_ID:-}" ]]; then
+        # Group exists but has no PrimaryGroupID, find next available
+        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+        GROUP_ID=$((NEXT_UID + 1))
+    fi
+    trace "Configuring dirtbox group properties..."
+    sudo dscl . -create /Groups/dirtbox PrimaryGroupID "$GROUP_ID"
+    sudo dscl . -create /Groups/dirtbox RealName "dirtbox Group"
+
+    # Check if user exists, create if needed
+    if ! dscl . -read /Users/dirtbox &>/dev/null 2>&1; then
+        trace "Creating dirtbox user..."
+
+        # Find next available UID
+        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+        NEXT_UID=$((NEXT_UID + 1))
+
+        # Create user
+        sudo dscl . -create /Users/dirtbox
+        USER_ID=$NEXT_UID
+    else
+        trace "User dirtbox already exists"
+        USER_ID=$(dscl . -read /Users/dirtbox UniqueID 2>/dev/null | awk '{print $2}')
+    fi
+
+    # Ensure user has all required properties (idempotent)
+    trace "Configuring dirtbox user properties..."
+    if [[ -z "${USER_ID:-}" ]]; then
+        # User exists but has no UniqueID, find next available
+        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+        USER_ID=$((NEXT_UID + 1))
+    fi
+    sudo dscl . -create /Users/dirtbox UniqueID "$USER_ID"
+    sudo dscl . -create /Users/dirtbox PrimaryGroupID "$GROUP_ID"
+    sudo dscl . -create /Users/dirtbox RealName "dirtbox User"
+    sudo dscl . -create /Users/dirtbox NFSHomeDirectory "/Users/dirtbox"
+    sudo dscl . -create /Users/dirtbox UserShell "/bin/zsh"
+
+    # Set a random password for the user (password required for SSH on macOS)
+    # We'll use key-based auth so the password won't actually be used.
+    RANDOM_PASS=$(openssl rand -base64 32)
+    sudo dscl . -passwd /Users/dirtbox "$RANDOM_PASS"
+    sudo dscl . -create /Users/dirtbox IsHidden 1  # Hide from login window
+
+    # Let's allow the user to login as this user if they want
+    #sudo dscl . -create /Users/dirtbox IsHidden 0
+    #sudo dscl . -passwd /Users/dirtbox "dirtbox"
+
+    # Add to SSH access group (required for SSH login)
+    # do not use sudo dscl; it creates duplicate entries
+    sudo dseditgroup -o edit -a dirtbox -t user com.apple.access_ssh
+fi
+
+
+###############################################################################
+# Create passwordless SSH key with permission to remotely login to guest
+###############################################################################
+if [[ "$REBUILD" != "false" ]]; then
+    if [[ ! -f "$SSH_KEYFILE_PRIV" ]] || [[ ! -f "$SSH_KEYFILE_PUB" ]]; then
+        trace "Creating SSH key files..."
+        mkdir -p "$SSH_DIR"
+        ssh-keygen -t ed25519 \
+            -f "$SSH_KEYFILE_PRIV" \
+            -N "" \
+            -q \
+            -C "dirtbox-${USER}@${HOSTNAME}"
+    fi
+fi
+
+
+###############################################################################
+# Configure settings
+###############################################################################
+if [[ "$REBUILD" != "false" ]]; then
+    debug "Configuring dirtbox dotfiles..."
+
+    # Get git config from host
+    GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
+    GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
+    git config set -f "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
+    git config set -f "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
+    git config set -f "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
+
+    # Add SSH public key to host's authorized_keys
+    GUEST_AUTHORIZED_KEYS="$WORKSPACE/guest/home/.ssh/authorized_keys"
+    mkdir -p "$(dirname "$GUEST_AUTHORIZED_KEYS")"
+    cp "$SSH_KEYFILE_PUB" "$GUEST_AUTHORIZED_KEYS"
+    /bin/chmod 600 "$GUEST_AUTHORIZED_KEYS"
+fi
+
+
+###############################################################################
+# Create shared workspace directory
+###############################################################################
+if [[ "$REBUILD" != "false" ]]; then
+
+    debug "Creating shared workspace at $SHARED_WORKSPACE..."
+    mkdir -p "$SHARED_WORKSPACE"
+    configure_shared_folder_permssions true
+
+    # Create a README in the shared workspace
+    cat > "$SHARED_WORKSPACE/README.md" << EOF
+    # Dirtbox Workspace
+    # (autogenerated file; do not edit)
+
+    This directory is shared with the dirtbox user.
+    The dirtbox user has full read/write access here.
+
+    ## To switch to the dirtbox user, run:
+
+        "${BASH_SOURCE[0]}"
+
+    ## Or create an alias in your $HOME/.zshrc or $HOME/.bashrc
+
+        alias dirt="${BASH_SOURCE[0]}"
+
+        then run "dirt"
+EOF
+fi
+
+
+###############################################################################
+# Configure dirtbox user
+###############################################################################
+if [[ "$REBUILD" != "false" ]]; then
+    debug "Configure dirtbox home directory..."
+
+    # Copy files to home directory
+    sudo mkdir -p "/Users/dirtbox"
+    sudo cp -rf "$WORKSPACE/guest/home/." "/Users/dirtbox/"
+
+    # Make dirtbox the owner of the files
+    sudo chown -R "dirtbox:dirtbox" "/Users/dirtbox" 2>/dev/null || true
+
+    # Fixup file permissions
+    sudo /bin/chmod 755 "/Users/dirtbox"
+    sudo /bin/chmod 700 "/Users/dirtbox/.ssh"
+    if [[ -f "/Users/dirtbox/authorized_keys" ]]; then
+        sudo /bin/chmod 600 "/Users/dirtbox/authorized_keys"
+    fi
+    if [[ -f "/Users/dirtbox/.ssh/id_ed25519" ]]; then
+        sudo /bin/chmod 600 "/Users/dirtbox/.ssh/id_ed25519"
+    fi
+    if [[ -f "/Users/dirtbox/.ssh/id_ed25519.pub" ]]; then
+        sudo /bin/chmod 644 "/Users/dirtbox/.ssh/id_ed25519.pub"
+    fi
+fi
+
+
+###############################################################################
+# Configure passwordless sudo to switch to dirtbox user
+###############################################################################
+if [[ "$REBUILD" != "false" ]]; then
+    debug "Configuring passwordless access to dirtbox..."
+    echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_FILE" > /dev/null
+    sudo chmod 440 "$SUDOERS_FILE"
+
+    # Validate the sudoers file
+    if ! sudo visudo -c -f "$SUDOERS_FILE" &>/dev/null; then
+        error "Failed to create valid sudoers file"
+        sudo rm -f "$SUDOERS_FILE"
+        abort "Sudoers configuration failed"
+    fi
+fi
+
+
+#
+#
+#
+#   IMPORTANT: SUDOERS_FILE should be created last so that this script is
+#   idempotent. The creation of the SUDOERS_FILE is used as a sentinel
+#   that installation was successfully completed.
+#
+#   NO MORE SETUP STEPS BELOW
+#
+#
+#
+
+###############################################################################
+# Run the application
+###############################################################################
+# kitty doesn't set this properly :(
+TERM_PROGRAM="${TERM_PROGRAM:-e.g. ghostty, kitty, iTerm, WezTerm}"
+heredoc LOCAL_NETWORK_ERROR << EOF
+\n
+ERROR: unable to connect to $HOSTNAME.
+
+Your terminal app ($TERM_PROGRAM)
+has not been granted "Local Network" access rights,
+which are required to SSH to the Virtual Machine.
+
+- Open "System Settings.app"
+- Navigate to "Privacy & Security"
+- Select "Local Network"
+- Grant access to your terminal application
+\n
+EOF
+
+if [[ "$MODE" == "ssh" ]]; then
+    trace "Checking $HOSTNAME SSH connectivity"
+    if ! nc -z "$HOSTNAME" 22 ; then
+        error "$LOCAL_NETWORK_ERROR"
+        read -n 1 -s -r -p "Press any key to open System Settings"
+        open "/System/Library/PreferencePanes/Security.prefPane"
+    fi
+
+    debug "SSH dirtbox@$HOSTNAME"
+    exec ssh \
+        -q \
+        -t \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -i "$SSH_KEYFILE_PRIV" \
+        "dirtbox@$HOSTNAME" \
+        /usr/bin/env "COMMAND=$COMMAND" zsh --login
+else
+    # First verify that passwordless sudo is working
+    if ! sudo --non-interactive --user=dirtbox true 2>/dev/null; then
+        error "Passwordless sudo to dirtbox user is not configured correctly."
+        error "Please run: ${BASH_SOURCE[0]} --rebuild"
+        exit 1
+    fi
+
+    # Launch interactive shell as dirtbox user
+    # Use sudo with -H to set HOME correctly
+    # Use env to ensure the environment is cleared, otherwise PATH carries over
+    debug "Runas dirtbox@$HOSTNAME"
+    exec sudo \
+        --set-home \
+        --user=dirtbox \
+        env -i \
+            "HOME=/Users/dirtbox" \
+            "USER=dirtbox" \
+            "SHELL=/bin/zsh" \
+            "TERM=${TERM:-}" \
+            "COMMAND=$COMMAND" \
+            /bin/zsh \
+            -c "cd '$SHARED_WORKSPACE' 2>/dev/null || cd ~ ; exec /bin/zsh --login"
+fi
