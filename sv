@@ -51,7 +51,7 @@ fi
 ###############################################################################
 VERSION="1.0.0"
 
-SHARED_WORKSPACE="$HOME/sandvault-shared"
+SHARED_WORKSPACE="$HOME/sandvault"
 
 # Create sudoers.d file for passwordless sudo to sandvault user
 SUDOERS_FILE="/etc/sudoers.d/50-sandvault-nopasswd-for-$USER"

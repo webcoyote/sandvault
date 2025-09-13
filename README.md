@@ -19,7 +19,7 @@ cd sandvault
 ./sv shell
 ```
 
-Sandvault creates the `$HOME/sandvault-shared` directory, and only has access to that directory (apart from it's own home directory).
+Sandvault creates the `$HOME/sandvault` directory, and only has access to that directory (apart from it's own home directory).
 
 
 ## Installation
@@ -44,13 +44,13 @@ Sandvault creates a separate macOS user account with:
 
 - Limited filesystem access
 - Isolated environment from your main user
-- Shared workspace at `~/sandvault-shared` for project files
+- Shared workspace at `~/sandvault` for project files
 - Passwordless sudo switching (no password prompts)
 - Pre-configured development tools
 
 The sandboxed user can only access:
 
-- The shared workspace (`~/sandvault-shared`) (read/write)
+- The shared workspace (`~/sandvault`) (read/write)
 - Its own home directory (`/Users/sandvault`) (read/write)
 - System binaries and tools (readonly)
 
@@ -58,7 +58,7 @@ The sandboxed user can only access:
 ## Features
 
 - **Fast context switching** - No VM overhead, instant user switching
-- **Shared workspace** - Easy file exchange through `~/sandvault-shared`
+- **Shared workspace** - Easy file exchange through `~/sandvault`
 - **Development ready** - Includes Node.js, Python, uv, and Homebrew
 - **SSH support** - Connect via SSH with `sv --ssh`
 - **Clean uninstall** - Complete removal with `sv uninstall`
