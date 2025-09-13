@@ -175,7 +175,7 @@
 
    END OF TERMS AND CONDITIONS
 
-Dirtbox
+Sandvault
 Copyright (C) 2025 Patrick Wyatt
 All rights reserved.
 

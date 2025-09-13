@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a sandbox user ("dirtbox") for running commands
+# Build a sandbox user ("sandvault") for running commands
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 

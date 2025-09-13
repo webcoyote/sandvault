@@ -1,25 +1,25 @@
-# dirtbox
+# SandVault
 
 **Run Claude Code safely in a sandboxed macOS user account**
 
-Dirtbox creates an isolated user account ("dirtbox") with restricted permissions for running Claude Code and other tools with reduced system access. This provides a lightweight alternative to VMs while maintaining security through macOS's built-in user isolation.
+Sandvault creates an isolated user account ("sandvault") with restricted permissions for running Claude Code and other tools with reduced system access. This provides a lightweight alternative to VMs while maintaining security through macOS's built-in user isolation.
 
 
 ## Quick Start
 
 ```bash
 # Clone the repository
-git clone https://github.com/webcoyote/dirtbox
-cd dirtbox
+git clone https://github.com/webcoyote/sandvault
+cd sandvault
 
 # Run Claude in the sandbox
-./dirt claude
+./sv claude
 
 # Or just get a shell
-./dirt shell
+./sv shell
 ```
 
-Dirtbox creates the `$HOME/dirtbox-shared` directory, and only has access to that directory (apart from it's own home directory).
+Sandvault creates the `$HOME/sandvault-shared` directory, and only has access to that directory (apart from it's own home directory).
 
 
 ## Installation
@@ -28,42 +28,43 @@ Add to your shell configuration for easy access:
 
 ```bash
 # In ~/.zshrc or ~/.bashrc
-alias dirt="$HOME/path/to/where/you/cloned/dirtbox/dirt"
+alias sv="$HOME/path/to/where/you/cloned/sandvault/sv"
 ```
 
 Then use:
-- `dirt` or `dirt shell` - Open a sandboxed shell
-- `dirt claude [PATH]` - Run Claude Code in the sandbox
-- `dirt uninstall` - Remove the dirtbox user and configuration
+
+- `sv` or `sv shell` - Open a sandboxed shell
+- `sv claude [PATH]` - Run Claude Code in the sandbox
+- `sv uninstall` - Remove the sandvault user and configuration
 
 
 ## How It Works
 
-Dirtbox creates a separate macOS user account with:
+Sandvault creates a separate macOS user account with:
 
 - Limited filesystem access
 - Isolated environment from your main user
-- Shared workspace at `~/dirtbox-shared` for project files
+- Shared workspace at `~/sandvault-shared` for project files
 - Passwordless sudo switching (no password prompts)
 - Pre-configured development tools
 
 The sandboxed user can only access:
 
-- The shared workspace (`~/dirtbox-shared`) (read/write)
-- Its own home directory (`/Users/dirtbox`) (read/write)
+- The shared workspace (`~/sandvault-shared`) (read/write)
+- Its own home directory (`/Users/sandvault`) (read/write)
 - System binaries and tools (readonly)
 
 
 ## Features
 
 - **Fast context switching** - No VM overhead, instant user switching
-- **Shared workspace** - Easy file exchange through `~/dirtbox-shared`
+- **Shared workspace** - Easy file exchange through `~/sandvault-shared`
 - **Development ready** - Includes Node.js, Python, uv, and Homebrew
-- **SSH support** - Connect via SSH with `dirt --ssh`
-- **Clean uninstall** - Complete removal with `dirt uninstall`
+- **SSH support** - Connect via SSH with `sv --ssh`
+- **Clean uninstall** - Complete removal with `sv uninstall`
 
 
-## Why Dirtbox?
+## Why Sandvault?
 
 After exploring Docker containers, Podman, sandbox-exec, and virtualization, I needed something that:
 
@@ -72,7 +73,7 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Allows running tools like Claude Code with `--dangerously-skip-permissions`
 - Maintains a clean separation between trusted and untrusted code
 
-Dirtbox uses macOS's Unix heritage and user account system to create a simple but effective sandbox.
+Sandvault uses macOS's Unix heritage and user account system to create a simple but effective sandbox.
 
 
 ## Requirements
@@ -86,29 +87,30 @@ Dirtbox uses macOS's Unix heritage and user account system to create a simple bu
 
 ```bash
 # Shell mode (default)
-dirt                    # Open sandboxed shell
-dirt shell [PATH]       # Open shell at specific path
-dirt s [PATH]           # Short alias
+sv                    # Open sandboxed shell
+sv shell [PATH]       # Open shell at specific path
+sv s [PATH]           # Short alias
 
 # Claude mode
-dirt claude [PATH]      # Run Claude Code
-dirt c [PATH]           # Short alias
-dirt run [PATH]         # Alternative alias
+sv claude [PATH]      # Run Claude Code
+sv c [PATH]           # Short alias
+sv run [PATH]         # Alternative alias
 
 # SSH mode
-dirt --ssh ...          # Connect via SSH instead of sudo
+sv --ssh ...          # Connect via SSH instead of sudo
 
 # Management
-dirt --rebuild ...      # Force rebuild configuration
-dirt uninstall          # Remove dirtbox user and files
-dirt --version          # Show version
-dirt --help             # Show help
+sv --rebuild ...      # Force rebuild configuration
+sv uninstall          # Remove sandvault user and files
+sv --version          # Show version
+sv --help             # Show help
 ```
 
 
 ## Security Model
 
-The dirtbox user:
+The sandvault user:
+
 - Cannot access your main user's files (except the shared workspace)
 - Runs with standard user privileges
 - Cannot modify system files
@@ -127,7 +129,7 @@ This provides defense in depth when running untrusted code or experimenting with
 
 Apache License, Version 2.0
 
-Dirtbox Copyright © 2025 Patrick Wyatt
+Sandvault Copyright © 2025 Patrick Wyatt
 
 See [LICENSE.md](LICENSE.md) for details.
 

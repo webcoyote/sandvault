@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a sandbox user ("dirtbox") for running commands
+# Build a sandbox user ("sandvault") for running commands
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,19 +51,19 @@ fi
 ###############################################################################
 VERSION="1.0.0"
 
-SHARED_WORKSPACE="$HOME/dirtbox-shared"
+SHARED_WORKSPACE="$HOME/sandvault-shared"
 
-# Create sudoers.d file for passwordless sudo to dirtbox user
-SUDOERS_FILE="/etc/sudoers.d/50-dirtbox-nopasswd-for-$USER"
+# Create sudoers.d file for passwordless sudo to sandvault user
+SUDOERS_FILE="/etc/sudoers.d/50-sandvault-nopasswd-for-$USER"
 
-# Allow this user to login to any host as dirtbox and run any command
+# Allow this user to login to any host as sandvault and run any command
 heredoc SUDOERS_CONTENT << EOF
-# Allow only '$USER' to sudo to dirtbox without password
-$USER ALL=(dirtbox) NOPASSWD: ALL
+# Allow only '$USER' to sudo to sandvault without password
+$USER ALL=(sandvault) NOPASSWD: ALL
 EOF
 
 SSH_DIR="$HOME/.ssh"
-SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_dirtbox"
+SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
 SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
 
 
@@ -106,7 +106,7 @@ configure_shared_folder_permssions() {
     local enable="$1"
 
     # Grant write access to shared workspace
-    local rights1="dirtbox allow read,write,execute,append,delete,file_inherit,directory_inherit"
+    local rights1="sandvault allow read,write,execute,append,delete,file_inherit,directory_inherit"
     if [[ "$enable" != "false" ]]; then
         trace "Configuring $SHARED_WORKSPACE: add $rights1"
         /bin/chmod +a "$rights1" "$SHARED_WORKSPACE"
@@ -115,11 +115,11 @@ configure_shared_folder_permssions() {
         /bin/chmod -a "$rights1" "$SHARED_WORKSPACE" 2>/dev/null || true
     fi
 
-    # Also ensure dirtbox can traverse parent directories to reach the shared workspace,
+    # Also ensure sandvault can traverse parent directories to reach the shared workspace,
     # but not do anything else with this user's files or directories.
     PARENT_DIR=$(dirname "$SHARED_WORKSPACE")
-    local rights2="dirtbox allow execute"
-    local rights3="dirtbox deny read,write,append,delete"
+    local rights2="sandvault allow execute"
+    local rights3="sandvault deny read,write,append,delete"
     while [[ "$PARENT_DIR" != "/" && "$PARENT_DIR" != "." ]]; do
         if [[ "$enable" != "false" ]]; then
             trace "Configuring $PARENT_DIR: add $rights2"
@@ -141,19 +141,19 @@ uninstall() {
     debug "Uninstalling..."
 
     # Remove the sudoers file first; it's a sentinel for "everything is complete".
-    # By removing it first we force a rebuild if the user wants to run dirt again.
+    # By removing it first we force a rebuild if the user wants to run this again.
     sudo rm -rf "$SUDOERS_FILE"
 
     # Remove shared folder ACLS
     configure_shared_folder_permssions false
 
     # Remove user from SSH group BEFORE deleting the user
-    sudo dseditgroup -o edit -d dirtbox -t user com.apple.access_ssh 2>/dev/null || true
+    sudo dseditgroup -o edit -d sandvault -t user com.apple.access_ssh 2>/dev/null || true
     
     # Now delete the user and group
-    sudo dscl . -delete "/Users/dirtbox" &>/dev/null || true
-    sudo dscl . -delete "/Groups/dirtbox" &>/dev/null || true
-    sudo rm -rf "/Users/dirtbox"
+    sudo dscl . -delete "/Users/sandvault" &>/dev/null || true
+    sudo dscl . -delete "/Groups/sandvault" &>/dev/null || true
+    sudo rm -rf "/Users/sandvault"
 
     # Cleanup SSH
     rm -rf "$SSH_KEYFILE_PRIV" "$SSH_KEYFILE_PUB"
@@ -269,7 +269,7 @@ install_tools
 if [[ ! -f "$SUDOERS_FILE" ]]; then
     # Since this is a full rebuild, provide more feedback
     VERBOSE_LEVEL=$(( VERBOSE_LEVEL > 1 ? VERBOSE_LEVEL : 1 ))
-    info "Installing dirtbox..."
+    info "Installing sandvault..."
     REBUILD=true
 # The following command requires sudo, and so it doesn't make sense to run this when
 # we're trying to avoid asking for the password; assume file contents are correct
@@ -278,30 +278,30 @@ if [[ ! -f "$SUDOERS_FILE" ]]; then
 fi
 
 if [[ "$REBUILD" != "false" ]]; then
-    sudo "-p Password required to create dirtbox: " true
+    sudo "-p Password required to create sandvault: " true
 fi
 
 
 ###############################################################################
-# Create dirtbox user and group
+# Create sandvault user and group
 ###############################################################################
 if [[ "$REBUILD" != "false" ]]; then
-    debug "Creating dirtbox user and group..."
+    debug "Creating sandvault user and group..."
 
     # Check if group exists, create if needed
-    if ! dscl . -read /Groups/dirtbox &>/dev/null 2>&1; then
-        trace "Creating dirtbox group..."
+    if ! dscl . -read /Groups/sandvault &>/dev/null 2>&1; then
+        trace "Creating sandvault group..."
 
         # Find next available UID/GID starting from 501
         NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
         NEXT_UID=$((NEXT_UID + 1))
 
         # Create group
-        sudo dscl . -create /Groups/dirtbox
+        sudo dscl . -create /Groups/sandvault
         GROUP_ID=$NEXT_UID
     else
-        trace "Group dirtbox already exists"
-        GROUP_ID=$(dscl . -read /Groups/dirtbox PrimaryGroupID 2>/dev/null | awk '{print $2}')
+        trace "Group sandvault already exists"
+        GROUP_ID=$(dscl . -read /Groups/sandvault PrimaryGroupID 2>/dev/null | awk '{print $2}')
     fi
 
     # Ensure group has all required properties (idempotent)
@@ -310,52 +310,52 @@ if [[ "$REBUILD" != "false" ]]; then
         NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
         GROUP_ID=$((NEXT_UID + 1))
     fi
-    trace "Configuring dirtbox group properties..."
-    sudo dscl . -create /Groups/dirtbox PrimaryGroupID "$GROUP_ID"
-    sudo dscl . -create /Groups/dirtbox RealName "dirtbox Group"
+    trace "Configuring sandvault group properties..."
+    sudo dscl . -create /Groups/sandvault PrimaryGroupID "$GROUP_ID"
+    sudo dscl . -create /Groups/sandvault RealName "sandvault Group"
 
     # Check if user exists, create if needed
-    if ! dscl . -read /Users/dirtbox &>/dev/null 2>&1; then
-        trace "Creating dirtbox user..."
+    if ! dscl . -read /Users/sandvault &>/dev/null 2>&1; then
+        trace "Creating sandvault user..."
 
         # Find next available UID
         NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
         NEXT_UID=$((NEXT_UID + 1))
 
         # Create user
-        sudo dscl . -create /Users/dirtbox
+        sudo dscl . -create /Users/sandvault
         USER_ID=$NEXT_UID
     else
-        trace "User dirtbox already exists"
-        USER_ID=$(dscl . -read /Users/dirtbox UniqueID 2>/dev/null | awk '{print $2}')
+        trace "User sandvault already exists"
+        USER_ID=$(dscl . -read /Users/sandvault UniqueID 2>/dev/null | awk '{print $2}')
     fi
 
     # Ensure user has all required properties (idempotent)
-    trace "Configuring dirtbox user properties..."
+    trace "Configuring sandvault user properties..."
     if [[ -z "${USER_ID:-}" ]]; then
         # User exists but has no UniqueID, find next available
         NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
         USER_ID=$((NEXT_UID + 1))
     fi
-    sudo dscl . -create /Users/dirtbox UniqueID "$USER_ID"
-    sudo dscl . -create /Users/dirtbox PrimaryGroupID "$GROUP_ID"
-    sudo dscl . -create /Users/dirtbox RealName "dirtbox User"
-    sudo dscl . -create /Users/dirtbox NFSHomeDirectory "/Users/dirtbox"
-    sudo dscl . -create /Users/dirtbox UserShell "/bin/zsh"
+    sudo dscl . -create /Users/sandvault UniqueID "$USER_ID"
+    sudo dscl . -create /Users/sandvault PrimaryGroupID "$GROUP_ID"
+    sudo dscl . -create /Users/sandvault RealName "sandvault User"
+    sudo dscl . -create /Users/sandvault NFSHomeDirectory "/Users/sandvault"
+    sudo dscl . -create /Users/sandvault UserShell "/bin/zsh"
 
     # Set a random password for the user (password required for SSH on macOS)
     # We'll use key-based auth so the password won't actually be used.
     RANDOM_PASS=$(openssl rand -base64 32)
-    sudo dscl . -passwd /Users/dirtbox "$RANDOM_PASS"
-    sudo dscl . -create /Users/dirtbox IsHidden 1  # Hide from login window
+    sudo dscl . -passwd /Users/sandvault "$RANDOM_PASS"
+    sudo dscl . -create /Users/sandvault IsHidden 1  # Hide from login window
 
     # Let's allow the user to login as this user if they want
-    #sudo dscl . -create /Users/dirtbox IsHidden 0
-    #sudo dscl . -passwd /Users/dirtbox "dirtbox"
+    #sudo dscl . -create /Users/sandvault IsHidden 0
+    #sudo dscl . -passwd /Users/sandvault "sandvault"
 
     # Add to SSH access group (required for SSH login)
     # do not use sudo dscl; it creates duplicate entries
-    sudo dseditgroup -o edit -a dirtbox -t user com.apple.access_ssh
+    sudo dseditgroup -o edit -a sandvault -t user com.apple.access_ssh
 fi
 
 
@@ -370,7 +370,7 @@ if [[ "$REBUILD" != "false" ]]; then
             -f "$SSH_KEYFILE_PRIV" \
             -N "" \
             -q \
-            -C "dirtbox-${USER}@${HOSTNAME}"
+            -C "sandvault-${USER}@${HOSTNAME}"
     fi
 fi
 
@@ -379,7 +379,7 @@ fi
 # Configure settings
 ###############################################################################
 if [[ "$REBUILD" != "false" ]]; then
-    debug "Configuring dirtbox dotfiles..."
+    debug "Configuring sandvault dotfiles..."
 
     # Get git config from host
     GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
@@ -407,58 +407,58 @@ if [[ "$REBUILD" != "false" ]]; then
 
     # Create a README in the shared workspace
     cat > "$SHARED_WORKSPACE/README.md" << EOF
-    # Dirtbox Workspace
+    # SandVault Workspace
     # (autogenerated file; do not edit)
 
-    This directory is shared with the dirtbox user.
-    The dirtbox user has full read/write access here.
+    This directory is shared with the sandvault user.
+    The sandvault user has full read/write access here.
 
-    ## To switch to the dirtbox user, run:
+    ## To switch to the sandvault user, run:
 
         "${BASH_SOURCE[0]}"
 
     ## Or create an alias in your $HOME/.zshrc or $HOME/.bashrc
 
-        alias dirt="${BASH_SOURCE[0]}"
+        alias sv="${BASH_SOURCE[0]}"
 
-        then run "dirt"
+        then run "sv"
 EOF
 fi
 
 
 ###############################################################################
-# Configure dirtbox user
+# Configure sandvault user
 ###############################################################################
 if [[ "$REBUILD" != "false" ]]; then
-    debug "Configure dirtbox home directory..."
+    debug "Configure sandvault home directory..."
 
     # Copy files to home directory
-    sudo mkdir -p "/Users/dirtbox"
-    sudo cp -rf "$WORKSPACE/guest/home/." "/Users/dirtbox/"
+    sudo mkdir -p "/Users/sandvault"
+    sudo cp -rf "$WORKSPACE/guest/home/." "/Users/sandvault/"
 
-    # Make dirtbox the owner of the files
-    sudo chown -R "dirtbox:dirtbox" "/Users/dirtbox" 2>/dev/null || true
+    # Make sandvault the owner of the files
+    sudo chown -R "sandvault:sandvault" "/Users/sandvault" 2>/dev/null || true
 
     # Fixup file permissions
-    sudo /bin/chmod 755 "/Users/dirtbox"
-    sudo /bin/chmod 700 "/Users/dirtbox/.ssh"
-    if [[ -f "/Users/dirtbox/authorized_keys" ]]; then
-        sudo /bin/chmod 600 "/Users/dirtbox/authorized_keys"
+    sudo /bin/chmod 755 "/Users/sandvault"
+    sudo /bin/chmod 700 "/Users/sandvault/.ssh"
+    if [[ -f "/Users/sandvault/authorized_keys" ]]; then
+        sudo /bin/chmod 600 "/Users/sandvault/authorized_keys"
     fi
-    if [[ -f "/Users/dirtbox/.ssh/id_ed25519" ]]; then
-        sudo /bin/chmod 600 "/Users/dirtbox/.ssh/id_ed25519"
+    if [[ -f "/Users/sandvault/.ssh/id_ed25519" ]]; then
+        sudo /bin/chmod 600 "/Users/sandvault/.ssh/id_ed25519"
     fi
-    if [[ -f "/Users/dirtbox/.ssh/id_ed25519.pub" ]]; then
-        sudo /bin/chmod 644 "/Users/dirtbox/.ssh/id_ed25519.pub"
+    if [[ -f "/Users/sandvault/.ssh/id_ed25519.pub" ]]; then
+        sudo /bin/chmod 644 "/Users/sandvault/.ssh/id_ed25519.pub"
     fi
 fi
 
 
 ###############################################################################
-# Configure passwordless sudo to switch to dirtbox user
+# Configure passwordless sudo to switch to sandvault user
 ###############################################################################
 if [[ "$REBUILD" != "false" ]]; then
-    debug "Configuring passwordless access to dirtbox..."
+    debug "Configuring passwordless access to sandvault..."
     echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_FILE" > /dev/null
     sudo chmod 440 "$SUDOERS_FILE"
 
@@ -511,33 +511,33 @@ if [[ "$MODE" == "ssh" ]]; then
         open "/System/Library/PreferencePanes/Security.prefPane"
     fi
 
-    debug "SSH dirtbox@$HOSTNAME"
+    debug "SSH sandvault@$HOSTNAME"
     exec ssh \
         -q \
         -t \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -i "$SSH_KEYFILE_PRIV" \
-        "dirtbox@$HOSTNAME" \
+        "sandvault@$HOSTNAME" \
         /usr/bin/env "COMMAND=$COMMAND" "INITIAL_DIR=${INITIAL_DIR:-}" zsh --login
 else
     # First verify that passwordless sudo is working
-    if ! sudo --non-interactive --user=dirtbox true 2>/dev/null; then
-        error "Passwordless sudo to dirtbox user is not configured correctly."
+    if ! sudo --non-interactive --user=sandvault true 2>/dev/null; then
+        error "Passwordless sudo to sandvault user is not configured correctly."
         error "Please run: ${BASH_SOURCE[0]} --rebuild"
         exit 1
     fi
 
-    # Launch interactive shell as dirtbox user
+    # Launch interactive shell as sandvault user
     # Use sudo with -H to set HOME correctly
     # Use env to ensure the environment is cleared, otherwise PATH carries over
-    debug "Runas dirtbox@$HOSTNAME"
+    debug "Runas sandvault@$HOSTNAME"
     exec sudo \
         --set-home \
-        --user=dirtbox \
+        --user=sandvault \
         env -i \
-            "HOME=/Users/dirtbox" \
-            "USER=dirtbox" \
+            "HOME=/Users/sandvault" \
+            "USER=sandvault" \
             "SHELL=/bin/zsh" \
             "TERM=${TERM:-}" \
             "COMMAND=$COMMAND" \
