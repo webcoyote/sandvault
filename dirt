@@ -188,9 +188,9 @@ show_help() {
     echo "  --version            Show version information"
     echo ""
     echo "Commands:"
-    echo "  c, claude            Run claude"
-    echo "  r, run               Run claude"
-    echo "  s, shell             Run shell"
+    echo "  c, claude [PATH]     Run claude"
+    echo "  r, run    [PATH]     Run claude"
+    echo "  s, shell  [PATH]     Run shell"
     echo "  uninstall            Remove user & files (but not this repo)"
     exit 0
 }
@@ -241,9 +241,11 @@ set -- "${NEW_ARGS[@]}"
 case "${1:-}" in
     c|claude|r|run)
         COMMAND=claude
+        INITIAL_DIR="${2:-}"
         ;;
     s|shell)
         COMMAND=
+        INITIAL_DIR="${2:-}"
         ;;
     uninstall)
         uninstall
@@ -517,7 +519,7 @@ if [[ "$MODE" == "ssh" ]]; then
         -o UserKnownHostsFile=/dev/null \
         -i "$SSH_KEYFILE_PRIV" \
         "dirtbox@$HOSTNAME" \
-        /usr/bin/env "COMMAND=$COMMAND" zsh --login
+        /usr/bin/env "COMMAND=$COMMAND" "INITIAL_DIR=${INITIAL_DIR:-}" zsh --login
 else
     # First verify that passwordless sudo is working
     if ! sudo --non-interactive --user=dirtbox true 2>/dev/null; then
@@ -539,6 +541,7 @@ else
             "SHELL=/bin/zsh" \
             "TERM=${TERM:-}" \
             "COMMAND=$COMMAND" \
+            "INITIAL_DIR=${INITIAL_DIR:-}" \
             /bin/zsh \
             -c "cd '$SHARED_WORKSPACE' 2>/dev/null || cd ~ ; exec /bin/zsh --login"
 fi

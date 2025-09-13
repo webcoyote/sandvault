@@ -1,3 +1,5 @@
+export PROMPT="%n@%m %~ %# "
+
 # Use GNU CLI binaries over outdated OSX CLI binaries
 if command -v brew &>/dev/null ; then
     BREW_PREFIX="$(brew --prefix)"
@@ -56,6 +58,9 @@ fi
 # Install claude
 "$HOME/configure.sh" || true
 
+if [[ -n "${INITIAL_DIR:-}" ]]; then
+    cd "$INITIAL_DIR"
+fi
 if [[ "${COMMAND:-}" != "" ]]; then
     exec "$COMMAND"
 fi
