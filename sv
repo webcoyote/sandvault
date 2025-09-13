@@ -241,11 +241,11 @@ set -- "${NEW_ARGS[@]}"
 case "${1:-}" in
     c|claude|r|run)
         COMMAND=claude
-        INITIAL_DIR="${2:-}"
+        INITIAL_DIR="${2:-$PWD}"
         ;;
     s|shell)
         COMMAND=
-        INITIAL_DIR="${2:-}"
+        INITIAL_DIR="${2:-$PWD}"
         ;;
     uninstall)
         uninstall
@@ -533,6 +533,7 @@ else
     # Use env to ensure the environment is cleared, otherwise PATH carries over
     debug "Runas sandvault@$HOSTNAME"
     exec sudo \
+        --login \
         --set-home \
         --user=sandvault \
         env -i \
