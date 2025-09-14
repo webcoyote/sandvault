@@ -57,7 +57,9 @@ SHARED_WORKSPACE="$HOME/sandvault"
 SUDOERS_FILE="/etc/sudoers.d/50-sandvault-nopasswd-for-$USER"
 
 # Installation marker file
-INSTALL_MARKER="$HOME/.config/codeofhonor/sandvault/install"
+INSTALL_ORG="$HOME/.config/codeofhonor"
+INSTALL_PRODUCT="$INSTALL_ORG/sandvault"
+INSTALL_MARKER="$INSTALL_PRODUCT/install"
 
 # Allow this user to login to any host as sandvault and run any command
 heredoc SUDOERS_CONTENT << EOF
@@ -83,6 +85,8 @@ install_tools () {
     fi
 
     local TOOLS=()
+    TOOLS+=("git")      # version control
+    TOOLS+=("git-lfs")  # large files
     TOOLS+=("netcat")   # test network connectivity
     TOOLS+=("node")     # install claude with npm
     TOOLS+=("python")   # python used for claude hooks
@@ -146,6 +150,8 @@ uninstall() {
     # Remove the install marker file first; it's a sentinel for "everything is complete".
     # By removing it first we force a rebuild if the user wants to run this again.
     rm -rf "$INSTALL_MARKER"
+    rmdir "$INSTALL_PRODUCT" &>/dev/null || true
+    rmdir "$INSTALL_ORG" &>/dev/null || true
 
     # Remove the sudoers file
     sudo rm -rf "$SUDOERS_FILE"
@@ -247,11 +253,11 @@ set -- "${NEW_ARGS[@]}"
 case "${1:-}" in
     c|claude|r|run)
         COMMAND=claude
-        INITIAL_DIR="${2:-$PWD}"
+        INITIAL_DIR="${2:-}"
         ;;
     s|shell)
         COMMAND=
-        INITIAL_DIR="${2:-$PWD}"
+        INITIAL_DIR="${2:-}"
         ;;
     u|uninstall)
         uninstall
@@ -261,6 +267,7 @@ case "${1:-}" in
         show_help
         ;;
 esac
+INITIAL_DIR="${INITIAL_DIR:-$PWD}"
 
 
 ###############################################################################
@@ -473,18 +480,6 @@ if [[ "$REBUILD" != "false" ]]; then
 fi
 
 
-#
-#
-#
-#   IMPORTANT: INSTALL_MARKER should be created last so that this script is
-#   idempotent. The creation of the INSTALL_MARKER is used as a sentinel
-#   that installation was successfully completed.
-#
-#   NO MORE SETUP STEPS BELOW
-#
-#
-#
-
 ###############################################################################
 # Mark installation as complete
 ###############################################################################
@@ -493,6 +488,7 @@ if [[ "$REBUILD" != "false" ]]; then
     mkdir -p "$(dirname "$INSTALL_MARKER")"
     date > "$INSTALL_MARKER"
 fi
+
 
 ###############################################################################
 # Run the application
@@ -515,7 +511,7 @@ which are required to SSH to the Virtual Machine.
 EOF
 
 if [[ "$MODE" == "ssh" ]]; then
-    trace "Checking $HOSTNAME SSH connectivity"
+    trace "Checking SSH connectivity"
     if ! nc -z "$HOSTNAME" 22 ; then
         error "$LOCAL_NETWORK_ERROR"
         read -n 1 -s -r -p "Press any key to open System Settings"
@@ -530,9 +526,14 @@ if [[ "$MODE" == "ssh" ]]; then
         -o UserKnownHostsFile=/dev/null \
         -i "$SSH_KEYFILE_PRIV" \
         "sandvault@$HOSTNAME" \
-        /usr/bin/env "COMMAND=$COMMAND" "INITIAL_DIR=${INITIAL_DIR:-}" zsh --login
+        /usr/bin/env \
+            "COMMAND=$COMMAND" \
+            "INITIAL_DIR=$INITIAL_DIR" \
+            "VERBOSE_LEVEL=${VERBOSE_LEVEL:-0}" \
+            /bin/zsh --login
 else
     # First verify that passwordless sudo is working
+    trace "Checking passwordless sudo"
     if ! sudo --non-interactive --user=sandvault true 2>/dev/null; then
         error "Passwordless sudo to sandvault user is not configured correctly."
         error "Please run: ${BASH_SOURCE[0]} --rebuild"
@@ -542,7 +543,7 @@ else
     # Launch interactive shell as sandvault user
     # Use sudo with -H to set HOME correctly
     # Use env to ensure the environment is cleared, otherwise PATH carries over
-    debug "Runas sandvault@$HOSTNAME"
+    debug "Shell sandvault@$HOSTNAME"
     exec sudo \
         --login \
         --set-home \
@@ -553,7 +554,7 @@ else
             "SHELL=/bin/zsh" \
             "TERM=${TERM:-}" \
             "COMMAND=$COMMAND" \
-            "INITIAL_DIR=${INITIAL_DIR:-}" \
-            /bin/zsh \
-            -c "cd '$SHARED_WORKSPACE' 2>/dev/null || cd ~ ; exec /bin/zsh --login"
+            "INITIAL_DIR=$INITIAL_DIR" \
+            "VERBOSE_LEVEL=${VERBOSE_LEVEL:-0}" \
+            /bin/zsh -c "cd ~ ; exec /bin/zsh --login"
 fi

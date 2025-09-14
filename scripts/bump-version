@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Update the version number
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+PROJECT_PATH="./sv"
+
+# Function to display usage
+show_usage() {
+    cat << EOF
+Usage: bump-version [TYPE]
+
+Bump the version number, commit changes, create a tag, and push to remote.
+
+Arguments:
+  TYPE        Version bump type: major, minor, or patch (default: patch)
+              
+              major: X.0.0 (increment major version, reset minor and patch)
+              minor: X.Y.0 (increment minor version, reset patch)
+              patch: X.Y.Z (increment patch version)
+
+Options:
+  -h, --help  Show this help message and exit
+
+Examples:
+  bump-version        # Bumps patch version (e.g., 1.2.3 -> 1.2.4)
+  bump-version minor  # Bumps minor version (e.g., 1.2.3 -> 1.3.0)
+  bump-version major  # Bumps major version (e.g., 1.2.3 -> 2.0.0)
+
+Note: Requires a clean git workspace (no uncommitted changes or untracked files).
+EOF
+}
+
+# Check for help flag
+if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+    show_usage
+    exit 0
+fi
+
+# Check the project file exists
+if [[ ! -f "$PROJECT_PATH" ]]; then
+  echo "ERROR: Cannot find $PROJECT_PATH"
+  exit 1
+fi
+
+# Check for clean git workspace
+if ! git diff-index --quiet HEAD -- || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    echo "Error: Git workspace has uncommitted changes or untracked files."
+    echo "Please commit or stash your changes before bumping the version."
+    git status --short
+    exit 1
+fi
+
+# Get current version
+CURRENT_VERSION=$(awk -F'"' '/^VERSION="[0-9.]*"/ {print $2; exit}' "$PROJECT_PATH")
+echo "Current version: $CURRENT_VERSION"
+
+# Parse version components
+IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+
+# Default to patch bump
+BUMP_TYPE="${1:-patch}"
+
+case "$BUMP_TYPE" in
+  major)
+    MAJOR=$((MAJOR + 1))
+    MINOR=0
+    PATCH=0
+    ;;
+  minor)
+    MINOR=$((MINOR + 1))
+    PATCH=0
+    ;;
+  patch)
+    PATCH=$((PATCH + 1))
+    ;;
+  *)
+    echo "Invalid bump type. Use: major, minor, or patch"
+    exit 1
+    ;;
+esac
+
+NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+echo "New version: $NEW_VERSION"
+
+# Update version
+sed -i '' "s/VERSION=\"$CURRENT_VERSION\"/VERSION=\"$NEW_VERSION\"/g" "$PROJECT_PATH"
+
+# Stage the changes
+git add -A
+
+# Commit with version message
+git commit -m "Bump version to $NEW_VERSION"
+
+# Create tag
+git tag -a "v$NEW_VERSION" -m "Version $NEW_VERSION"
+
+git push && git push --tags
+
+echo "✓ Version bumped to $NEW_VERSION"
+gecho "✓ Changes committed"
+echo "✓ Tag v$NEW_VERSION created"
+echo "✓ Changes pushed"

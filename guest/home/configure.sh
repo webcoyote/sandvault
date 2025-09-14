@@ -43,10 +43,37 @@ abort () {
 # - security dump-keychain $LOGIN_KEYCHAIN => sandvault user
 LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 if [[ ! -f "$LOGIN_KEYCHAIN" ]]; then
-    warn "Creating keychain without password"
+    debug "Creating keychain without password"
     security create-keychain -p '' "$LOGIN_KEYCHAIN"
 fi
+
+# Unlock the keychain to avoid password dialogs
 security unlock-keychain -p '' "$LOGIN_KEYCHAIN"
+
+
+###############################################################################
+# Load environment vars
+###############################################################################
+# shellcheck disable=SC1091 # file does not exist
+[[ -f "$HOME/.env" ]] && set -a && source "$HOME/.env" && set +a
+
+
+###############################################################################
+# Install Claude Code configuration
+###############################################################################
+if [[ -n "${CLAUDE_CONFIG_REPO:-}" ]]; then
+    CLAUDE_CONFIG_DIR="$HOME/.claude"
+
+    if [[ -d "$CLAUDE_CONFIG_DIR/.git" ]]; then
+        debug "Updating Claude Code configuration from $CLAUDE_CONFIG_REPO"
+        cd "$CLAUDE_CONFIG_DIR"
+        git pull --quiet
+    else
+        debug "Cloning Claude Code configuration from $CLAUDE_CONFIG_REPO"
+        rm -rf "$CLAUDE_CONFIG_DIR"
+        git clone --quiet "$CLAUDE_CONFIG_REPO" "$CLAUDE_CONFIG_DIR"
+    fi
+fi
 
 
 ###############################################################################
