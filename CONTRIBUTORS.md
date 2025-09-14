@@ -1,6 +1,6 @@
 # Contributors
 
-This file lists the contributors to the Sandvault project.
+This file lists the contributors to the SandVault project.
 
 ## Primary Contributors
 
@@ -8,7 +8,7 @@ This file lists the contributors to the Sandvault project.
 
 ## How to Contribute
 
-We welcome contributions to Sandvault! If you'd like to contribute:
+We welcome contributions to SandVault! If you'd like to contribute:
 
 1. Fork the repository
 2. Create a feature branch
@@ -19,4 +19,4 @@ Please ensure your contributions align with the project's goals of providing a r
 
 ## Acknowledgments
 
-Special thanks to all who have provided feedback, bug reports, and suggestions for improving Sandvault.
+Special thanks to all who have provided feedback, bug reports, and suggestions for improving SandVault.

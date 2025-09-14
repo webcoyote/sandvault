@@ -175,7 +175,7 @@
 
    END OF TERMS AND CONDITIONS
 
-Sandvault
+SandVault
 Copyright (C) 2025 Patrick Wyatt
 All rights reserved.
 

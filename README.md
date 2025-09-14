@@ -2,7 +2,7 @@
 
 **Run Claude Code safely in a sandboxed macOS user account**
 
-Sandvault creates an isolated user account ("sandvault") with restricted permissions for running Claude Code and other tools with reduced system access. This provides a lightweight alternative to VMs while maintaining security through macOS's built-in user isolation.
+SandVault creates an isolated user account ("sandvault") with restricted permissions for running Claude Code and other tools with reduced system access. This provides a lightweight alternative to VMs while maintaining security through macOS's built-in user isolation.
 
 
 ## Quick Start
@@ -19,7 +19,12 @@ cd sandvault
 ./sv shell
 ```
 
-Sandvault creates the `$HOME/sandvault` directory, and only has access to that directory (apart from it's own home directory).
+SandVault has limited access to your computer:
+
+- read/write: /Users/YOUR-HOME-DIRECTORY/sandvault     -- shared directory
+- read/write: /Users/sandvault                         -- sandvault's home directory
+- read:       /usr, /bin, /etc, /opt                   -- system directories
+- no access:  /Users/*                                 -- user directories
 
 
 ## Installation
@@ -33,14 +38,25 @@ alias sv="$HOME/path/to/where/you/cloned/sandvault/sv"
 
 Then use:
 
-- `sv` or `sv shell` - Open a sandboxed shell
-- `sv claude [PATH]` - Run Claude Code in the sandbox
-- `sv uninstall` - Remove the sandvault user and configuration
+- `sv s` or `sv shell` - Open a sandboxed shell
+- `sv c` or `sv claude` - Run Claude Code in the sandbox
+- `sv u` or `sv uninstall` - Remove the sandvault user and configuration
+
+
+## Configuring Claude Code
+
+SandVault supports custom Claude Code configuration:
+
+1. Copy `./guest/home/.env.sample` to `./guest/home/.env`
+2. Set the `CLAUDE_CONFIG_REPO` variable to your Git repository containing Claude Code configuration files
+3. Run SandVault again
+
+Your repository will be cloned to `/Users/sandvault/.claude`, allowing you to maintain custom Claude Code settings, hooks, and other configuration.
 
 
 ## How It Works
 
-Sandvault creates a separate macOS user account with:
+SandVault creates a separate macOS user account with:
 
 - Limited filesystem access
 - Isolated environment from your main user
@@ -64,7 +80,7 @@ The sandboxed user can only access:
 - **Clean uninstall** - Complete removal with `sv uninstall`
 
 
-## Why Sandvault?
+## Why SandVault?
 
 After exploring Docker containers, Podman, sandbox-exec, and virtualization, I needed something that:
 
@@ -73,7 +89,7 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Allows running tools like Claude Code with `--dangerously-skip-permissions`
 - Maintains a clean separation between trusted and untrusted code
 
-Sandvault uses macOS's Unix heritage and user account system to create a simple but effective sandbox.
+SandVault uses macOS's Unix heritage and user account system to create a simple but effective sandbox.
 
 
 ## Requirements
@@ -129,7 +145,7 @@ This provides defense in depth when running untrusted code or experimenting with
 
 Apache License, Version 2.0
 
-Sandvault Copyright © 2025 Patrick Wyatt
+SandVault Copyright © 2025 Patrick Wyatt
 
 See [LICENSE.md](LICENSE.md) for details.
 
