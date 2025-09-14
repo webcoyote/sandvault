@@ -56,6 +56,9 @@ SHARED_WORKSPACE="$HOME/sandvault"
 # Create sudoers.d file for passwordless sudo to sandvault user
 SUDOERS_FILE="/etc/sudoers.d/50-sandvault-nopasswd-for-$USER"
 
+# Installation marker file
+INSTALL_MARKER="$HOME/.config/codeofhonor/sandvault/install"
+
 # Allow this user to login to any host as sandvault and run any command
 heredoc SUDOERS_CONTENT << EOF
 # Allow only '$USER' to sudo to sandvault without password
@@ -140,8 +143,11 @@ configure_shared_folder_permssions() {
 uninstall() {
     debug "Uninstalling..."
 
-    # Remove the sudoers file first; it's a sentinel for "everything is complete".
+    # Remove the install marker file first; it's a sentinel for "everything is complete".
     # By removing it first we force a rebuild if the user wants to run this again.
+    rm -rf "$INSTALL_MARKER"
+
+    # Remove the sudoers file
     sudo rm -rf "$SUDOERS_FILE"
 
     # Remove shared folder ACLS
@@ -266,15 +272,11 @@ install_tools
 ###############################################################################
 # Determine whether configuration is already complete
 ###############################################################################
-if [[ ! -f "$SUDOERS_FILE" ]]; then
+if [[ ! -f "$INSTALL_MARKER" ]]; then
     # Since this is a full rebuild, provide more feedback
     VERBOSE_LEVEL=$(( VERBOSE_LEVEL > 1 ? VERBOSE_LEVEL : 1 ))
     info "Installing sandvault..."
     REBUILD=true
-# The following command requires sudo, and so it doesn't make sense to run this when
-# we're trying to avoid asking for the password; assume file contents are correct
-#elif ! echo "$SUDOERS_CONTENT" | sudo diff -q "$SUDOERS_FILE" - &>/dev/null; then
-#    REBUILD=true
 fi
 
 if [[ "$REBUILD" != "false" ]]; then
@@ -474,14 +476,23 @@ fi
 #
 #
 #
-#   IMPORTANT: SUDOERS_FILE should be created last so that this script is
-#   idempotent. The creation of the SUDOERS_FILE is used as a sentinel
+#   IMPORTANT: INSTALL_MARKER should be created last so that this script is
+#   idempotent. The creation of the INSTALL_MARKER is used as a sentinel
 #   that installation was successfully completed.
 #
 #   NO MORE SETUP STEPS BELOW
 #
 #
 #
+
+###############################################################################
+# Mark installation as complete
+###############################################################################
+if [[ "$REBUILD" != "false" ]]; then
+    debug "Creating installation marker..."
+    mkdir -p "$(dirname "$INSTALL_MARKER")"
+    date > "$INSTALL_MARKER"
+fi
 
 ###############################################################################
 # Run the application
