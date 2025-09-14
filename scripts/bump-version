@@ -93,13 +93,10 @@ git add -A
 
 # Commit with version message
 git commit -m "Bump version to $NEW_VERSION"
+git push
 
 # Create tag
-git tag -a "v$NEW_VERSION" -m "Version $NEW_VERSION"
-
-git push && git push --tags
+#git tag -a "v$NEW_VERSION" -m "Version $NEW_VERSION"
+#git push --tags
 
 echo "✓ Version bumped to $NEW_VERSION"
-gecho "✓ Changes committed"
-echo "✓ Tag v$NEW_VERSION created"
-echo "✓ Changes pushed"

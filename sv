@@ -61,14 +61,6 @@ INSTALL_ORG="$HOME/.config/codeofhonor"
 INSTALL_PRODUCT="$INSTALL_ORG/sandvault"
 INSTALL_MARKER="$INSTALL_PRODUCT/install"
 
-# Allow this user to login to any host as sandvault and run any command
-heredoc SUDOERS_CONTENT << EOF
-# Allow only '$USER' to sudo to sandvault without password
-$USER ALL=(sandvault) NOPASSWD: ALL
-# Allow '$USER' to kill sandvault processes without password
-$USER ALL=($USER) NOPASSWD: /usr/bin/killall -u sandvault
-EOF
-
 SSH_DIR="$HOME/.ssh"
 SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
 SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
@@ -470,6 +462,18 @@ fi
 ###############################################################################
 if [[ "$REBUILD" != "false" ]]; then
     debug "Configuring passwordless access to sandvault..."
+
+    # Get the sandvault user's UID
+    SANDVAULT_UID=$(dscl . -read /Users/sandvault UniqueID 2>/dev/null | awk '{print $2}')
+
+heredoc SUDOERS_CONTENT << EOF
+# Allow '$USER' to sudo to sandvault without password and run any command as that user
+$USER ALL=(sandvault) NOPASSWD: ALL
+# Allow '$USER' to kill sandvault processes without password
+$USER ALL=(root) NOPASSWD: /bin/launchctl bootout user/$SANDVAULT_UID
+$USER ALL=(root) NOPASSWD: /usr/bin/pkill -9 -u sandvault
+EOF
+
     echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_FILE" > /dev/null
     sudo chmod 440 "$SUDOERS_FILE"
 
@@ -504,42 +508,23 @@ cleanup_sandvault_processes() {
     fi
 
     # We're the last session, safe to cleanup all sandvault processes
-    trace "Last sandvault session, cleaning up all sandvault processes"
+    # Try to bootout the user session (this terminates all processes)
+    trace "Terminating sandvault user session..."
+    local sandvault_uid=$(dscl . -read /Users/sandvault UniqueID 2>/dev/null | awk '{print $2}')
+    sudo launchctl bootout user/$sandvault_uid 2>/dev/null || true
 
-    # try SIGTERM several times
-    local attempts=2
-    local i
-    for i in $(seq 1 $attempts); do
-        trace "graceful kill (attempt $i/$attempts)..."
-        sudo /usr/bin/killall -u sandvault 2>/dev/null || true
+    # Brief wait for cleanup
+    sleep 0.2
 
-        # Wait before next attempt
-        sleep 0.4
-
-        # Check if any processes remain
-        if ! pgrep -u sandvault >/dev/null 2>&1; then
-            break
-        fi
-    done
-
-    # try SIGKILL several times
-    local attempts=4
-    for i in $(seq 1 $attempts); do
-        trace "forceful kill (attempt $i/$attempts)..."
-        sudo /usr/bin/killall -u sandvault -9 2>/dev/null || true
-
-        # Wait before next attempt
-        sleep 0.4
-
-        # Check if any processes remain
-        if ! pgrep -u sandvault >/dev/null 2>&1; then
-            break
-        fi
-    done
+    # Final forceful cleanup only if needed
+    if pgrep -u sandvault >/dev/null 2>&1; then
+        trace "Final cleanup of remaining processes..."
+        sudo pkill -9 -u sandvault 2>/dev/null || true
+    fi
 
     # Final check
     if pgrep -u sandvault >/dev/null 2>&1; then
-        warn "Some sandvault processes may still be running"
+        warn "Some sandvault processes may still be running (likely system daemons)"
     fi
 }
 
