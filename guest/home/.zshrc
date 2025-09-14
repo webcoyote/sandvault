@@ -68,6 +68,12 @@ fi
 if [[ -n "${INITIAL_DIR:-}" ]]; then
     cd "$INITIAL_DIR"
 fi
+if [[ ! -r "$PWD" ]] && [[ -n "${SHARED_WORKSPACE:-}" ]]; then
+    cd "${SHARED_WORKSPACE:-}"
+fi
+if [[ ! -r "$PWD" ]]; then
+    cd "$HOME"
+fi
 if [[ "${COMMAND:-}" != "" ]]; then
     exec "$COMMAND"
 fi

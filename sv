@@ -529,6 +529,7 @@ if [[ "$MODE" == "ssh" ]]; then
         /usr/bin/env \
             "COMMAND=$COMMAND" \
             "INITIAL_DIR=$INITIAL_DIR" \
+            "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "VERBOSE_LEVEL=${VERBOSE_LEVEL:-0}" \
             /bin/zsh --login
 else
@@ -555,6 +556,7 @@ else
             "TERM=${TERM:-}" \
             "COMMAND=$COMMAND" \
             "INITIAL_DIR=$INITIAL_DIR" \
+            "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "VERBOSE_LEVEL=${VERBOSE_LEVEL:-0}" \
             /bin/zsh -c "cd ~ ; exec /bin/zsh --login"
 fi
