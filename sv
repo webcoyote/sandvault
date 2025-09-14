@@ -191,7 +191,7 @@ show_help() {
     echo "  c, claude [PATH]     Run claude"
     echo "  r, run    [PATH]     Run claude"
     echo "  s, shell  [PATH]     Run shell"
-    echo "  uninstall            Remove user & files (but not this repo)"
+    echo "  u, uninstall         Remove user & files (but not this repo)"
     exit 0
 }
 
@@ -247,7 +247,7 @@ case "${1:-}" in
         COMMAND=
         INITIAL_DIR="${2:-$PWD}"
         ;;
-    uninstall)
+    u|uninstall)
         uninstall
         exit 0
         ;;

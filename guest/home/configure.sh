@@ -33,15 +33,20 @@ abort () {
 # error message: "a keychain cannot be found to store ..."
 #
 # This occurs when connecting using "sudo --user=sandvault ..."
-# but not when using "ssh ..."
+# but not when using "ssh sandvault@..."
 #
 # TODO: I guess the sv script could call this configure script directly
 # with the password the first time instead of it being called from .zshrc
 ###############################################################################
-if [[ ! -f "$HOME/Library/Keychains/login.keychain-db" ]]; then
+# Explicitly specify the path to avoid confusion with the host user;
+# - security dump-keychain                 => host user
+# - security dump-keychain $LOGIN_KEYCHAIN => sandvault user
+LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+if [[ ! -f "$LOGIN_KEYCHAIN" ]]; then
     warn "Creating keychain without password"
-    security create-keychain -p '' login.keychain-db
+    security create-keychain -p '' "$LOGIN_KEYCHAIN"
 fi
+security unlock-keychain -p '' "$LOGIN_KEYCHAIN"
 
 
 ###############################################################################
