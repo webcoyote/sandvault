@@ -65,6 +65,8 @@ INSTALL_MARKER="$INSTALL_PRODUCT/install"
 heredoc SUDOERS_CONTENT << EOF
 # Allow only '$USER' to sudo to sandvault without password
 $USER ALL=(sandvault) NOPASSWD: ALL
+# Allow '$USER' to kill sandvault processes without password
+$USER ALL=($USER) NOPASSWD: /usr/bin/killall -u sandvault
 EOF
 
 SSH_DIR="$HOME/.ssh"
@@ -491,6 +493,57 @@ fi
 
 
 ###############################################################################
+# Cleanup function for sandvault processes
+###############################################################################
+cleanup_sandvault_processes() {
+    # Exit if other sandvault sessions are active
+    local session_count=$(ps -u sandvault -o command | grep -c "/bin/zsh --login" || true)
+    if [[ "${session_count:-0}" -ne 0 ]]; then
+        trace "$session_count sandvault sessions still active; skipping cleanup"
+        return 0
+    fi
+
+    # We're the last session, safe to cleanup all sandvault processes
+    trace "Last sandvault session, cleaning up all sandvault processes"
+
+    # try SIGTERM several times
+    local attempts=2
+    local i
+    for i in $(seq 1 $attempts); do
+        trace "graceful kill (attempt $i/$attempts)..."
+        sudo /usr/bin/killall -u sandvault 2>/dev/null || true
+
+        # Wait before next attempt
+        sleep 0.4
+
+        # Check if any processes remain
+        if ! pgrep -u sandvault >/dev/null 2>&1; then
+            break
+        fi
+    done
+
+    # try SIGKILL several times
+    local attempts=4
+    for i in $(seq 1 $attempts); do
+        trace "forceful kill (attempt $i/$attempts)..."
+        sudo /usr/bin/killall -u sandvault -9 2>/dev/null || true
+
+        # Wait before next attempt
+        sleep 0.4
+
+        # Check if any processes remain
+        if ! pgrep -u sandvault >/dev/null 2>&1; then
+            break
+        fi
+    done
+
+    # Final check
+    if pgrep -u sandvault >/dev/null 2>&1; then
+        warn "Some sandvault processes may still be running"
+    fi
+}
+
+###############################################################################
 # Run the application
 ###############################################################################
 # kitty doesn't set this properly :(
@@ -510,6 +563,9 @@ which are required to SSH to the Virtual Machine.
 \n
 EOF
 
+# Set up trap to cleanup processes on exit
+trap 'cleanup_sandvault_processes' EXIT
+
 if [[ "$MODE" == "ssh" ]]; then
     trace "Checking SSH connectivity"
     if ! nc -z "$HOSTNAME" 22 ; then
@@ -519,7 +575,7 @@ if [[ "$MODE" == "ssh" ]]; then
     fi
 
     debug "SSH sandvault@$HOSTNAME"
-    exec ssh \
+    ssh \
         -q \
         -t \
         -o StrictHostKeyChecking=no \
@@ -545,7 +601,7 @@ else
     # Use sudo with -H to set HOME correctly
     # Use env to ensure the environment is cleared, otherwise PATH carries over
     debug "Shell sandvault@$HOSTNAME"
-    exec sudo \
+    sudo \
         --login \
         --set-home \
         --user=sandvault \
