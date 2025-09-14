@@ -1,4 +1,11 @@
-export PROMPT="%n@%m %~ %# "
+# .zshrc
+
+#export PROMPT="%n@%m %~ %# "
+export PROMPT="%F{magenta}%n %F{blue}%~%f %# "
+
+# Set the sandvault default umask to allow sandvault and its group ("staff")
+# to have read/write/execute to files, whereas others only have read access
+umask 002
 
 # Use GNU CLI binaries over outdated OSX CLI binaries
 if command -v brew &>/dev/null ; then
