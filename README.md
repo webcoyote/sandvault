@@ -2,7 +2,16 @@
 
 **Run Claude Code safely in a sandboxed macOS user account**
 
-SandVault creates an isolated user account ("sandvault") with restricted permissions for running Claude Code and other tools with reduced system access. This provides a lightweight alternative to VMs while maintaining security through macOS's built-in user isolation.
+SandVault creates an isolated user account ("sandvault-$USER") with restricted permissions for running Claude Code and other tools with limited system access. This provides a lightweight alternative to VMs while maintaining security through macOS's built-in user isolation.
+
+
+## Features
+
+- **Development ready** - Includes Claude Code, Node.js, Python, uv, and Homebrew
+- **Shared workspace** - joint access to `/Users/Shared/sandvault-$USER`
+- **Fast context switching** - No VM overhead, instant user switching
+- **Passwordless** - switch accounts or use SSH without a prompt (after setup)
+- **Clean uninstall** - Complete removal with `sv uninstall`
 
 
 ## Quick Start
@@ -12,72 +21,35 @@ SandVault creates an isolated user account ("sandvault") with restricted permiss
 git clone https://github.com/webcoyote/sandvault
 cd sandvault
 
-# Run Claude in the sandbox
-./sv claude
+# Add to your shell configuration for easy access:
+echo >> ~/.zshrc  'alias sv="/path/to/where/you/cloned/sandvault/sv"'
+echo >> ~/.bashrc 'alias sv="/path/to/where/you/cloned/sandvault/sv"'
 
-# Or just get a shell
-./sv shell
+# Run Claude in the sandbox
+sv claude
+
+# Or a shell
+sv shell
 ```
 
 SandVault has limited access to your computer:
 
-- read/write: /Users/YOUR-HOME-DIRECTORY/sandvault     -- shared directory
-- read/write: /Users/sandvault                         -- sandvault's home directory
-- read:       /usr, /bin, /etc, /opt                   -- system directories
-- no access:  /Users/*                                 -- user directories
-
-
-## Installation
-
-Add to your shell configuration for easy access:
-
-```bash
-# In ~/.zshrc or ~/.bashrc
-alias sv="$HOME/path/to/where/you/cloned/sandvault/sv"
+```
+- writable:  /Users/Shared/sandvault-$USER  -- only accessible by you & sandvault-$USER
+- writable:  /Users/sandvault-$USER         -- sandvault's home directory
+- readable:  /usr, /bin, /etc, /opt         -- system directories
+- no access: /Users/*                       -- other user directories
 ```
 
-Then use:
 
-- `sv s` or `sv shell` - Open a sandboxed shell
-- `sv c` or `sv claude` - Run Claude Code in the sandbox
-- `sv u` or `sv uninstall` - Remove the sandvault user and configuration
+## Custom Claude Code Configuration
 
+SandVault supports deploying your own custom Claude Code configuration, like hooks, agents, and plugins.
 
-## Configuring Claude Code
+1. Copy `./guest/home/.env.sample` to `./guest/home/.env` and edit the `CLAUDE_CONFIG_REPO` variable to your Git repository containing your Claude Code configuration files
+2. Run `sv c --rebuild` to copy your configuration (only needs to be done once)
 
-SandVault supports custom Claude Code configuration:
-
-1. Copy `./guest/home/.env.sample` to `./guest/home/.env`
-2. Set the `CLAUDE_CONFIG_REPO` variable to your Git repository containing Claude Code configuration files
-3. Run SandVault again
-
-Your repository will be cloned to `/Users/sandvault/.claude`, allowing you to maintain custom Claude Code settings, hooks, and other configuration.
-
-
-## How It Works
-
-SandVault creates a separate macOS user account with:
-
-- Limited filesystem access
-- Isolated environment from your main user
-- Shared workspace at `~/sandvault` for project files
-- Passwordless sudo switching (no password prompts)
-- Pre-configured development tools
-
-The sandboxed user can only access:
-
-- The shared workspace (`~/sandvault`) (read/write)
-- Its own home directory (`/Users/sandvault`) (read/write)
-- System binaries and tools (readonly)
-
-
-## Features
-
-- **Fast context switching** - No VM overhead, instant user switching
-- **Shared workspace** - Easy file exchange through `~/sandvault`
-- **Development ready** - Includes Node.js, Python, uv, and Homebrew
-- **SSH support** - Connect via SSH with `sv --ssh`
-- **Clean uninstall** - Complete removal with `sv uninstall`
+Your repository will be cloned to `/Users/sandvault-$USER/.claude/` during setup.
 
 
 ## Why SandVault?
@@ -92,13 +64,6 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 SandVault uses macOS's Unix heritage and user account system to create a simple but effective sandbox.
 
 
-## Requirements
-
-- macOS (Darwin)
-- Admin privileges (for initial setup only)
-- Homebrew (will be installed if missing)
-
-
 ## Commands
 
 ```bash
@@ -111,13 +76,14 @@ sv s [PATH]           # Short alias
 sv claude [PATH]      # Run Claude Code
 sv c [PATH]           # Short alias
 sv run [PATH]         # Alternative alias
+sv r [PATH]           # Yet another alias
 
 # SSH mode
 sv --ssh ...          # Connect via SSH instead of sudo
 
 # Management
-sv --rebuild ...      # Force rebuild configuration
 sv uninstall          # Remove sandvault user and files
+sv --rebuild ...      # Force rebuild configuration
 sv --version          # Show version
 sv --help             # Show help
 ```
@@ -127,7 +93,7 @@ sv --help             # Show help
 
 The sandvault user:
 
-- Cannot access your main user's files (except the shared workspace)
+- Cannot access your home directory
 - Runs with standard user privileges
 - Cannot modify system files
 - Has its own isolated home directory

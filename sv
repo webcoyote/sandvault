@@ -51,10 +51,13 @@ fi
 ###############################################################################
 VERSION="1.0.4"
 
-SHARED_WORKSPACE="$HOME/sandvault"
+# Each user on the computer can have their own sandvault
+SANDVAULT_USER="sandvault-$USER"
+SANDVAULT_GROUP="sandvault-$USER"
+SHARED_WORKSPACE="/Users/Shared/$SANDVAULT_USER"
 
 # Create sudoers.d file for passwordless sudo to sandvault user
-SUDOERS_FILE="/etc/sudoers.d/50-sandvault-nopasswd-for-$USER"
+SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
 
 # Installation marker file
 INSTALL_ORG="$HOME/.config/codeofhonor"
@@ -106,36 +109,23 @@ show_version() {
 configure_shared_folder_permssions() {
     local enable="$1"
 
-    # Grant write access to shared workspace
-    local rights1="sandvault allow read,write,execute,append,delete,file_inherit,directory_inherit"
+    # Set the owner to $USER on both enable and disable so
+    # files owned by sandvault do not get orphaned by uninstall
+    sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
+    sudo /usr/sbin/chown -f -R "$USER:$(id -gn)" "$SHARED_WORKSPACE"
+
+    # Grant write access to shared workspace for sandvault group. We want
+    # to modify files and symbolic links, not what symbolic links point to.
+    # Use `find | xargs chmod -h` instead of `chmod -R -h` because the latter
+    # causes: "chmod: the -R and -h options may not be specified together"
+    local rights="group:$SANDVAULT_GROUP allow read,write,execute,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit"
     if [[ "$enable" != "false" ]]; then
-        trace "Configuring $SHARED_WORKSPACE: add $rights1"
-        /bin/chmod +a "$rights1" "$SHARED_WORKSPACE"
+        trace "Configuring $SHARED_WORKSPACE: add $rights (recursively)"
+        sudo find "$SHARED_WORKSPACE" -print0 | xargs -0 sudo /bin/chmod -h +a "$rights"
     else
-        trace "Configuring $SHARED_WORKSPACE: remove $rights1"
-        /bin/chmod -a "$rights1" "$SHARED_WORKSPACE" 2>/dev/null || true
+        trace "Configuring $SHARED_WORKSPACE: remove $rights (recursively)"
+        sudo find "$SHARED_WORKSPACE" -print0 2>/dev/null | xargs -0 sudo /bin/chmod -h -a "$rights" 2>/dev/null || true
     fi
-
-    # Also ensure sandvault can traverse parent directories to reach the shared workspace,
-    # but not do anything else with this user's files or directories.
-    PARENT_DIR=$(dirname "$SHARED_WORKSPACE")
-    local rights2="sandvault allow execute"
-    local rights3="sandvault deny read,write,append,delete"
-    while [[ "$PARENT_DIR" != "/" && "$PARENT_DIR" != "." ]]; do
-        if [[ "$enable" != "false" ]]; then
-            trace "Configuring $PARENT_DIR: add $rights2"
-            /bin/chmod +a "$rights2" "$PARENT_DIR" 2>/dev/null || true
-            trace "Configuring $PARENT_DIR: add $rights3"
-            /bin/chmod +a "$rights3" "$PARENT_DIR" 2>/dev/null || true
-        else
-            trace "Configuring $PARENT_DIR: remove $rights2"
-            /bin/chmod -a "$rights2" "$PARENT_DIR" 2>/dev/null || true
-            trace "Configuring $PARENT_DIR: remove $rights3"
-            /bin/chmod -a "$rights3" "$PARENT_DIR" 2>/dev/null || true
-        fi
-        PARENT_DIR=$(dirname "$PARENT_DIR")
-    done
-
 }
 
 uninstall() {
@@ -153,13 +143,16 @@ uninstall() {
     # Remove shared folder ACLS
     configure_shared_folder_permssions false
 
-    # Remove user from SSH group BEFORE deleting the user
-    sudo dseditgroup -o edit -d sandvault -t user com.apple.access_ssh 2>/dev/null || true
-    
+    # Remove current user from sandvault group
+    sudo dseditgroup -o edit -d "$USER" -t user "$SANDVAULT_GROUP" 2>/dev/null || true
+
+    # Remove sandvault user from SSH group BEFORE deleting the user
+    sudo dseditgroup -o edit -d "$SANDVAULT_USER" -t user com.apple.access_ssh 2>/dev/null || true
+
     # Now delete the user and group
-    sudo dscl . -delete "/Users/sandvault" &>/dev/null || true
-    sudo dscl . -delete "/Groups/sandvault" &>/dev/null || true
-    sudo rm -rf "/Users/sandvault"
+    sudo dscl . -delete "/Users/$SANDVAULT_USER" &>/dev/null || true
+    sudo dscl . -delete "/Groups/$SANDVAULT_GROUP" &>/dev/null || true
+    sudo rm -rf "/Users/$SANDVAULT_USER"
 
     # Cleanup SSH
     rm -rf "$SSH_KEYFILE_PRIV" "$SSH_KEYFILE_PUB"
@@ -289,22 +282,22 @@ fi
 # Create sandvault user and group
 ###############################################################################
 if [[ "$REBUILD" != "false" ]]; then
-    debug "Creating sandvault user and group..."
+    debug "Creating $SANDVAULT_USER user and $SANDVAULT_GROUP group..."
 
     # Check if group exists, create if needed
-    if ! dscl . -read /Groups/sandvault &>/dev/null 2>&1; then
-        trace "Creating sandvault group..."
+    if ! dscl . -read "/Groups/$SANDVAULT_GROUP" &>/dev/null 2>&1; then
+        trace "Creating $SANDVAULT_GROUP group..."
 
         # Find next available UID/GID starting from 501
         NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
         NEXT_UID=$((NEXT_UID + 1))
 
         # Create group
-        sudo dscl . -create /Groups/sandvault
+        sudo dscl . -create "/Groups/$SANDVAULT_GROUP"
         GROUP_ID=$NEXT_UID
     else
-        trace "Group sandvault already exists"
-        GROUP_ID=$(dscl . -read /Groups/sandvault PrimaryGroupID 2>/dev/null | awk '{print $2}')
+        trace "Group $SANDVAULT_GROUP already exists"
+        GROUP_ID=$(dscl . -read "/Groups/$SANDVAULT_GROUP" PrimaryGroupID 2>/dev/null | awk '{print $2}')
     fi
 
     # Ensure group has all required properties (idempotent)
@@ -313,52 +306,59 @@ if [[ "$REBUILD" != "false" ]]; then
         NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
         GROUP_ID=$((NEXT_UID + 1))
     fi
-    trace "Configuring sandvault group properties..."
-    sudo dscl . -create /Groups/sandvault PrimaryGroupID "$GROUP_ID"
-    sudo dscl . -create /Groups/sandvault RealName "sandvault Group"
+    trace "Configuring $SANDVAULT_GROUP group properties..."
+    sudo dscl . -create "/Groups/$SANDVAULT_GROUP" PrimaryGroupID "$GROUP_ID"
+    sudo dscl . -create "/Groups/$SANDVAULT_GROUP" RealName "$SANDVAULT_GROUP Group"
 
     # Check if user exists, create if needed
-    if ! dscl . -read /Users/sandvault &>/dev/null 2>&1; then
-        trace "Creating sandvault user..."
+    if ! dscl . -read "/Users/$SANDVAULT_USER" &>/dev/null 2>&1; then
+        trace "Creating $SANDVAULT_USER user..."
 
         # Find next available UID
         NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
         NEXT_UID=$((NEXT_UID + 1))
 
         # Create user
-        sudo dscl . -create /Users/sandvault
+        sudo dscl . -create "/Users/$SANDVAULT_USER"
         USER_ID=$NEXT_UID
     else
-        trace "User sandvault already exists"
-        USER_ID=$(dscl . -read /Users/sandvault UniqueID 2>/dev/null | awk '{print $2}')
+        trace "User $SANDVAULT_USER already exists"
+        USER_ID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
     fi
 
     # Ensure user has all required properties (idempotent)
-    trace "Configuring sandvault user properties..."
+    trace "Configuring $SANDVAULT_USER user properties..."
     if [[ -z "${USER_ID:-}" ]]; then
         # User exists but has no UniqueID, find next available
         NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
         USER_ID=$((NEXT_UID + 1))
     fi
-    sudo dscl . -create /Users/sandvault UniqueID "$USER_ID"
-    sudo dscl . -create /Users/sandvault PrimaryGroupID "$GROUP_ID"
-    sudo dscl . -create /Users/sandvault RealName "sandvault User"
-    sudo dscl . -create /Users/sandvault NFSHomeDirectory "/Users/sandvault"
-    sudo dscl . -create /Users/sandvault UserShell "/bin/zsh"
+    sudo dscl . -create "/Users/$SANDVAULT_USER" UniqueID "$USER_ID"
+    sudo dscl . -create "/Users/$SANDVAULT_USER" PrimaryGroupID "$GROUP_ID"
+    sudo dscl . -create "/Users/$SANDVAULT_USER" RealName "$SANDVAULT_USER User"
+    sudo dscl . -create "/Users/$SANDVAULT_USER" NFSHomeDirectory "/Users/$SANDVAULT_USER"
+    sudo dscl . -create "/Users/$SANDVAULT_USER" UserShell "/bin/zsh"
 
     # Set a random password for the user (password required for SSH on macOS)
     # We'll use key-based auth so the password won't actually be used.
     RANDOM_PASS=$(openssl rand -base64 32)
-    sudo dscl . -passwd /Users/sandvault "$RANDOM_PASS"
-    sudo dscl . -create /Users/sandvault IsHidden 1  # Hide from login window
+    sudo dscl . -passwd "/Users/$SANDVAULT_USER" "$RANDOM_PASS"
+    sudo dscl . -create "/Users/$SANDVAULT_USER" IsHidden 1  # Hide from login window
 
-    # Let's allow the user to login as this user if they want
-    #sudo dscl . -create /Users/sandvault IsHidden 0
-    #sudo dscl . -passwd /Users/sandvault "sandvault"
+    # DANGEROUS: allow login as sandvault user
+    #sudo dscl . -create "/Users/$SANDVAULT_USER" IsHidden 0
+    #sudo dscl . -passwd "/Users/$SANDVAULT_USER" "sandvault"
+
+    # Remove sandvault user from "staff" group so it doesn't have access to most files
+    sudo dseditgroup -o edit -d "$SANDVAULT_USER" -t user staff 2>/dev/null || true
 
     # Add to SSH access group (required for SSH login)
     # do not use sudo dscl; it creates duplicate entries
-    sudo dseditgroup -o edit -a sandvault -t user com.apple.access_ssh
+    sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
+
+    # Add current user to the sandvault group
+    trace "Adding $USER to $SANDVAULT_GROUP group..."
+    sudo dseditgroup -o edit -a "$USER" -t user "$SANDVAULT_GROUP"
 fi
 
 
@@ -369,6 +369,7 @@ if [[ "$REBUILD" != "false" ]]; then
     if [[ ! -f "$SSH_KEYFILE_PRIV" ]] || [[ ! -f "$SSH_KEYFILE_PUB" ]]; then
         trace "Creating SSH key files..."
         mkdir -p "$SSH_DIR"
+        /bin/chmod 0700 "$SSH_DIR"
         ssh-keygen -t ed25519 \
             -f "$SSH_KEYFILE_PRIV" \
             -N "" \
@@ -395,7 +396,7 @@ if [[ "$REBUILD" != "false" ]]; then
     GUEST_AUTHORIZED_KEYS="$WORKSPACE/guest/home/.ssh/authorized_keys"
     mkdir -p "$(dirname "$GUEST_AUTHORIZED_KEYS")"
     cp "$SSH_KEYFILE_PUB" "$GUEST_AUTHORIZED_KEYS"
-    /bin/chmod 600 "$GUEST_AUTHORIZED_KEYS"
+    /bin/chmod 0600 "$GUEST_AUTHORIZED_KEYS"
 fi
 
 
@@ -410,13 +411,13 @@ if [[ "$REBUILD" != "false" ]]; then
 
     # Create a README in the shared workspace
     cat > "$SHARED_WORKSPACE/SANDVAULT-README.md" << EOF
-    # SandVault Workspace
+    # sandvault workspace for '$USER'
     # (autogenerated file; do not edit)
 
-    This directory is shared with the sandvault user.
+    This directory is shared with '$SANDVAULT_USER' user.
     The sandvault user has full read/write access here.
 
-    ## To switch to the sandvault user, run:
+    ## To switch to the sandvault run:
 
         "${BASH_SOURCE[0]}"
 
@@ -433,26 +434,26 @@ fi
 # Configure sandvault user
 ###############################################################################
 if [[ "$REBUILD" != "false" ]]; then
-    debug "Configure sandvault home directory..."
+    debug "Configure $SANDVAULT_USER home directory..."
 
     # Copy files to home directory
-    sudo mkdir -p "/Users/sandvault"
-    sudo cp -rf "$WORKSPACE/guest/home/." "/Users/sandvault/"
+    sudo mkdir -p "/Users/$SANDVAULT_USER"
+    sudo cp -rf "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/"
 
     # Make sandvault the owner of the files
-    sudo chown -R "sandvault:sandvault" "/Users/sandvault" 2>/dev/null || true
+    sudo chown -R "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER" 2>/dev/null || true
 
     # Fixup file permissions
-    sudo /bin/chmod 755 "/Users/sandvault"
-    sudo /bin/chmod 700 "/Users/sandvault/.ssh"
-    if [[ -f "/Users/sandvault/authorized_keys" ]]; then
-        sudo /bin/chmod 600 "/Users/sandvault/authorized_keys"
+    sudo /bin/chmod 0755 "/Users/$SANDVAULT_USER"
+    sudo /bin/chmod 0700 "/Users/$SANDVAULT_USER/.ssh"
+    if [[ -f "/Users/$SANDVAULT_USER/authorized_keys" ]]; then
+        sudo /bin/chmod 0600 "/Users/$SANDVAULT_USER/authorized_keys"
     fi
-    if [[ -f "/Users/sandvault/.ssh/id_ed25519" ]]; then
-        sudo /bin/chmod 600 "/Users/sandvault/.ssh/id_ed25519"
+    if [[ -f "/Users/$SANDVAULT_USER/.ssh/id_ed25519" ]]; then
+        sudo /bin/chmod 0600 "/Users/$SANDVAULT_USER/.ssh/id_ed25519"
     fi
-    if [[ -f "/Users/sandvault/.ssh/id_ed25519.pub" ]]; then
-        sudo /bin/chmod 644 "/Users/sandvault/.ssh/id_ed25519.pub"
+    if [[ -f "/Users/$SANDVAULT_USER/.ssh/id_ed25519.pub" ]]; then
+        sudo /bin/chmod 0644 "/Users/$SANDVAULT_USER/.ssh/id_ed25519.pub"
     fi
 fi
 
@@ -461,21 +462,21 @@ fi
 # Configure passwordless sudo to switch to sandvault user
 ###############################################################################
 if [[ "$REBUILD" != "false" ]]; then
-    debug "Configuring passwordless access to sandvault..."
+    debug "Configuring passwordless access to $SANDVAULT_USER..."
 
     # Get the sandvault user's UID
-    SANDVAULT_UID=$(dscl . -read /Users/sandvault UniqueID 2>/dev/null | awk '{print $2}')
+    SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
 
 heredoc SUDOERS_CONTENT << EOF
-# Allow '$USER' to sudo to sandvault without password and run any command as that user
-$USER ALL=(sandvault) NOPASSWD: ALL
-# Allow '$USER' to kill sandvault processes without password
+# Allow '$USER' to sudo to $SANDVAULT_USER without password and run any command as that user
+$USER ALL=($SANDVAULT_USER) NOPASSWD: ALL
+# Allow '$USER' to kill $SANDVAULT_USER processes without password
 $USER ALL=(root) NOPASSWD: /bin/launchctl bootout user/$SANDVAULT_UID
-$USER ALL=(root) NOPASSWD: /usr/bin/pkill -9 -u sandvault
+$USER ALL=(root) NOPASSWD: /usr/bin/pkill -9 -u $SANDVAULT_USER
 EOF
 
     echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_FILE" > /dev/null
-    sudo chmod 440 "$SUDOERS_FILE"
+    sudo /bin/chmod 0440 "$SUDOERS_FILE"
 
     # Validate the sudoers file
     if ! sudo visudo -c -f "$SUDOERS_FILE" &>/dev/null; then
@@ -501,30 +502,30 @@ fi
 ###############################################################################
 cleanup_sandvault_processes() {
     # Exit if other sandvault sessions are active
-    local session_count=$(ps -u sandvault -o command | grep -c "/bin/zsh --login" || true)
+    local session_count=$(ps -u "$SANDVAULT_USER" -o command | grep -c "/bin/zsh --login" || true)
     if [[ "${session_count:-0}" -ne 0 ]]; then
-        trace "$session_count sandvault sessions still active; skipping cleanup"
+        trace "$session_count $SANDVAULT_USER sessions still active; skipping cleanup"
         return 0
     fi
 
     # We're the last session, safe to cleanup all sandvault processes
     # Try to bootout the user session (this terminates all processes)
-    trace "Terminating sandvault user session..."
-    local sandvault_uid=$(dscl . -read /Users/sandvault UniqueID 2>/dev/null | awk '{print $2}')
+    trace "Terminating $SANDVAULT_USER user session..."
+    local sandvault_uid=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
     sudo launchctl bootout user/$sandvault_uid 2>/dev/null || true
 
     # Brief wait for cleanup
     sleep 0.2
 
     # Final forceful cleanup only if needed
-    if pgrep -u sandvault >/dev/null 2>&1; then
+    if pgrep -u "$SANDVAULT_USER" >/dev/null 2>&1; then
         trace "Final cleanup of remaining processes..."
-        sudo pkill -9 -u sandvault 2>/dev/null || true
+        sudo pkill -9 -u "$SANDVAULT_USER" 2>/dev/null || true
     fi
 
     # Final check
-    if pgrep -u sandvault >/dev/null 2>&1; then
-        warn "Some sandvault processes may still be running (likely system daemons)"
+    if pgrep -u "$SANDVAULT_USER" >/dev/null 2>&1; then
+        warn "Some $SANDVAULT_USER processes may still be running (likely system daemons)"
     fi
 }
 
@@ -559,25 +560,25 @@ if [[ "$MODE" == "ssh" ]]; then
         open "/System/Library/PreferencePanes/Security.prefPane"
     fi
 
-    debug "SSH sandvault@$HOSTNAME"
+    debug "SSH $SANDVAULT_USER@$HOSTNAME"
     ssh \
         -q \
         -t \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -i "$SSH_KEYFILE_PRIV" \
-        "sandvault@$HOSTNAME" \
+        "$SANDVAULT_USER@$HOSTNAME" \
         /usr/bin/env \
             "COMMAND=$COMMAND" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "VERBOSE_LEVEL=${VERBOSE_LEVEL:-0}" \
-            /bin/zsh --login
+            /bin/zsh --login || true
 else
     # First verify that passwordless sudo is working
     trace "Checking passwordless sudo"
-    if ! sudo --non-interactive --user=sandvault true 2>/dev/null; then
-        error "Passwordless sudo to sandvault user is not configured correctly."
+    if ! sudo --non-interactive --user="$SANDVAULT_USER" true 2>/dev/null; then
+        error "Passwordless sudo to $SANDVAULT_USER user is not configured correctly."
         error "Please run: ${BASH_SOURCE[0]} --rebuild"
         exit 1
     fi
@@ -585,19 +586,19 @@ else
     # Launch interactive shell as sandvault user
     # Use sudo with -H to set HOME correctly
     # Use env to ensure the environment is cleared, otherwise PATH carries over
-    debug "Shell sandvault@$HOSTNAME"
+    debug "Shell $SANDVAULT_USER@$HOSTNAME"
     sudo \
         --login \
         --set-home \
-        --user=sandvault \
+        --user="$SANDVAULT_USER" \
         env -i \
-            "HOME=/Users/sandvault" \
-            "USER=sandvault" \
+            "HOME=/Users/$SANDVAULT_USER" \
+            "USER=$SANDVAULT_USER" \
             "SHELL=/bin/zsh" \
             "TERM=${TERM:-}" \
             "COMMAND=$COMMAND" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "VERBOSE_LEVEL=${VERBOSE_LEVEL:-0}" \
-            /bin/zsh -c "cd ~ ; exec /bin/zsh --login"
+            /bin/zsh -c "cd ~ ; exec /bin/zsh --login" || true
 fi

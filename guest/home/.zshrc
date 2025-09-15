@@ -3,10 +3,6 @@
 #export PROMPT="%n@%m %~ %# "
 export PROMPT="%F{magenta}%n %F{blue}%~%f %# "
 
-# Set the sandvault default umask to allow sandvault and its group ("staff")
-# to have read/write/execute to files, whereas others only have read access
-umask 002
-
 # Use GNU CLI binaries over outdated OSX CLI binaries
 if command -v brew &>/dev/null ; then
     BREW_PREFIX="$(brew --prefix)"
@@ -62,25 +58,19 @@ else
     alias ll='ls -al'
 fi
 
-
-###############################################################################
 # Configure sandbox
-###############################################################################
 "$HOME/configure.sh" || true
 
-
-###############################################################################
-# Run the application
-###############################################################################
-if [[ -n "${INITIAL_DIR:-}" ]]; then
+# Find a readable directory
+if [[ -r "${INITIAL_DIR:-}" ]]; then
     cd "$INITIAL_DIR"
-fi
-if [[ ! -r "$PWD" ]] && [[ -n "${SHARED_WORKSPACE:-}" ]]; then
-    cd "${SHARED_WORKSPACE:-}"
-fi
-if [[ ! -r "$PWD" ]]; then
+elif [[ -r "${SHARED_WORKSPACE:-}" ]]; then
+    cd "$SHARED_WORKSPACE"
+elif [[ ! -r "$PWD" ]]; then
     cd "$HOME"
 fi
+
+# Run specified application
 if [[ "${COMMAND:-}" != "" ]]; then
     exec "$COMMAND"
 fi
