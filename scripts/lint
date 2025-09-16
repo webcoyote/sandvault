@@ -19,6 +19,6 @@ cd "$WORKSPACE"
 #
 # awk pattern matches only the first line that starts with '#!'
 # and ends with 'sh'
-fd --hidden -t f '(^[^.]+$|\.sh$)' \
+fd --hidden -t f '(^[^.]+$|\.sh$)' --exclude '.git' \
     --exec bash -c "awk 'NR==1 && /^#!/ && /sh$/{exit 0} {exit 1}' '{}' && \
     shellcheck --check-sourced --external-sources --exclude SC1017 '{}' || true"

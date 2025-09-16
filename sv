@@ -49,7 +49,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-VERSION="1.0.4"
+VERSION="1.0.5"
 
 # Each user on the computer can have their own sandvault
 SANDVAULT_USER="sandvault-$USER"
