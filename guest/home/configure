@@ -2,6 +2,7 @@
 # Build a sandbox user ("sandvault") for running commands
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 
 ###############################################################################
@@ -43,37 +44,13 @@ abort () {
 # - security dump-keychain $LOGIN_KEYCHAIN => sandvault user
 LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 if [[ ! -f "$LOGIN_KEYCHAIN" ]]; then
-    debug "Creating keychain without password"
+    debug "Creating keychain without password..."
     security create-keychain -p '' "$LOGIN_KEYCHAIN"
 fi
 
 # Unlock the keychain to avoid password dialogs
+debug "Unlocking keychain..."
 security unlock-keychain -p '' "$LOGIN_KEYCHAIN"
-
-
-###############################################################################
-# Load environment vars
-###############################################################################
-# shellcheck disable=SC1091 # file does not exist
-[[ -f "$HOME/.env" ]] && set -a && source "$HOME/.env" && set +a
-
-
-###############################################################################
-# Install Claude Code configuration
-###############################################################################
-if [[ -n "${CLAUDE_CONFIG_REPO:-}" ]]; then
-    CLAUDE_CONFIG_DIR="$HOME/.claude"
-
-    if [[ -d "$CLAUDE_CONFIG_DIR/.git" ]]; then
-        debug "Updating Claude Code configuration from $CLAUDE_CONFIG_REPO"
-        cd "$CLAUDE_CONFIG_DIR"
-        git pull --quiet
-    else
-        debug "Cloning Claude Code configuration from $CLAUDE_CONFIG_REPO"
-        rm -rf "$CLAUDE_CONFIG_DIR"
-        git clone --quiet "$CLAUDE_CONFIG_REPO" "$CLAUDE_CONFIG_DIR"
-    fi
-fi
 
 
 ###############################################################################
@@ -81,6 +58,7 @@ fi
 ###############################################################################
 if [[ ! -x "$HOME/node_modules/.bin/claude" ]]; then
     cd "$HOME"
+    debug "Installing claude..."
     npm install --silent @anthropic-ai/claude-code@latest
 fi
 
@@ -106,5 +84,31 @@ fi
 #
 # See https://github.com/webcoyote/sandvault/blob/main/scripts/worktree for a
 # simple implementation of worktrees.
+debug "Configuring xcode..."
 defaults write com.apple.dt.Xcode DerivedDataLocationStyle Custom
 defaults write com.apple.dt.Xcode IDECustomDerivedDataLocation ".DerivedData"
+
+
+###############################################################################
+# Copy user directory contents to $HOME
+###############################################################################
+# Copy contents of guest/home/user to $HOME, excluding zsh config files
+USER_DIR="$SCRIPT_DIR/user"
+if [[ -d "$USER_DIR" ]]; then
+    debug "Copying user directory contents to $HOME"
+    # Use rsync to copy while excluding specific files
+    rsync \
+        --quiet \
+        --archive \
+        --exclude='.git' \
+        --exclude='.gitattributes' \
+        --exclude='.gitignore' \
+        --exclude='README.md' \
+        --exclude='configure' \
+        --exclude='.zshenv' \
+        --exclude='.zprofile' \
+        --exclude='.zshrc' \
+        --exclude='.zlogin' \
+        --exclude='.zlogout' \
+        "$USER_DIR/" "$HOME/" 2>/dev/null
+fi

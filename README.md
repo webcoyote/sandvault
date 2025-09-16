@@ -44,12 +44,7 @@ SandVault has limited access to your computer:
 
 ## Custom Claude Code Configuration
 
-SandVault supports deploying your own custom Claude Code configuration, like hooks, agents, and plugins.
-
-1. Copy `./guest/home/.env.sample` to `./guest/home/.env` and edit the `CLAUDE_CONFIG_REPO` variable to your Git repository containing your Claude Code configuration files
-2. Run `sv c --rebuild` to copy your configuration (only needs to be done once)
-
-Your repository will be cloned to `/Users/sandvault-$USER/.claude/` during setup.
+SandVault supports custom configuration; see `./guest/home/README.md`.
 
 
 ## Why SandVault?

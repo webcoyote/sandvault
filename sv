@@ -73,14 +73,13 @@ SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
 # Functions
 ###############################################################################
 install_tools () {
-    trace "Installing tools..."
-
     # Install brew
     if ! command -v brew &> /dev/null ; then
-        trace "Installing brew..."
+        debug "Installing brew..."
         /usr/bin/env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     fi
 
+    debug "Installing tools..."
     local TOOLS=()
     TOOLS+=("git")      # version control
     TOOLS+=("git-lfs")  # large files
@@ -89,14 +88,14 @@ install_tools () {
     TOOLS+=("python")   # python used for claude hooks
     TOOLS+=("uv")       # run python scripts with uv
 
-    # Hide output of brew if VERBOSE_LEVEL is <3
-    local QUIET=("--quiet")
-    [[ "${VERBOSE_LEVEL:-0}" -lt 3 ]] || QUIET=()
-
     for tool in "${TOOLS[@]}"; do
         if ! command -v "$(basename "$tool")" &>/dev/null ; then
-            trace "Installing $tool"
-            brew install "${QUIET[@]}" "$tool"
+            trace "Installing $tool..."
+            if [[ "${VERBOSE_LEVEL:-0}" -lt 3 ]]; then
+                brew install --quiet "$tool"
+            else
+                brew install "$tool"
+            fi
         fi
     done
 }
@@ -502,7 +501,9 @@ fi
 ###############################################################################
 cleanup_sandvault_processes() {
     # Exit if other sandvault sessions are active
-    local session_count=$(ps -u "$SANDVAULT_USER" -o command | grep -c "/bin/zsh --login" || true)
+    local session_count
+    # shellcheck disable=SC2009 # Consider using pgrep instead of grepping ps output
+    session_count=$(ps -u "$SANDVAULT_USER" -o command | grep -c "/bin/zsh --login" || true)
     if [[ "${session_count:-0}" -ne 0 ]]; then
         trace "$session_count $SANDVAULT_USER sessions still active; skipping cleanup"
         return 0
@@ -511,8 +512,9 @@ cleanup_sandvault_processes() {
     # We're the last session, safe to cleanup all sandvault processes
     # Try to bootout the user session (this terminates all processes)
     trace "Terminating $SANDVAULT_USER user session..."
-    local sandvault_uid=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
-    sudo launchctl bootout user/$sandvault_uid 2>/dev/null || true
+    local sandvault_uid
+    sandvault_uid=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
+    sudo launchctl bootout "user/$sandvault_uid" 2>/dev/null || true
 
     # Brief wait for cleanup
     sleep 0.2

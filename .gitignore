@@ -12,3 +12,6 @@
 # Dynamically created files that shouldn't be committed
 guest/home/.gitconfig
 guest/home/.ssh/authorized_keys
+
+# User directory for storing files that are not committed
+guest/home/user/

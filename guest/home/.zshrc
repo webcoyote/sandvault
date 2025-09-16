@@ -1,24 +1,8 @@
-# .zshrc
+# Ensure current directory is readable
+[[ -r "$PWD" ]] || cd "$HOME"
 
 #export PROMPT="%n@%m %~ %# "
 export PROMPT="%F{magenta}%n %F{blue}%~%f %# "
-
-# Use GNU CLI binaries over outdated OSX CLI binaries
-if command -v brew &>/dev/null ; then
-    BREW_PREFIX="$(brew --prefix)"
-    if [[ -d "$BREW_PREFIX/opt/coreutils/libexec/gnubin" ]]; then
-        export PATH="$BREW_PREFIX/opt/coreutils/libexec/gnubin:$PATH"
-    fi
-    if [[ -d "$BREW_PREFIX/opt/gnu-getopt/bin" ]]; then
-        export PATH="$BREW_PREFIX/opt/gnu-getopt/bin:$PATH"
-    fi
-    if [[ -d "$BREW_PREFIX/opt/python/libexec/bin" ]]; then
-        export PATH="$BREW_PREFIX/opt/python/libexec/bin:$PATH"
-    fi
-fi
-
-# My path has high priority than all others
-export PATH="$HOME/bin:$PATH"
 
 autoload -Uz +X compinit && compinit
 
@@ -58,16 +42,40 @@ else
     alias ll='ls -al'
 fi
 
-# Configure sandbox
-"$HOME/configure.sh" || true
+# Perform sandvault setup
+"$HOME/configure"
 
-# Find a readable directory
+# Use GNU CLI binaries over outdated OSX CLI binaries
+if command -v brew &>/dev/null ; then
+    BREW_PREFIX="$(brew --prefix)"
+    if [[ -d "$BREW_PREFIX/opt/coreutils/libexec/gnubin" ]]; then
+        export PATH="$BREW_PREFIX/opt/coreutils/libexec/gnubin:$PATH"
+    fi
+    if [[ -d "$BREW_PREFIX/opt/findutils/libexec/gnubin" ]]; then
+        export PATH="$BREW_PREFIX/opt/findutils/libexec/gnubin:$PATH"
+    fi
+    if [[ -d "$BREW_PREFIX/opt/gnu-getopt/bin" ]]; then
+        export PATH="$BREW_PREFIX/opt/gnu-getopt/bin:$PATH"
+    fi
+    if [[ -d "$BREW_PREFIX/opt/python/libexec/bin" ]]; then
+        export PATH="$BREW_PREFIX/opt/python/libexec/bin:$PATH"
+    fi
+fi
+
+# Add sandvault and user bin directories
+export PATH="$HOME/bin:$PATH"
+if [[ -d "$HOME/user/bin" ]]; then
+    export PATH="$HOME/user/bin:$PATH"
+fi
+
+# Load user configuration
+[[ -f "$HOME/user/.zshrc" ]] && source "$HOME/user/.zshrc"
+
+# Set directory as requested
 if [[ -r "${INITIAL_DIR:-}" ]]; then
     cd "$INITIAL_DIR"
 elif [[ -r "${SHARED_WORKSPACE:-}" ]]; then
     cd "$SHARED_WORKSPACE"
-elif [[ ! -r "$PWD" ]]; then
-    cd "$HOME"
 fi
 
 # Run specified application
