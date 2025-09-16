@@ -83,3 +83,28 @@ if [[ ! -x "$HOME/node_modules/.bin/claude" ]]; then
     cd "$HOME"
     npm install --silent @anthropic-ai/claude-code@latest
 fi
+
+
+###############################################################################
+# Xcode
+###############################################################################
+# It's really useful to be able to run XCode inside sandvault, especially with
+# worktrees to allow multiple agents to work on the code at the same time.
+#
+# However, the default configuration for Xcode stores build files (e.g. object
+# files) in ~/Library/Developer/Xcode/DerivedData, which is inconvenient because:
+#
+# - these files are only accessible to sandvault-$USER, not $USER
+# - running multiple agents on separate branches causes file-sharing conflicts;
+#   who knows what kind of frankenstein-app will get built when two branches
+#   are compiled into the same folder.
+#
+# The settings below build the Xcode application into the current directory,
+# e.g. $REPO/.DerivedData
+#
+# You'll need to account for this in your .gitignore file. Ta!
+#
+# See https://github.com/webcoyote/sandvault/blob/main/scripts/worktree for a
+# simple implementation of worktrees.
+defaults write com.apple.dt.Xcode DerivedDataLocationStyle Custom
+defaults write com.apple.dt.Xcode IDECustomDerivedDataLocation ".DerivedData"
