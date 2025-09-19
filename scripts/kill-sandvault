@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+###############################################################################
+# Functions
+###############################################################################
+info () {
+    echo >&2 -e "ℹ️ \033[36m$*\033[0m"
+}
+error () {
+    echo >&2 -e "❌ \033[31m$*\033[0m"
+}
+abort () {
+    error "$*"
+    exit 1
+}
+
+SANDVAULT_USER=sandvault-$USER
+if ! SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}') ; then
+    abort "$SANDVAULT_USER does not exist"
+fi
+
+if ! SANDVAULT_PIDS=$(ps -u "$SANDVAULT_USER" -o pid=) ; then
+    info "$SANDVAULT_USER has no processes"
+    exit 0
+fi
+
+info "Booting $SANDVAULT_USER"
+sudo launchctl bootout "user/$SANDVAULT_UID" || true
+sudo /usr/bin/pkill -9 -u "$SANDVAULT_USER" || true
