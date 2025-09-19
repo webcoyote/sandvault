@@ -62,8 +62,13 @@ if command -v brew &>/dev/null ; then
     fi
 fi
 
-# Add sandvault and user bin directories
-export PATH="$HOME/bin:$PATH"
+# sandvault bin directories
+export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
+
+# user bin directories
+if [[ -d "$HOME/user/.local/bin" ]]; then
+    export PATH="$HOME/user/.local/bin:$PATH"
+fi
 if [[ -d "$HOME/user/bin" ]]; then
     export PATH="$HOME/user/bin:$PATH"
 fi

@@ -110,7 +110,9 @@ configure_shared_folder_permssions() {
 
     # Set the owner to $USER on both enable and disable so
     # files owned by sandvault do not get orphaned by uninstall
+    trace "Configuring $SHARED_WORKSPACE permissions..."
     sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
+    trace "Configuring $SHARED_WORKSPACE owner and group..."
     sudo /usr/sbin/chown -f -R "$USER:$(id -gn)" "$SHARED_WORKSPACE"
 
     # Grant write access to shared workspace for sandvault group. We want
@@ -140,9 +142,11 @@ uninstall() {
     sudo rm -rf "$SUDOERS_FILE"
 
     # Remove shared folder ACLS
+    debug "Configuring shared workspace permissions..."
     configure_shared_folder_permssions false
 
     # Remove current user from sandvault group
+    debug "Removing user and group..."
     sudo dseditgroup -o edit -d "$USER" -t user "$SANDVAULT_GROUP" 2>/dev/null || true
 
     # Remove sandvault user from SSH group BEFORE deleting the user
@@ -160,7 +164,9 @@ uninstall() {
     rm -f "$SHARED_WORKSPACE/SANDVAULT-README.md"
     rmdir "$SHARED_WORKSPACE" 2>/dev/null || true
     if [[ -d "$SHARED_WORKSPACE" ]]; then
-        info "Keeping $SHARED_WORKSPACE directory: not empty"
+        info "Keeping $SHARED_WORKSPACE directory (it is not empty)"
+    else
+        debug "Removed $SHARED_WORKSPACE (it was empty)"
     fi
 }
 
