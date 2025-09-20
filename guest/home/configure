@@ -82,12 +82,11 @@ defaults write com.apple.dt.Xcode IDECustomDerivedDataLocation ".DerivedData"
 ###############################################################################
 # Copy user directory contents to $HOME
 ###############################################################################
-# Copy contents of guest/home/user to $HOME, excluding zsh config files
+# Copy contents of guest/home/user to $HOME
 USER_DIR="$SCRIPT_DIR/user"
 if [[ -d "$USER_DIR" ]]; then
     debug "Copying user directory contents to $HOME"
-    # Use rsync to copy while excluding specific files
-    rsync \
+    $(brew --prefix)/bin/rsync \
         --quiet \
         --archive \
         --exclude='.git' \

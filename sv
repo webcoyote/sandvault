@@ -93,6 +93,7 @@ install_tools () {
     TOOLS+=("netcat")   # test network connectivity
     TOOLS+=("node")     # install claude with npm
     TOOLS+=("python")   # python used for claude hooks
+    TOOLS+=("rsync")    # file synchronization
     TOOLS+=("uv")       # run python scripts with uv
 
     for tool in "${TOOLS[@]}"; do
@@ -476,25 +477,20 @@ fi
 
 # Copy files to home directory
 sudo mkdir -p "/Users/$SANDVAULT_USER"
+sudo chown "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER"
 sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
-sudo cp -rf "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/"
 
-# Make sandvault the owner of the files
-sudo chown -R "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER" 2>/dev/null || true
-
-# Fixup file permissions
-#if [[ -d "/Users/$SANDVAULT_USER/.ssh" ]]; then
-#    sudo /bin/chmod 0700 "/Users/$SANDVAULT_USER/.ssh"
-#fi
-#if [[ -f "/Users/$SANDVAULT_USER/authorized_keys" ]]; then
-#    sudo /bin/chmod 0600 "/Users/$SANDVAULT_USER/authorized_keys"
-#fi
-#if [[ -f "/Users/$SANDVAULT_USER/.ssh/id_ed25519" ]]; then
-#    sudo /bin/chmod 0600 "/Users/$SANDVAULT_USER/.ssh/id_ed25519"
-#fi
-#if [[ -f "/Users/$SANDVAULT_USER/.ssh/id_ed25519.pub" ]]; then
-#    sudo /bin/chmod 0644 "/Users/$SANDVAULT_USER/.ssh/id_ed25519.pub"
-#fi
+#sudo cp -rf "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/"
+#sudo chown -R "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER" 2>/dev/null || true
+$(brew --prefix)/bin/rsync \
+    --quiet \
+    --links \
+    --checksum \
+    --recursive \
+    --perms \
+    --times \
+    --chown="$SANDVAULT_USER:$SANDVAULT_GROUP" \
+    "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER"
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     echo "$SUDOERS_BUILD_HOME_SCRIPT_CONTENTS" | sudo tee "$SUDOERS_BUILD_HOME_SCRIPT_NAME" > /dev/null
@@ -504,11 +500,11 @@ EOF
     SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
 
 heredoc SUDOERS_CONTENT << EOF
-# Allow '$USER' to sudo to $SANDVAULT_USER without password and run any command as that user
+# Allow $USER to sudo to $SANDVAULT_USER without password and run any command as that user
 $USER ALL=($SANDVAULT_USER) NOPASSWD: ALL
-# Allow '$USER' to run '$SUDOERS_BUILD_HOME_SCRIPT_NAME'
+# Allow $USER to run $SUDOERS_BUILD_HOME_SCRIPT_NAME
 $USER ALL=(root) NOPASSWD: $SUDOERS_BUILD_HOME_SCRIPT_NAME
-# Allow '$USER' to kill $SANDVAULT_USER processes without password
+# Allow $USER to kill $SANDVAULT_USER processes without password
 $USER ALL=(root) NOPASSWD: /bin/launchctl bootout user/$SANDVAULT_UID
 $USER ALL=(root) NOPASSWD: /usr/bin/pkill -9 -u $SANDVAULT_USER
 EOF
