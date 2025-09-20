@@ -177,6 +177,10 @@ uninstall() {
     # Remove the sudoers file
     sudo rm -rf "$SUDOERS_FILE"
 
+    # Remove home build script
+    sudo rm -rf "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+    sudo rmdir "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")" 2>/dev/null || true
+
     # Remove shared folder ACLS
     debug "Configuring shared workspace permissions..."
     configure_shared_folder_permssions false
@@ -424,44 +428,6 @@ fi
 
 
 ###############################################################################
-# Create passwordless SSH key with permission to remotely login to guest
-###############################################################################
-if [[ "$REBUILD" != "false" ]]; then
-    if [[ ! -f "$SSH_KEYFILE_PRIV" ]] || [[ ! -f "$SSH_KEYFILE_PUB" ]]; then
-        trace "Creating SSH key files..."
-        mkdir -p "$SSH_DIR"
-        /bin/chmod 0700 "$SSH_DIR"
-        ssh-keygen -t ed25519 \
-            -f "$SSH_KEYFILE_PRIV" \
-            -N "" \
-            -q \
-            -C "sandvault-${USER}@${HOSTNAME}"
-    fi
-fi
-
-
-###############################################################################
-# Configure settings
-###############################################################################
-if [[ "$REBUILD" != "false" ]]; then
-    debug "Configuring sandvault dotfiles..."
-
-    # Get git config from host
-    GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
-    GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
-    git config set -f "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
-    git config set -f "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
-    git config set -f "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
-
-    # Add SSH public key to host's authorized_keys
-    GUEST_AUTHORIZED_KEYS="$WORKSPACE/guest/home/.ssh/authorized_keys"
-    mkdir -p "$(dirname "$GUEST_AUTHORIZED_KEYS")"
-    cp "$SSH_KEYFILE_PUB" "$GUEST_AUTHORIZED_KEYS"
-    /bin/chmod 0600 "$GUEST_AUTHORIZED_KEYS"
-fi
-
-
-###############################################################################
 # Create shared workspace directory
 ###############################################################################
 if [[ "$REBUILD" != "false" ]]; then
@@ -492,38 +458,47 @@ fi
 
 
 ###############################################################################
-# Configure sandvault user
-###############################################################################
-if [[ "$REBUILD" != "false" ]]; then
-    debug "Configure $SANDVAULT_USER home directory..."
-
-    # Copy files to home directory
-    sudo mkdir -p "/Users/$SANDVAULT_USER"
-    sudo cp -rf "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/"
-
-    # Make sandvault the owner of the files
-    sudo chown -R "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER" 2>/dev/null || true
-
-    # Fixup file permissions
-    sudo /bin/chmod 0755 "/Users/$SANDVAULT_USER"
-    sudo /bin/chmod 0700 "/Users/$SANDVAULT_USER/.ssh"
-    if [[ -f "/Users/$SANDVAULT_USER/authorized_keys" ]]; then
-        sudo /bin/chmod 0600 "/Users/$SANDVAULT_USER/authorized_keys"
-    fi
-    if [[ -f "/Users/$SANDVAULT_USER/.ssh/id_ed25519" ]]; then
-        sudo /bin/chmod 0600 "/Users/$SANDVAULT_USER/.ssh/id_ed25519"
-    fi
-    if [[ -f "/Users/$SANDVAULT_USER/.ssh/id_ed25519.pub" ]]; then
-        sudo /bin/chmod 0644 "/Users/$SANDVAULT_USER/.ssh/id_ed25519.pub"
-    fi
-fi
-
-
-###############################################################################
 # Configure passwordless sudo to switch to sandvault user
 ###############################################################################
 if [[ "$REBUILD" != "false" ]]; then
     debug "Configuring passwordless access to $SANDVAULT_USER..."
+
+heredoc SUDOERS_BUILD_HOME_SCRIPT_CONTENTS << EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+trap 'echo "\${BASH_SOURCE[0]}: line \$LINENO: \$BASH_COMMAND: exitcode \$?"' ERR
+
+# Verify preconditions
+if [[ ! -d "$WORKSPACE/guest/home" ]]; then
+    echo >&2 "ERROR: '$WORKSPACE/guest/home' directory not found"
+    exit 1
+fi
+
+# Copy files to home directory
+sudo mkdir -p "/Users/$SANDVAULT_USER"
+sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
+sudo cp -rf "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/"
+
+# Make sandvault the owner of the files
+sudo chown -R "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER" 2>/dev/null || true
+
+# Fixup file permissions
+#if [[ -d "/Users/$SANDVAULT_USER/.ssh" ]]; then
+#    sudo /bin/chmod 0700 "/Users/$SANDVAULT_USER/.ssh"
+#fi
+#if [[ -f "/Users/$SANDVAULT_USER/authorized_keys" ]]; then
+#    sudo /bin/chmod 0600 "/Users/$SANDVAULT_USER/authorized_keys"
+#fi
+#if [[ -f "/Users/$SANDVAULT_USER/.ssh/id_ed25519" ]]; then
+#    sudo /bin/chmod 0600 "/Users/$SANDVAULT_USER/.ssh/id_ed25519"
+#fi
+#if [[ -f "/Users/$SANDVAULT_USER/.ssh/id_ed25519.pub" ]]; then
+#    sudo /bin/chmod 0644 "/Users/$SANDVAULT_USER/.ssh/id_ed25519.pub"
+#fi
+EOF
+    sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
+    echo "$SUDOERS_BUILD_HOME_SCRIPT_CONTENTS" | sudo tee "$SUDOERS_BUILD_HOME_SCRIPT_NAME" > /dev/null
+    sudo /bin/chmod 0550 "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
 
     # Get the sandvault user's UID
     SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
@@ -531,6 +506,8 @@ if [[ "$REBUILD" != "false" ]]; then
 heredoc SUDOERS_CONTENT << EOF
 # Allow '$USER' to sudo to $SANDVAULT_USER without password and run any command as that user
 $USER ALL=($SANDVAULT_USER) NOPASSWD: ALL
+# Allow '$USER' to run '$SUDOERS_BUILD_HOME_SCRIPT_NAME'
+$USER ALL=(root) NOPASSWD: $SUDOERS_BUILD_HOME_SCRIPT_NAME
 # Allow '$USER' to kill $SANDVAULT_USER processes without password
 $USER ALL=(root) NOPASSWD: /bin/launchctl bootout user/$SANDVAULT_UID
 $USER ALL=(root) NOPASSWD: /usr/bin/pkill -9 -u $SANDVAULT_USER
@@ -549,49 +526,54 @@ fi
 
 
 ###############################################################################
-# Mark installation as complete
+# Create passwordless SSH key with permission to remotely login to guest
 ###############################################################################
-if [[ "$REBUILD" != "false" ]]; then
-    debug "Creating installation marker..."
-    mkdir -p "$(dirname "$INSTALL_MARKER")"
-    date > "$INSTALL_MARKER"
+if [[ ! -f "$SSH_KEYFILE_PRIV" ]] || [[ ! -f "$SSH_KEYFILE_PUB" ]]; then
+    trace "Creating SSH key files..."
+    mkdir -p "$SSH_DIR"
+    /bin/chmod 0700 "$SSH_DIR"
+    ssh-keygen -t ed25519 \
+        -f "$SSH_KEYFILE_PRIV" \
+        -N "" \
+        -q \
+        -C "${USER}-to-sandvault@${HOSTNAME}"
 fi
 
+# Add SSH public key to host's authorized_keys
+trace "Configuring remote SSH access"
+GUEST_AUTHORIZED_KEYS="$WORKSPACE/guest/home/.ssh/authorized_keys"
+mkdir -p "$(dirname "$GUEST_AUTHORIZED_KEYS")"
+/bin/chmod 0700 "$(dirname "$GUEST_AUTHORIZED_KEYS")"
+cp "$SSH_KEYFILE_PUB" "$GUEST_AUTHORIZED_KEYS"
+/bin/chmod 0600 "$GUEST_AUTHORIZED_KEYS"
+
 
 ###############################################################################
-# Cleanup function for sandvault processes
+# Configure git
 ###############################################################################
-cleanup_sandvault_processes() {
-    # Exit if other sandvault sessions are active
-    local session_count
-    # shellcheck disable=SC2009 # Consider using pgrep instead of grepping ps output
-    session_count=$(ps -u "$SANDVAULT_USER" -o command | grep -c "/bin/zsh --login" || true)
-    if [[ "${session_count:-0}" -ne 0 ]]; then
-        trace "$session_count $SANDVAULT_USER sessions still active; skipping cleanup"
-        return 0
-    fi
+trace "Configuring git..."
 
-    # We're the last session, safe to cleanup all sandvault processes
-    # Try to bootout the user session (this terminates all processes)
-    trace "Terminating $SANDVAULT_USER user session..."
-    local sandvault_uid
-    sandvault_uid=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
-    sudo launchctl bootout "user/$sandvault_uid" 2>/dev/null || true
+# Get git config from host
+GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
+GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
+git config set -f "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
+git config set -f "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
+git config set -f "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
 
-    # Brief wait for cleanup
-    sleep 0.2
 
-    # Final forceful cleanup only if needed
-    if pgrep -u "$SANDVAULT_USER" >/dev/null 2>&1; then
-        trace "Final cleanup of remaining processes..."
-        sudo pkill -9 -u "$SANDVAULT_USER" 2>/dev/null || true
-    fi
+###############################################################################
+# Copy guest/home/. to sandvault $HOME
+###############################################################################
+debug "Configure $SANDVAULT_USER home directory..."
+sudo "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
 
-    # Final check
-    if pgrep -u "$SANDVAULT_USER" >/dev/null 2>&1; then
-        warn "Some $SANDVAULT_USER processes may still be running (likely system daemons)"
-    fi
-}
+
+###############################################################################
+# Mark installation as complete
+###############################################################################
+debug "Creating installation marker..."
+mkdir -p "$(dirname "$INSTALL_MARKER")"
+date > "$INSTALL_MARKER"
 
 
 ###############################################################################
