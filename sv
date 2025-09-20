@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE="$SCRIPT_DIR"
+readonly WORKSPACE="$SCRIPT_DIR"
 
 
 ###############################################################################
@@ -49,29 +49,36 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-VERSION="1.0.5"
+readonly VERSION="1.0.5"
 
 # Each user on the computer can have their own sandvault
-SANDVAULT_USER="sandvault-$USER"
-SANDVAULT_GROUP="sandvault-$USER"
-SHARED_WORKSPACE="/Users/Shared/$SANDVAULT_USER"
+readonly SANDVAULT_USER="sandvault-$USER"
+readonly SANDVAULT_GROUP="sandvault-$USER"
+readonly SHARED_WORKSPACE="/Users/Shared/$SANDVAULT_USER"
+readonly SANDVAULT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,execute,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit"
 
 # Create sudoers.d file for passwordless sudo to sandvault user
-SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
+readonly SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
+readonly SUDOERS_BUILD_HOME_SCRIPT_NAME="/var/sandvault/buildhome-$SANDVAULT_USER"
 
 # Installation marker file
-INSTALL_ORG="$HOME/.config/codeofhonor"
-INSTALL_PRODUCT="$INSTALL_ORG/sandvault"
-INSTALL_MARKER="$INSTALL_PRODUCT/install"
+readonly INSTALL_ORG="$HOME/.config/codeofhonor"
+readonly INSTALL_PRODUCT="$INSTALL_ORG/sandvault"
+readonly INSTALL_MARKER="$INSTALL_PRODUCT/install"
 
-SSH_DIR="$HOME/.ssh"
-SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
-SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
+readonly SSH_DIR="$HOME/.ssh"
+readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
+readonly SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
 
 
 ###############################################################################
 # Functions
 ###############################################################################
+show_version() {
+    echo "$(basename "${BASH_SOURCE[0]}") version $VERSION"
+    exit 0
+}
+
 install_tools () {
     # Install brew
     if ! command -v brew &> /dev/null ; then
@@ -100,9 +107,38 @@ install_tools () {
     done
 }
 
-show_version() {
-    echo "$(basename "${BASH_SOURCE[0]}") version $VERSION"
-    exit 0
+force_cleanup_sandvault_processes() {
+    # Try to bootout the user session (this terminates all processes)
+    trace "Terminating $SANDVAULT_USER user session..."
+    local sandvault_uid
+    if ! sandvault_uid=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}') ; then
+        sudo launchctl bootout "user/$sandvault_uid" 2>/dev/null || true
+        sleep 0.2
+    fi
+
+    # Final forceful cleanup only if needed
+    if pgrep -u "$SANDVAULT_USER" >/dev/null 2>&1; then
+        trace "Final cleanup of remaining processes..."
+        sudo pkill -9 -u "$SANDVAULT_USER" 2>/dev/null || true
+    fi
+
+    # Final check
+    if pgrep -u "$SANDVAULT_USER" >/dev/null 2>&1; then
+        warn "Some $SANDVAULT_USER processes may still be running (likely system daemons)"
+    fi
+}
+
+cleanup_sandvault_processes() {
+    # Exit if other sandvault sessions are active
+    local session_count
+    # shellcheck disable=SC2009 # Consider using pgrep instead of grepping ps output
+    session_count=$(ps -u "$SANDVAULT_USER" -o command | grep -c "/bin/zsh --login" || true)
+    if [[ "${session_count:-0}" -ne 0 ]]; then
+        trace "$session_count $SANDVAULT_USER sessions still active; skipping cleanup"
+    else
+        # We're the last session, safe to cleanup all sandvault processes
+        force_cleanup_sandvault_processes
+    fi
 }
 
 configure_shared_folder_permssions() {
@@ -119,18 +155,18 @@ configure_shared_folder_permssions() {
     # to modify files and symbolic links, not what symbolic links point to.
     # Use `find | xargs chmod -h` instead of `chmod -R -h` because the latter
     # causes: "chmod: the -R and -h options may not be specified together"
-    local rights="group:$SANDVAULT_GROUP allow read,write,execute,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit"
     if [[ "$enable" != "false" ]]; then
-        trace "Configuring $SHARED_WORKSPACE: add $rights (recursively)"
-        sudo find "$SHARED_WORKSPACE" -print0 | xargs -0 sudo /bin/chmod -h +a "$rights"
+        trace "Configuring $SHARED_WORKSPACE: add $SANDVAULT_RIGHTS (recursively)"
+        sudo find "$SHARED_WORKSPACE" -print0 | xargs -0 sudo /bin/chmod -h +a "$SANDVAULT_RIGHTS"
     else
-        trace "Configuring $SHARED_WORKSPACE: remove $rights (recursively)"
-        sudo find "$SHARED_WORKSPACE" -print0 2>/dev/null | xargs -0 sudo /bin/chmod -h -a "$rights" 2>/dev/null || true
+        trace "Configuring $SHARED_WORKSPACE: remove $SANDVAULT_RIGHTS (recursively)"
+        sudo find "$SHARED_WORKSPACE" -print0 2>/dev/null | xargs -0 sudo /bin/chmod -h -a "$SANDVAULT_RIGHTS" 2>/dev/null || true
     fi
 }
 
 uninstall() {
     debug "Uninstalling..."
+    force_cleanup_sandvault_processes
 
     # Remove the install marker file first; it's a sentinel for "everything is complete".
     # By removing it first we force a rebuild if the user wants to run this again.
