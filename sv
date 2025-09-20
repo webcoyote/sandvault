@@ -192,8 +192,9 @@ show_help() {
     echo "  --version            Show version information"
     echo ""
     echo "Commands:"
-    echo "  c, claude [PATH]     Open Claude Code in sandvault"
-    echo "  s, shell  [PATH]     Open shell in sandvault"
+    echo "  cl, claude [PATH]    Open Claude Code in sandvault"
+    echo "  co, codex  [PATH]    Open OpenAI Codex in sandvault"
+    echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove user & files (but not this repo)"
     exit 0
@@ -243,8 +244,12 @@ set -- "${NEW_ARGS[@]}"
 
 # Parse fixed arguments
 case "${1:-}" in
-    c|claude)
+    cl|claude)
         COMMAND=claude
+        INITIAL_DIR="${2:-}"
+        ;;
+    co|codex)
+        COMMAND=codex
         INITIAL_DIR="${2:-}"
         ;;
     s|shell)

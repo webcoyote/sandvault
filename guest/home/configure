@@ -54,16 +54,6 @@ security unlock-keychain -p '' "$LOGIN_KEYCHAIN"
 
 
 ###############################################################################
-# Install claude
-###############################################################################
-if [[ ! -x "$HOME/node_modules/.bin/claude" ]]; then
-    cd "$HOME"
-    debug "Installing claude..."
-    npm install --silent @anthropic-ai/claude-code@latest
-fi
-
-
-###############################################################################
 # Xcode
 ###############################################################################
 # It's really useful to be able to run XCode inside sandvault, especially with

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+if [[ ! -x "$HOME/node_modules/.bin/codex" ]]; then
+    echo >&2 "Installing codex..."
+    npm install --silent @openai/codex@latest
+fi
+
+exec "$HOME/node_modules/.bin/codex" --dangerously-bypass-approvals-and-sandbox "$@"

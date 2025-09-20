@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+if [[ ! -x "$HOME/node_modules/.bin/claude" ]]; then
+    echo >&2 "Installing claude..."
+    npm install --silent @anthropic-ai/claude-code@latest
+fi
+
 exec "$HOME/node_modules/.bin/claude" --dangerously-skip-permissions "$@"

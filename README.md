@@ -1,13 +1,13 @@
 # SandVault
 
-**Run Claude Code safely in a sandboxed macOS user account**
+**Run Claude Code and OpenAI Codex safely in a sandboxed macOS user account**
 
-SandVault creates an isolated user account ("sandvault-$USER") with restricted permissions for running Claude Code and other tools with limited system access. This provides a lightweight alternative to VMs while maintaining security through macOS's built-in user isolation.
+SandVault creates an isolated user account ("sandvault-$USER") with restricted permissions for running AI tools with limited system access. This provides a lightweight alternative to VMs while maintaining security through macOS's built-in user isolation.
 
 
 ## Features
 
-- **Development ready** - Includes Claude Code, Node.js, Python, uv, and Homebrew
+- **Development ready** - Includes Claude Code, OpenAI Codex, Node.js, Python, uv, and Homebrew
 - **Shared workspace** - joint access to `/Users/Shared/sandvault-$USER`
 - **Fast context switching** - No VM overhead, instant user switching
 - **Passwordless** - switch accounts or use SSH without a prompt (after setup)
@@ -25,9 +25,13 @@ cd sandvault
 echo >> ~/.zshrc  'alias sv="/path/to/where/you/cloned/sandvault/sv"'
 echo >> ~/.bashrc 'alias sv="/path/to/where/you/cloned/sandvault/sv"'
 
-# Run Claude in the sandbox
-# shortcut: sv c
+# Run Claude Code in the sandbox
+# shortcut: sv cl
 sv claude
+
+# Run OpenAI Codex in the sandbox
+# shortcut: sv co
+sv codex
 
 # Or a shell
 # shortcut: sv s
@@ -44,7 +48,7 @@ SandVault has limited access to your computer:
 ```
 
 
-## Custom Claude Code Configuration
+## Custom Configuration
 
 SandVault supports custom configuration; see `./guest/home/README.md`.
 
@@ -55,7 +59,8 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 
 - Works natively on macOS without virtualization overhead
 - Provides meaningful isolation without too much complexity
-- Allows running tools like Claude Code with `--dangerously-skip-permissions`
+- Runs Claude Code with `--dangerously-skip-permissions`
+- Runs OpenAI Codex with `--dangerously-bypass-approvals-and-sandbox`
 - Maintains a clean separation between trusted and untrusted code
 
 SandVault uses macOS's Unix heritage and user account system to create a simple but effective sandbox.
@@ -69,8 +74,12 @@ SandVault uses macOS's Unix heritage and user account system to create a simple 
 sv shell [PATH]
 
 # Open Claude Code in sandvault
-# shortcut: sv c
+# shortcut: sv cl
 sv claude [PATH]
+
+# Open OpenAI Codex in sandvault
+# shortcut: sv co
+sv codex [PATH]
 
 # Build sandvault
 # shortcut: sv b
@@ -126,6 +135,7 @@ See [CONTRIBUTORS.md](CONTRIBUTORS.md) for the list of contributors to this proj
 This project builds on the great works of other open-source authors:
 
 - [Claude](https://www.anthropic.com/claude) - AI coding assistant
+- [Codex](https://openai.com/codex/) - AI coding assistant
 - [Homebrew](https://brew.sh): 🍺 The missing package manager for macOS (or Linux)
 - [Shellcheck](https://www.shellcheck.net): finds bugs in your shell scripts
 - [uv](https://docs.astral.sh/uv/): An extremely fast Python package and project manager, written in Rust
