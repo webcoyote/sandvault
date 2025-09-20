@@ -3,5 +3,15 @@
   "bypassPermissionsModeAccepted": true,
   "tipsHistory": {
     "new-user-warmup": 1
+  },
+  "mcpServers": {
+    "ios-simulator-mcp": {
+      "type": "stdio",
+      "command": "/Users/sandvault-pat/bin/connect.sh",
+      "args": [
+        "ios-simulator-mcp"
+      ],
+      "env": {}
+    }
   }
 }

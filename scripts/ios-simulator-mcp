@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Build a sandbox user ("sandvault") for running commands
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+exec npm start --silent --prefix "$SCRIPT_DIR/../../ios-simulator-mcp" "$@"
