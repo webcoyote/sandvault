@@ -26,9 +26,11 @@ echo >> ~/.zshrc  'alias sv="/path/to/where/you/cloned/sandvault/sv"'
 echo >> ~/.bashrc 'alias sv="/path/to/where/you/cloned/sandvault/sv"'
 
 # Run Claude in the sandbox
+# shortcut: sv c
 sv claude
 
 # Or a shell
+# shortcut: sv s
 sv shell
 ```
 
@@ -62,23 +64,24 @@ SandVault uses macOS's Unix heritage and user account system to create a simple 
 ## Commands
 
 ```bash
-# Shell mode (default)
-sv                    # Open sandboxed shell
-sv shell [PATH]       # Open shell at specific path
-sv s [PATH]           # Short alias
+# Open shell (zsh) in sandvault
+# shortcut: sv s
+sv shell [PATH]
 
-# Claude mode
-sv claude [PATH]      # Run Claude Code
-sv c [PATH]           # Short alias
-sv run [PATH]         # Alternative alias
-sv r [PATH]           # Yet another alias
+# Open Claude Code in sandvault
+# shortcut: sv c
+sv claude [PATH]
+
+# Build sandvault
+# shortcut: sv b
+sv build
 
 # SSH mode
 sv --ssh ...          # Connect via SSH instead of sudo
 
 # Management
-sv uninstall          # Remove sandvault user and files
-sv --rebuild ...      # Force rebuild configuration
+sv uninstall          # Remove sandvault (but keep any files in shared directory)
+sv --rebuild ...      # Force rebuild
 sv --version          # Show version
 sv --help             # Show help
 ```

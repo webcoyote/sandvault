@@ -183,7 +183,7 @@ show_help() {
     echo "Usage: $appname [options] command"
     echo ""
     echo "Options:"
-    echo "  -s, --ssh            Use SSH (default: use shell)"
+    echo "  -s, --ssh            Use SSH to connect"
     echo "  -r, --rebuild        Rebuild all files & configuration"
     echo "  -v, --verbose        Enable verbose output (repeat for more verbosity)"
     echo "  -vv                  Set verbosity level 2"
@@ -192,9 +192,9 @@ show_help() {
     echo "  --version            Show version information"
     echo ""
     echo "Commands:"
-    echo "  c, claude [PATH]     Run claude"
-    echo "  r, run    [PATH]     Run claude"
-    echo "  s, shell  [PATH]     Run shell"
+    echo "  c, claude [PATH]     Open Claude Code in sandvault"
+    echo "  s, shell  [PATH]     Open shell in sandvault"
+    echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove user & files (but not this repo)"
     exit 0
 }
@@ -243,13 +243,16 @@ set -- "${NEW_ARGS[@]}"
 
 # Parse fixed arguments
 case "${1:-}" in
-    c|claude|r|run)
+    c|claude)
         COMMAND=claude
         INITIAL_DIR="${2:-}"
         ;;
     s|shell)
         COMMAND=
         INITIAL_DIR="${2:-}"
+        ;;
+    b|build)
+        COMMAND=build
         ;;
     u|uninstall)
         uninstall
@@ -422,15 +425,15 @@ if [[ "$REBUILD" != "false" ]]; then
     This directory is shared with '$SANDVAULT_USER' user.
     The sandvault user has full read/write access here.
 
-    ## To switch to the sandvault run:
+    ## To switch to sandvault:
 
-        "${BASH_SOURCE[0]}"
+        "${BASH_SOURCE[0]} shell"
 
     ## Or create an alias in your $HOME/.zshrc or $HOME/.bashrc
 
         alias sv="${BASH_SOURCE[0]}"
 
-        then run "sv"
+        then run "sv shell"
 EOF
 fi
 
@@ -537,9 +540,14 @@ cleanup_sandvault_processes() {
     fi
 }
 
+
 ###############################################################################
 # Run the application
 ###############################################################################
+if [[ "$COMMAND" == "build" ]]; then
+    exit 0
+fi
+
 # kitty doesn't set this properly :(
 TERM_PROGRAM="${TERM_PROGRAM:-e.g. ghostty, kitty, iTerm, WezTerm}"
 heredoc LOCAL_NETWORK_ERROR << EOF
@@ -587,7 +595,7 @@ else
     trace "Checking passwordless sudo"
     if ! sudo --non-interactive --user="$SANDVAULT_USER" true 2>/dev/null; then
         error "Passwordless sudo to $SANDVAULT_USER user is not configured correctly."
-        error "Please run: ${BASH_SOURCE[0]} --rebuild"
+        error "Please run: ${BASH_SOURCE[0]} build --rebuild"
         exit 1
     fi
 

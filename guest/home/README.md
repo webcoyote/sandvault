@@ -6,4 +6,4 @@ Any zsh configuration files in `user` will be sourced as they are normally:
 
 All files will be copied to the `$HOME` directory during setup.
 
-Run `sv --rebuild shell` or `sv --rebuild claude` to update sandvault after making changes in this directory (only needs to be done once).
+Run `sv build --rebuild` after making changes to files in this directory or its children.
