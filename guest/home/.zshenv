@@ -3,3 +3,6 @@
 
 # Load user configuration
 [[ -f "$HOME/user/.zshenv" ]] && source "$HOME/user/.zshenv"
+
+# Sentinel to indicate application is running inside a vault
+export SANDVAULT=true
