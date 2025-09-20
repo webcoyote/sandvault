@@ -177,10 +177,11 @@ uninstall() {
 VERBOSE_LEVEL="${VERBOSE_LEVEL:-0}"
 REBUILD=false
 MODE=shell
+COMMAND_ARGS=()
 
 show_help() {
     appname=$(basename "${BASH_SOURCE[0]}")
-    echo "Usage: $appname [options] command"
+    echo "Usage: $appname [options] command [-- args...]"
     echo ""
     echo "Options:"
     echo "  -s, --ssh            Use SSH to connect"
@@ -197,6 +198,8 @@ show_help() {
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove user & files (but not this repo)"
+    echo ""
+    echo "Arguments after -- are passed to the command (e.g. claude, codex, shell)"
     exit 0
 }
 
@@ -204,6 +207,15 @@ show_help() {
 NEW_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --)
+            # Everything after -- goes to COMMAND_ARGS
+            shift
+            while [[ $# -gt 0 ]]; do
+                COMMAND_ARGS+=("$1")
+                shift
+            done
+            break
+            ;;
         -s|--ssh)
             MODE=ssh
             shift
@@ -573,6 +585,12 @@ EOF
 # Set up trap to cleanup processes on exit
 trap 'cleanup_sandvault_processes' EXIT
 
+# Prepare command args as a single string
+COMMAND_ARGS_STR=""
+if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
+    printf -v COMMAND_ARGS_STR '%q ' "${COMMAND_ARGS[@]}"
+fi
+
 if [[ "$MODE" == "ssh" ]]; then
     trace "Checking SSH connectivity"
     if ! nc -z "$HOSTNAME" 22 ; then
@@ -591,6 +609,7 @@ if [[ "$MODE" == "ssh" ]]; then
         "$SANDVAULT_USER@$HOSTNAME" \
         /usr/bin/env \
             "COMMAND=$COMMAND" \
+            "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "VERBOSE_LEVEL=${VERBOSE_LEVEL:-0}" \
@@ -618,6 +637,7 @@ else
             "SHELL=/bin/zsh" \
             "TERM=${TERM:-}" \
             "COMMAND=$COMMAND" \
+            "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "VERBOSE_LEVEL=${VERBOSE_LEVEL:-0}" \

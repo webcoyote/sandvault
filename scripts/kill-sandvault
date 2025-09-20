@@ -21,7 +21,7 @@ if ! SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null 
     abort "$SANDVAULT_USER does not exist"
 fi
 
-if ! SANDVAULT_PIDS=$(ps -u "$SANDVAULT_USER" -o pid=) ; then
+if [[ -z "$(ps -u "$SANDVAULT_USER" -o pid=)" ]] ; then
     info "$SANDVAULT_USER has no processes"
     exit 0
 fi
