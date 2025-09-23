@@ -9,11 +9,12 @@ readonly WORKSPACE="$SCRIPT_DIR"
 ###############################################################################
 # Functions
 ###############################################################################
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
 trace () {
-    [[ "${VERBOSE_LEVEL:-0}" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
+    [[ "$VERBOSE" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
 }
 debug () {
-    [[ "${VERBOSE_LEVEL:-0}" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
+    [[ "$VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
 }
 info () {
     echo >&2 -e "ℹ️ \033[36m$*\033[0m"
@@ -99,7 +100,7 @@ install_tools () {
     for tool in "${TOOLS[@]}"; do
         if ! command -v "$(basename "$tool")" &>/dev/null ; then
             trace "Installing $tool..."
-            if [[ "${VERBOSE_LEVEL:-0}" -lt 3 ]]; then
+            if [[ "$VERBOSE" -lt 3 ]]; then
                 brew install --quiet "$tool"
             else
                 brew install "$tool"
@@ -215,7 +216,6 @@ uninstall() {
 ###############################################################################
 # Parse command line
 ###############################################################################
-VERBOSE_LEVEL="${VERBOSE_LEVEL:-0}"
 REBUILD=false
 MODE=shell
 COMMAND_ARGS=()
@@ -266,15 +266,15 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -v|--verbose)
-            ((VERBOSE_LEVEL++)) || true
+            ((VERBOSE++)) || true
             shift
             ;;
         -vv)
-            ((VERBOSE_LEVEL+=2)) || true
+            ((VERBOSE+=2)) || true
             shift
             ;;
         -vvv)
-            ((VERBOSE_LEVEL+=3)) || true
+            ((VERBOSE+=3)) || true
             shift
             ;;
         -h|--help)
@@ -334,7 +334,7 @@ install_tools
 ###############################################################################
 if [[ ! -f "$INSTALL_MARKER" ]]; then
     # Since this is a full rebuild, provide more feedback
-    VERBOSE_LEVEL=$(( VERBOSE_LEVEL > 1 ? VERBOSE_LEVEL : 1 ))
+    VERBOSE=$(( VERBOSE > 1 ? VERBOSE : 1 ))
     info "Installing sandvault..."
     REBUILD=true
 fi
@@ -626,7 +626,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
-            "VERBOSE_LEVEL=${VERBOSE_LEVEL:-0}" \
+            "VERBOSE=$VERBOSE" \
             /bin/zsh --login || true
 else
     # First verify that passwordless sudo is working
@@ -654,6 +654,6 @@ else
             "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
-            "VERBOSE_LEVEL=${VERBOSE_LEVEL:-0}" \
+            "VERBOSE=$VERBOSE" \
             /bin/zsh -c "cd ~ ; exec /bin/zsh --login" || true
 fi

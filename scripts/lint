@@ -19,6 +19,28 @@ cd "$WORKSPACE"
 #
 # awk pattern matches only the first line that starts with '#!'
 # and ends with 'sh'
-fd --hidden -t f '(^[^.]+$|\.sh$)' --exclude '.git' \
-    --exec bash -c "awk 'NR==1 && /^#!/ && /sh$/{exit 0} {exit 1}' '{}' && \
-    shellcheck --check-sourced --external-sources --exclude SC1017 '{}' || true"
+
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
+trace () {
+    [[ "$VERBOSE" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
+}
+debug () {
+    [[ "$VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
+}
+
+RESULT=0
+while IFS= read -r -d '' file; do
+    # Ignore files that don't have shell-script shebang: "#!...sh"
+    if ! awk 'NR==1 && /^#!/ && /sh$/{exit 0} {exit 1}' "$file" ; then
+        trace "Skipping $file (not shell script)"
+        continue
+    fi
+
+    debug "Checking $file"
+    if ! shellcheck --check-sourced --external-sources --exclude SC1017 "$file" ; then
+        RESULT=1
+    fi
+done < <(fd --hidden -t f '(^[^.]+$|\.sh$)' --exclude '.git' -0)
+
+exit $RESULT

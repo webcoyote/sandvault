@@ -8,11 +8,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ###############################################################################
 # Functions
 ###############################################################################
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
 trace () {
-    [[ "${VERBOSE_LEVEL:-0}" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
+    [[ "$VERBOSE" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
 }
 debug () {
-    [[ "${VERBOSE_LEVEL:-0}" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
+    [[ "$VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
 }
 info () {
     echo >&2 -e "ℹ️ \033[36m$*\033[0m"
@@ -86,7 +87,7 @@ defaults write com.apple.dt.Xcode IDECustomDerivedDataLocation ".DerivedData"
 USER_DIR="$SCRIPT_DIR/user"
 if [[ -d "$USER_DIR" ]]; then
     debug "Copying user directory contents to $HOME"
-    $(brew --prefix)/bin/rsync \
+    "$(brew --prefix)/bin/rsync" \
         --quiet \
         --archive \
         --exclude='.git' \
