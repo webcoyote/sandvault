@@ -112,6 +112,7 @@ This provides defense in depth when running untrusted code or experimenting with
 
 - [ClodPod](https://github.com/webcoyote/clodpod) runs Claude Code inside a macOS virtual machine.
 - [Chamber](https://github.com/cirruslabs/chamber) is a proof-of-concept app for running Claude Code inside a macOS virtual machine.
+- [Claude Code Sandbox](https://github.com/textcortex/claude-code-sandbox) runs Claude Code in a Docker container (Linux)
 
 
 # License
