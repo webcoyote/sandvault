@@ -46,7 +46,7 @@ if [[ ! -f "$PROJECT_PATH" ]]; then
 fi
 
 # Check for clean git workspace
-if ! git diff-index --quiet HEAD -- || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+if ! git diff-index --quiet HEAD -- || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
     echo "Error: Git workspace has uncommitted changes or untracked files."
     echo "Please commit or stash your changes before bumping the version."
     git status --short

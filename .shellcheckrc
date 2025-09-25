@@ -1,0 +1,17 @@
+check-sources=true
+external-sources=true
+
+# Enable checks disabled by default
+
+#enable=require-variable-braces         # don't make scripts into perl
+#enable=check-extra-masked-returns      # unnecessary with "set -e"
+
+enable=add-default-case
+enable=avoid-negated-conditions
+enable=avoid-nullary-conditions
+enable=check-set-e-suppressed
+enable=check-unassigned-uppercase
+enable=deprecate-which
+enable=quote-safe-variables
+enable=require-double-brackets
+enable=useless-use-of-cat

@@ -2,23 +2,7 @@
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE="$(realpath "$SCRIPT_DIR/..")"
-cd "$WORKSPACE"
-
-# Find files in workspace
-# ... with no filename extension or a .sh extension
-# ... that have shell shebang (sh/bash/zsh/ksh)
-# ... and run shellcheck on them
-#
-# Disable warnings:
-# - SC1017 => Literal carriage return (ignore Windows line endings)
-#
-# fd regex pattern matches:
-#   ^[^.]+$ - files with no dots (no extension)
-#   \.sh$   - files ending with .sh
-#
-# awk pattern matches only the first line that starts with '#!'
-# and ends with 'sh'
+cd "$SCRIPT_DIR/.."
 
 [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
 
@@ -29,8 +13,37 @@ debug () {
     [[ "$VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
 }
 
-RESULT=0
-while IFS= read -r -d '' file; do
+# Function to find shell script files
+#   ^[^.]+$ - files with no dots (no extension)
+#   \.sh$   - files ending with .sh
+find_shell_files() {
+    local search_path="${1:-.}"
+    fd --hidden -t f '(^[^.]+$|\.sh$)' --exclude '.git' -0 "$search_path"
+}
+
+FILES=()
+if [[ $# -gt 0 ]]; then
+    # Use files specified on the command line
+    for file in "$@"; do
+        if [[ -d "$file" ]]; then
+            # Find all matching files in the directory
+            while IFS= read -r -d '' found_file; do
+                FILES+=("$found_file")
+            done < <(find_shell_files "$file")
+        else
+            FILES+=("$file")
+        fi
+    done
+else
+    # Find all the script files in the entire project
+    while IFS= read -r -d '' file; do
+        FILES+=("$file")
+    done < <(find_shell_files)
+fi
+
+# Scan all the files
+EXITCODE=0
+for file in "${FILES[@]}"; do
     # Ignore files that don't have shell-script shebang: "#!...sh"
     if ! awk 'NR==1 && /^#!/ && /sh$/{exit 0} {exit 1}' "$file" ; then
         trace "Skipping $file (not shell script)"
@@ -38,9 +51,7 @@ while IFS= read -r -d '' file; do
     fi
 
     debug "Checking $file"
-    if ! shellcheck --check-sourced --external-sources --exclude SC1017 "$file" ; then
-        RESULT=1
-    fi
-done < <(fd --hidden -t f '(^[^.]+$|\.sh$)' --exclude '.git' -0)
+    shellcheck "$file" || EXITCODE=1
+done
 
-exit $RESULT
+exit "$EXITCODE"

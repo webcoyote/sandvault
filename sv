@@ -493,6 +493,7 @@ $(brew --prefix)/bin/rsync \
     "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER"
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
+    # shellcheck disable=SC2154 # SUDOERS_BUILD_HOME_SCRIPT_CONTENTS is referenced but not assigned (yes it is)
     echo "$SUDOERS_BUILD_HOME_SCRIPT_CONTENTS" | sudo tee "$SUDOERS_BUILD_HOME_SCRIPT_NAME" > /dev/null
     sudo /bin/chmod 0550 "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
 
@@ -509,6 +510,7 @@ $USER ALL=(root) NOPASSWD: /bin/launchctl bootout user/$SANDVAULT_UID
 $USER ALL=(root) NOPASSWD: /usr/bin/pkill -9 -u $SANDVAULT_USER
 EOF
 
+    # shellcheck disable=SC2154 # SUDOERS_CONTENT is referenced but not assigned (yes it is)
     echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_FILE" > /dev/null
     sudo /bin/chmod 0440 "$SUDOERS_FILE"
 
@@ -608,6 +610,7 @@ fi
 if [[ "$MODE" == "ssh" ]]; then
     trace "Checking SSH connectivity"
     if ! nc -z "$HOSTNAME" 22 ; then
+        # shellcheck disable=SC2154 # LOCAL_NETWORK_ERROR is referenced but not assigned (yes it is)
         error "$LOCAL_NETWORK_ERROR"
         read -n 1 -s -r -p "Press any key to open System Settings"
         open "/System/Library/PreferencePanes/Security.prefPane"
