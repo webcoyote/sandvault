@@ -7,7 +7,7 @@ SandVault creates an isolated user account ("sandvault-$USER") with restricted p
 
 ## Features
 
-- **Development ready** - Includes Claude Code, OpenAI Codex, Node.js, Python, uv, and Homebrew
+- **Development ready** - Includes Claude Code, OpenAI Codex, Google Gemini, Node.js, Python, uv, and Homebrew
 - **Shared workspace** - joint access to `/Users/Shared/sandvault-$USER`
 - **Fast context switching** - No VM overhead, instant user switching
 - **Passwordless** - switch accounts or use SSH without a prompt (after setup)
@@ -32,6 +32,10 @@ sv claude
 # Run OpenAI Codex in the sandbox
 # shortcut: sv co
 sv codex
+
+# Run Google Gemini in the sandbox
+# shortcut: sv g
+sv gemini
 
 # Or a shell
 # shortcut: sv s
@@ -61,6 +65,7 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Provides meaningful isolation without too much complexity
 - Runs Claude Code with `--dangerously-skip-permissions`
 - Runs OpenAI Codex with `--dangerously-bypass-approvals-and-sandbox`
+- Runs Google Gemini
 - Maintains a clean separation between trusted and untrusted code
 
 SandVault uses macOS's Unix heritage and user account system to create a simple but effective sandbox.
@@ -80,6 +85,10 @@ sv claude [PATH]
 # Open OpenAI Codex in sandvault
 # shortcut: sv co
 sv codex [PATH]
+
+# Open Google Gemini in sandvault
+# shortcut: sv g
+sv gemini [PATH]
 
 # Build sandvault
 # shortcut: sv b

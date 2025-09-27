@@ -92,7 +92,7 @@ install_tools () {
     TOOLS+=("git")      # version control
     TOOLS+=("git-lfs")  # large files
     TOOLS+=("netcat")   # test network connectivity
-    TOOLS+=("node")     # install claude with npm
+    TOOLS+=("node")     # npm used to install claude, codex, gemini
     TOOLS+=("python")   # python used for claude hooks
     TOOLS+=("rsync")    # file synchronization
     TOOLS+=("uv")       # run python scripts with uv
@@ -236,11 +236,12 @@ show_help() {
     echo "Commands:"
     echo "  cl, claude [PATH]    Open Claude Code in sandvault"
     echo "  co, codex  [PATH]    Open OpenAI Codex in sandvault"
+    echo "  g,  gemini [PATH]    Open Google Gemini in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove user & files (but not this repo)"
     echo ""
-    echo "Arguments after -- are passed to the command (e.g. claude, codex, shell)"
+    echo "Arguments after -- are passed to command (claude, gemini, codex)"
     exit 0
 }
 
@@ -303,6 +304,10 @@ case "${1:-}" in
         ;;
     co|codex)
         COMMAND=codex
+        INITIAL_DIR="${2:-}"
+        ;;
+    g|gemini)
+        COMMAND=gemini
         INITIAL_DIR="${2:-}"
         ;;
     s|shell)
