@@ -146,21 +146,24 @@ cleanup_sandvault_processes() {
 configure_shared_folder_permssions() {
     local enable="$1"
 
-    # Set the owner to $USER on both enable and disable so
-    # files owned by sandvault do not get orphaned by uninstall
-    trace "Configuring $SHARED_WORKSPACE permissions..."
-    sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
-    trace "Configuring $SHARED_WORKSPACE owner and group..."
-    sudo /usr/sbin/chown -f -R "$USER:$(id -gn)" "$SHARED_WORKSPACE"
-
     # Grant write access to shared workspace for sandvault group. We want
     # to modify files and symbolic links, not what symbolic links point to.
     # Use `find | xargs chmod -h` instead of `chmod -R -h` because the latter
     # causes: "chmod: the -R and -h options may not be specified together"
     if [[ "$enable" != "false" ]]; then
+        # Make workspace accessible to $USER and $SANDVAULT_GROUP only
+        trace "Configuring $SHARED_WORKSPACE permissions..."
+        sudo /bin/chmod 0770 "$SHARED_WORKSPACE"
+        trace "Configuring $SHARED_WORKSPACE: set owner to $USER:$SANDVAULT_GROUP"
+        sudo /usr/sbin/chown -f -R "$USER:$SANDVAULT_GROUP" "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE: add $SANDVAULT_RIGHTS (recursively)"
         sudo find "$SHARED_WORKSPACE" -print0 | xargs -0 sudo /bin/chmod -h +a "$SANDVAULT_RIGHTS"
     else
+        # Make workspace accessible to $USER only
+        trace "Configuring $SHARED_WORKSPACE permissions..."
+        sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
+        trace "Configuring $SHARED_WORKSPACE: restoring owner to $USER:$(id -gn)"
+        sudo /usr/sbin/chown -f -R "$USER:$(id -gn)" "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE: remove $SANDVAULT_RIGHTS (recursively)"
         sudo find "$SHARED_WORKSPACE" -print0 2>/dev/null | xargs -0 sudo /bin/chmod -h -a "$SANDVAULT_RIGHTS" 2>/dev/null || true
     fi
@@ -239,7 +242,7 @@ show_help() {
     echo "  g,  gemini [PATH]    Open Google Gemini in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
-    echo "  u, uninstall         Remove user but do not delete shared files"
+    echo "  u, uninstall         Remove sandvault; keep shared files"
     echo ""
     echo "Arguments after -- are passed to command (claude, gemini, codex)"
     exit 0
@@ -485,8 +488,8 @@ sudo mkdir -p "/Users/$SANDVAULT_USER"
 sudo chown "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER"
 sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 
-#sudo cp -rf "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/"
-#sudo chown -R "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER" 2>/dev/null || true
+# Copy files preserving permissions for contents only
+# (trailing slash on destination ensures it isn't modified)
 $(brew --prefix)/bin/rsync \
     --quiet \
     --links \
@@ -495,7 +498,7 @@ $(brew --prefix)/bin/rsync \
     --perms \
     --times \
     --chown="$SANDVAULT_USER:$SANDVAULT_GROUP" \
-    "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER"
+    "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/"
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     # shellcheck disable=SC2154 # SUDOERS_BUILD_HOME_SCRIPT_CONTENTS is referenced but not assigned (yes it is)
