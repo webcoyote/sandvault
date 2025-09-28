@@ -113,7 +113,7 @@ force_cleanup_sandvault_processes() {
     # Try to bootout the user session (this terminates all processes)
     trace "Terminating $SANDVAULT_USER user session..."
     local sandvault_uid
-    if ! sandvault_uid=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}') ; then
+    if sandvault_uid=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}') ; then
         sudo launchctl bootout "user/$sandvault_uid" 2>/dev/null || true
         sleep 0.2
     fi
