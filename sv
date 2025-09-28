@@ -56,7 +56,7 @@ readonly VERSION="1.0.5"
 readonly SANDVAULT_USER="sandvault-$USER"
 readonly SANDVAULT_GROUP="sandvault-$USER"
 readonly SHARED_WORKSPACE="/Users/Shared/$SANDVAULT_USER"
-readonly SANDVAULT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,execute,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit"
+readonly SANDVAULT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit"
 
 # Create sudoers.d file for passwordless sudo to sandvault user
 readonly SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
@@ -179,7 +179,7 @@ uninstall() {
     # Remove the sudoers file
     sudo rm -rf "$SUDOERS_FILE"
 
-    # Remove home build script
+    # Remove build home script
     sudo rm -rf "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
     sudo rmdir "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")" 2>/dev/null || true
 
@@ -239,7 +239,7 @@ show_help() {
     echo "  g,  gemini [PATH]    Open Google Gemini in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
-    echo "  u, uninstall         Remove user & files (but not this repo)"
+    echo "  u, uninstall         Remove user but do not delete shared files"
     echo ""
     echo "Arguments after -- are passed to command (claude, gemini, codex)"
     exit 0
