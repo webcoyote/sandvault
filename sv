@@ -55,7 +55,7 @@ readonly VERSION="1.0.5"
 # Each user on the computer can have their own sandvault
 readonly SANDVAULT_USER="sandvault-$USER"
 readonly SANDVAULT_GROUP="sandvault-$USER"
-readonly SHARED_WORKSPACE="/Users/Shared/$SANDVAULT_USER"
+readonly SHARED_WORKSPACE="/Users/Shared/sv-$USER"
 readonly SANDVAULT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit"
 
 # Create sudoers.d file for passwordless sudo to sandvault user
