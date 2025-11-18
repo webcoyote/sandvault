@@ -1,3 +1,11 @@
+<div align="center" id="sandvault">
+<a href="https://github.com/webcoyote/sandvault" title="sandvault">
+  <img src="./assets/icon.jpg" alt="Sandvault Banner" width="128">
+</a>
+</div>
+
+---
+
 # SandVault
 
 **Run Claude Code and OpenAI Codex safely in a sandboxed macOS user account**
