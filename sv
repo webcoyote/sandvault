@@ -326,6 +326,9 @@ case "${1:-}" in
 esac
 INITIAL_DIR="${INITIAL_DIR:-$PWD}"
 
+# Resolve symlinks to get the real path
+INITIAL_DIR="$(cd "$INITIAL_DIR" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
+
 
 ###############################################################################
 # Setup
