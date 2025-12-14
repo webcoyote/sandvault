@@ -97,16 +97,12 @@ install_tools () {
     TOOLS+=("rsync")    # file synchronization
     TOOLS+=("uv")       # run python scripts with uv
 
-    for tool in "${TOOLS[@]}"; do
-        if ! command -v "$(basename "$tool")" &>/dev/null ; then
-            trace "Installing $tool..."
-            if [[ "$VERBOSE" -lt 3 ]]; then
-                brew install --quiet "$tool"
-            else
-                brew install "$tool"
-            fi
-        fi
-    done
+    trace "brew install ${TOOLS[@]}..."
+    if [[ "$VERBOSE" -lt 3 ]]; then
+        brew install --quiet "${TOOLS[@]}"
+    else
+        brew install "${TOOLS[@]}"
+    fi
 }
 
 force_cleanup_sandvault_processes() {
