@@ -96,7 +96,7 @@ install_tools () {
     TOOLS+=("rsync")    # file synchronization
     TOOLS+=("uv")       # run python scripts with uv
 
-    trace "brew install ${TOOLS[@]}..."
+    trace "brew install " "${TOOLS[@]}" "..."
     if [[ "$VERBOSE" -lt 3 ]]; then
         brew install --quiet "${TOOLS[@]}"
     else
@@ -488,7 +488,10 @@ sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 
 # Copy files preserving permissions for contents only
 # (trailing slash on destination ensures it isn't modified)
-$(brew --prefix)/bin/rsync \
+# Use the full path to the homebrew rsync binary:
+# - OSX default rsync has different options
+# - Homebrew rsync may not be linked into the brew path
+"$(brew --prefix)/opt/rsync/bin/rsync" \
     --quiet \
     --links \
     --checksum \
