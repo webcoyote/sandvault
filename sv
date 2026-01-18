@@ -81,9 +81,9 @@ show_version() {
 }
 
 install_tools () {
-    # Install brew
+    # Install Homebrew
     if ! command -v brew &> /dev/null ; then
-        debug "Installing brew..."
+        debug "Installing Homebrew..."
         /usr/bin/env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     fi
 
@@ -489,9 +489,9 @@ sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 # Copy files preserving permissions for contents only
 # (trailing slash on destination ensures it isn't modified)
 # Use the full path to the homebrew rsync binary:
-# - OSX default rsync has different options
-# - Homebrew rsync may not be linked into the brew path
-"$(brew --prefix)/opt/rsync/bin/rsync" \
+# - macOS' default rsync has different options
+# - Homebrew rsync may not be linked into the PATH
+"$(brew --prefix rsync)/bin/rsync" \
     --quiet \
     --links \
     --checksum \
