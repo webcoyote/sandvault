@@ -2,7 +2,7 @@
 # Build a sandbox user ("sandvault") for running commands
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)"
 readonly WORKSPACE="$SCRIPT_DIR"
 
 
@@ -90,7 +90,6 @@ install_tools () {
     debug "Installing tools..."
     local TOOLS=()
     TOOLS+=("git")      # version control
-    TOOLS+=("git-lfs")  # large files
     TOOLS+=("netcat")   # test network connectivity
     TOOLS+=("node")     # npm used to install claude, codex, gemini
     TOOLS+=("python")   # python used for claude hooks

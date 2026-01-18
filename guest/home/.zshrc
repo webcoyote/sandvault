@@ -4,6 +4,9 @@
 # Set custom prompt
 export PROMPT="%F{magenta}%n %F{blue}%~%f %# "
 
+# Bootstrap brew
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+
 # Perform sandvault setup
 "$HOME/configure"
 
