@@ -90,7 +90,6 @@ install_tools () {
     debug "Installing tools..."
     local TOOLS=()
     TOOLS+=("git")      # version control
-    TOOLS+=("git-lfs")  # large files
     TOOLS+=("netcat")   # test network connectivity
     TOOLS+=("node")     # npm used to install claude, codex, gemini
     TOOLS+=("python")   # python used for claude hooks
