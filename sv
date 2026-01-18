@@ -293,7 +293,7 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-set -- "${NEW_ARGS[@]}"
+set -- "${NEW_ARGS[@]:-}"
 
 # Parse fixed arguments
 case "${1:-}" in
