@@ -42,6 +42,9 @@ else
     alias ll='ls -al'
 fi
 
+# Bootstrap brew
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+
 # Perform sandvault setup
 "$HOME/configure"
 
