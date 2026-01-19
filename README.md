@@ -1,8 +1,8 @@
 # SandVault
 
-**Run Claude Code and OpenAI Codex safely in a sandboxed macOS user account**
+**Run Claude Code, OpenAI Codex, and Google Gemini safely in a sandboxed macOS user account**
 
-SandVault creates an isolated user account ("sandvault-$USER") with restricted permissions for running AI tools with limited system access. This provides a lightweight alternative to VMs while maintaining security through macOS's built-in user isolation.
+SandVault creates an isolated user account ("sandvault-$USER") with restricted permissions for running AI agents with limited system access. This provides a lightweight alternative to VMs while maintaining security through macOS's built-in user isolation.
 
 
 ## Features
@@ -14,17 +14,30 @@ SandVault creates an isolated user account ("sandvault-$USER") with restricted p
 - **Clean uninstall** - Complete removal with `sv uninstall`
 
 
-## Quick Start
+## Installation
+
+Install via Homebrew:
+
+```bash
+brew install sandvault
+```
+
+Install via git:
 
 ```bash
 # Clone the repository
 git clone https://github.com/webcoyote/sandvault
 cd sandvault
 
-# Add to your shell configuration for easy access:
+# Add to your shell configuration for easy access
 echo >> ~/.zshrc  'alias sv="/path/to/where/you/cloned/sandvault/sv"'
 echo >> ~/.bashrc 'alias sv="/path/to/where/you/cloned/sandvault/sv"'
+```
 
+
+## Quick Start
+
+```bash
 # Run Claude Code in the sandbox
 # shortcut: sv cl
 sv claude
@@ -65,7 +78,7 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Provides meaningful isolation without too much complexity
 - Runs Claude Code with `--dangerously-skip-permissions`
 - Runs OpenAI Codex with `--dangerously-bypass-approvals-and-sandbox`
-- Runs Google Gemini
+- Runs Google Gemini with `--yolo`
 - Maintains a clean separation between trusted and untrusted code
 
 SandVault uses macOS's Unix heritage and user account system to create a simple but effective sandbox.
@@ -128,7 +141,7 @@ This provides defense in depth when running untrusted code or experimenting with
 
 Apache License, Version 2.0
 
-SandVault Copyright © 2025 Patrick Wyatt
+SandVault Copyright © 2026 Patrick Wyatt
 
 See [LICENSE.md](LICENSE.md) for details.
 
