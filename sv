@@ -50,7 +50,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.1.0"
+readonly VERSION="1.1.1"
 
 # Each user on the computer can have their own sandvault
 readonly SANDVAULT_USER="sandvault-$USER"
