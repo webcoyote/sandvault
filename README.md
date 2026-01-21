@@ -8,7 +8,7 @@ SandVault creates an isolated user account ("sandvault-$USER") with restricted p
 ## Features
 
 - **Development ready** - Includes Claude Code, OpenAI Codex, Google Gemini, Node.js, Python, uv, and Homebrew
-- **Shared workspace** - joint access to `/Users/Shared/sandvault-$USER`
+- **Shared workspace** - joint access to `/Users/Shared/sv-$USER`
 - **Fast context switching** - No VM overhead, instant user switching
 - **Passwordless** - switch accounts or use SSH without a prompt (after setup)
 - **Clean uninstall** - Complete removal with `sv uninstall`
@@ -58,7 +58,7 @@ sv shell
 SandVault has limited access to your computer:
 
 ```
-- writable:  /Users/Shared/sandvault-$USER  -- only accessible by you & sandvault-$USER
+- writable:  /Users/Shared/sv-$USER         -- only accessible by you & sandvault-$USER
 - writable:  /Users/sandvault-$USER         -- sandvault's home directory
 - readable:  /usr, /bin, /etc, /opt         -- system directories
 - no access: /Users/*                       -- other user directories
