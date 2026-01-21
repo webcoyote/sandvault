@@ -699,9 +699,8 @@ if [[ "$MODE" == "ssh" ]]; then
                 "COMMAND_ARGS=$COMMAND_ARGS_STR" \
                 "INITIAL_DIR=$INITIAL_DIR" \
                 "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
-                "TMPDIR=$(mktemp -d)" \
                 "VERBOSE=$VERBOSE" \
-                /bin/zsh --login || true
+                /bin/zsh -c 'export TMPDIR=$(mktemp -d); cd ~; exec /bin/zsh --login' || true
 else
     # First verify that passwordless sudo is working
     trace "Checking passwordless sudo"
@@ -729,8 +728,7 @@ else
             "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
-            "TMPDIR=$(mktemp -d)" \
             "VERBOSE=$VERBOSE" \
             /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
-                /bin/zsh -c "cd ~ ; exec /bin/zsh --login" || true
+                /bin/zsh -c 'export TMPDIR=$(mktemp -d); cd ~; exec /bin/zsh --login' || true
 fi
