@@ -145,11 +145,6 @@ cleanup_sandvault_processes() {
     fi
 }
 
-add_user_to_ssh_group() {
-    # do not use sudo dscl; it creates duplicate entries
-    sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
-}
-
 configure_shared_folder_permssions() {
     local enable="$1"
 
@@ -449,12 +444,16 @@ fi
 # SSH mode: must configure (core functionality)
 if [[ "$REBUILD" != "false" ]] || [[ "$MODE" == "ssh" ]]; then
     if dscl . -read /Groups/com.apple.access_ssh &>/dev/null; then
-        add_user_to_ssh_group
+        # Remote Login is enabled; ensure sandvault user can SSH
+        if ! dseditgroup -o checkmember -m "$SANDVAULT_USER" com.apple.access_ssh &>/dev/null; then
+            # do not use sudo dscl; it creates duplicate entries
+            sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
+        fi
     elif [[ "$MODE" == "ssh" ]]; then
+        # Remote Login is disabled and SSH mode requested
         abort "Remote Login via SSH is not enabled. Enable it in System Settings → General → Sharing → Remote Login"
-    #else
-        # REBUILD set but Remote Login not enabled - skip SSH config silently
     fi
+    # else: Remote Login disabled but not using SSH mode; skip silently
 fi
 
 
