@@ -87,7 +87,6 @@ install_tools () {
         /usr/bin/env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     fi
 
-    debug "Installing tools..."
     local TOOLS=()
     TOOLS+=("git")      # version control
     TOOLS+=("netcat")   # test network connectivity
@@ -96,11 +95,19 @@ install_tools () {
     TOOLS+=("rsync")    # file synchronization
     TOOLS+=("uv")       # run python scripts with uv
 
-    trace "brew install " "${TOOLS[@]}" "..."
-    if [[ "$VERBOSE" -lt 3 ]]; then
-        brew install --quiet "${TOOLS[@]}"
-    else
-        brew install "${TOOLS[@]}"
+    # Only install tools if necessary
+    local LIST_COUNT
+    local BREW_COUNT
+    LIST_COUNT="$(echo "${TOOLS[@]}" | wc -w)"
+    BREW_COUNT="$(brew list --versions "${TOOLS[@]}" | awk '{print $1}' | wc -w || true)"
+    if [[ "$LIST_COUNT" != "$BREW_COUNT" ]]; then
+        debug "Installing tools..."
+        trace "brew install " "${TOOLS[@]}" "..."
+        if [[ "$VERBOSE" -lt 3 ]]; then
+            brew install --quiet "${TOOLS[@]}"
+        else
+            brew install "${TOOLS[@]}"
+        fi
     fi
 }
 
