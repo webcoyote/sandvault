@@ -138,6 +138,11 @@ cleanup_sandvault_processes() {
     fi
 }
 
+add_user_to_ssh_group() {
+    # do not use sudo dscl; it creates duplicate entries
+    sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
+}
+
 configure_shared_folder_permssions() {
     local enable="$1"
 
@@ -424,13 +429,25 @@ if [[ "$REBUILD" != "false" ]]; then
     # Remove sandvault user from "staff" group so it doesn't have access to most files
     sudo dseditgroup -o edit -d "$SANDVAULT_USER" -t user staff 2>/dev/null || true
 
-    # Add to SSH access group (required for SSH login)
-    # do not use sudo dscl; it creates duplicate entries
-    sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
-
     # Add current user to the sandvault group
     trace "Adding $USER to $SANDVAULT_GROUP group..."
     sudo dseditgroup -o edit -a "$USER" -t user "$SANDVAULT_GROUP"
+fi
+
+
+###############################################################################
+# Manage SSH access
+###############################################################################
+# REBUILD mode: always configure
+# SSH mode: must configure (core functionality)
+if [[ "$REBUILD" != "false" ]] || [[ "$MODE" == "ssh" ]]; then
+    if dscl . -read /Groups/com.apple.access_ssh &>/dev/null; then
+        add_user_to_ssh_group
+    elif [[ "$MODE" == "ssh" ]]; then
+        abort "Remote Login via SSH is not enabled. Enable it in System Settings → General → Sharing → Remote Login"
+    #else
+        # REBUILD set but Remote Login not enabled - skip SSH config silently
+    fi
 fi
 
 
