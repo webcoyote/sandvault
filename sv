@@ -71,6 +71,10 @@ readonly SSH_DIR="$HOME/.ssh"
 readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
 readonly SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
 
+# Sandbox profile to restrict /Volumes access (external drives)
+# Stored in /var/sandvault/ so sandvault user cannot modify it
+readonly SANDBOX_PROFILE="/var/sandvault/sandbox-$SANDVAULT_USER.sb"
+
 
 ###############################################################################
 # Functions
@@ -184,8 +188,9 @@ uninstall() {
     # Remove the sudoers file
     sudo rm -rf "$SUDOERS_FILE"
 
-    # Remove build home script
+    # Remove build home script and sandbox profile
     sudo rm -rf "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+    sudo rm -rf "$SANDBOX_PROFILE"
     sudo rmdir "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")" 2>/dev/null || true
 
     # Remove shared folder ACLS
@@ -348,11 +353,11 @@ install_tools
 if [[ ! -f "$INSTALL_MARKER" ]]; then
     # Since this is a full rebuild, provide more feedback
     VERBOSE=$(( VERBOSE > 1 ? VERBOSE : 1 ))
-    info "Installing sandvault..."
     REBUILD=true
 fi
 
 if [[ "$REBUILD" != "false" ]]; then
+    info "Installing sandvault..."
     sudo "-p Password required to create sandvault: " true
 fi
 
@@ -556,6 +561,33 @@ fi
 
 
 ###############################################################################
+# Configure sandbox-exec
+###############################################################################
+if [[ "$REBUILD" != "false" ]] || [[ ! -f "$SANDBOX_PROFILE" ]]; then
+    debug "Configuring passwordless access to $SANDVAULT_USER..."
+
+    # Create sandbox profile to restrict /Volumes access, which prevents
+    # sandvault user from modifying removable drives. Issue discovered by
+    # by Github user redLocomotive.
+    #
+    # The profile file is owned by root so sandvault user cannot modify it.
+    debug "Creating sandbox profile..."
+heredoc SANDBOX_PROFILE_CONTENT << 'EOF'
+;; Sandbox profile for sandvault - restricts access to external drives
+(version 1)
+(allow default)
+(deny file-read* (subpath "/Volumes"))
+(deny file-write* (subpath "/Volumes"))
+(allow file-read* (subpath "/Volumes/Macintosh HD"))
+(allow file-write* (subpath "/Volumes/Macintosh HD"))
+EOF
+    # shellcheck disable=SC2154
+    echo "$SANDBOX_PROFILE_CONTENT" | sudo tee "$SANDBOX_PROFILE" > /dev/null
+    sudo /bin/chmod 0444 "$SANDBOX_PROFILE"
+fi
+
+
+###############################################################################
 # Create passwordless SSH key with permission to remotely login to guest
 ###############################################################################
 if [[ ! -f "$SSH_KEYFILE_PRIV" ]] || [[ ! -f "$SSH_KEYFILE_PUB" ]]; then
@@ -661,14 +693,15 @@ if [[ "$MODE" == "ssh" ]]; then
         -o UserKnownHostsFile=/dev/null \
         -i "$SSH_KEYFILE_PRIV" \
         "$SANDVAULT_USER@$HOSTNAME" \
-        /usr/bin/env \
-            "COMMAND=$COMMAND" \
-            "COMMAND_ARGS=$COMMAND_ARGS_STR" \
-            "INITIAL_DIR=$INITIAL_DIR" \
-            "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
-            "TMPDIR=$(mktemp -d)" \
-            "VERBOSE=$VERBOSE" \
-            /bin/zsh --login || true
+        /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
+            /usr/bin/env \
+                "COMMAND=$COMMAND" \
+                "COMMAND_ARGS=$COMMAND_ARGS_STR" \
+                "INITIAL_DIR=$INITIAL_DIR" \
+                "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
+                "TMPDIR=$(mktemp -d)" \
+                "VERBOSE=$VERBOSE" \
+                /bin/zsh --login || true
 else
     # First verify that passwordless sudo is working
     trace "Checking passwordless sudo"
@@ -681,6 +714,7 @@ else
     # Launch interactive shell as sandvault user
     # Use sudo with -H to set HOME correctly
     # Use env to ensure the environment is cleared, otherwise PATH carries over
+    # Use sandbox-exec to restrict access to external drives
     debug "Shell $SANDVAULT_USER@$HOSTNAME"
     sudo \
         --login \
@@ -697,5 +731,6 @@ else
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "TMPDIR=$(mktemp -d)" \
             "VERBOSE=$VERBOSE" \
-            /bin/zsh -c "cd ~ ; exec /bin/zsh --login" || true
+            /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
+                /bin/zsh -c "cd ~ ; exec /bin/zsh --login" || true
 fi
