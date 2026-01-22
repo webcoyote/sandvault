@@ -1,5 +1,6 @@
 check-sources=true
 external-sources=true
+source-path=SCRIPTDIR
 
 # Enable checks disabled by default
 
