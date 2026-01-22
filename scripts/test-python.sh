@@ -9,6 +9,9 @@ echo "===================="
 
 cd "$PROJECT_ROOT"
 
+# Set PYTHONPATH to include the hooks directory for imports
+export PYTHONPATH="$PROJECT_ROOT/guest/home/user/.claude/hooks${PYTHONPATH:+:$PYTHONPATH}"
+
 # Use uv to run pytest (handles virtual environment automatically)
 # This is consistent with how the project already runs Python scripts
 if command -v uv &> /dev/null; then
