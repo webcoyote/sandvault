@@ -14,11 +14,7 @@ guest/home/.gitconfig
 guest/home/.ssh/authorized_keys
 
 # User directory for storing files that are not committed
-# Ignore user directory EXCEPT the hooks
-guest/home/user/*
-!guest/home/user/.claude
-guest/home/user/.claude/*
-!guest/home/user/.claude/hooks
-guest/home/user/.claude/hooks/__pycache__
-guest/home/user/.claude/hooks/utils/__pycache__
-guest/home/user/.claude/hooks/utils/*/__pycache__
+guest/home/user/
+
+# Python cache directories
+**/__pycache__/
