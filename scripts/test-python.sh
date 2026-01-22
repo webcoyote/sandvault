@@ -18,8 +18,12 @@ if command -v uv &> /dev/null; then
     uv run --with pytest pytest tests/python/ -v --tb=short
 else
     # Fallback: use python -m pytest to ensure correct environment
-    # Use 'python' (not python3) since setup-python action configures 'python'
-    PYTHON_CMD="${PYTHON:-python}"
+    # Use pythonLocation from setup-python action if available, otherwise fall back to PYTHON env var
+    if [[ -n "${pythonLocation:-}" ]]; then
+        PYTHON_CMD="${pythonLocation}/bin/python"
+    else
+        PYTHON_CMD="${PYTHON:-python}"
+    fi
     if $PYTHON_CMD -c "import pytest" &> /dev/null; then
         $PYTHON_CMD -m pytest tests/python/ -v --tb=short
     else
