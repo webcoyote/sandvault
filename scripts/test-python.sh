@@ -14,15 +14,15 @@ cd "$PROJECT_ROOT"
 if command -v uv &> /dev/null; then
     uv run --with pytest pytest tests/python/ -v --tb=short
 else
-    # Fallback: try system pytest or create venv
-    if command -v pytest &> /dev/null; then
-        pytest tests/python/ -v --tb=short
+    # Fallback: use python -m pytest to ensure correct environment
+    if python3 -c "import pytest" &> /dev/null; then
+        python3 -m pytest tests/python/ -v --tb=short
     else
         echo "Creating virtual environment..."
         python3 -m venv .venv
         # shellcheck disable=SC1091  # .venv created at runtime
         source .venv/bin/activate
         pip install pytest
-        pytest tests/python/ -v --tb=short
+        python3 -m pytest tests/python/ -v --tb=short
     fi
 fi
