@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Test the sv CLI and sandbox security
 set -Eeuo pipefail
+START_TIME=$(date +%s.%N)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SV="$SCRIPT_DIR/../sv"
@@ -161,6 +162,31 @@ assert_sandbox_contains "can run pwd" "pwd" "/"
 
 ###############################################################################
 echo ""
+echo "=== Initial Directory Tests ==="
+###############################################################################
+
+# Test that unreadable directory falls back to SHARED_WORKSPACE
+# Host user's home directory should not be readable by sandvault user
+((TESTS_RUN++)) || true
+output=$(cd "$HOST_HOME" && echo "pwd ; exit" | "$SV" s 2>&1)
+if [[ "$output" == *"$SHARED_WORKSPACE"* ]]; then
+    pass "unreadable directory falls back to SHARED_WORKSPACE"
+else
+    fail "unreadable directory falls back to SHARED_WORKSPACE" "$SHARED_WORKSPACE" "$output"
+fi
+
+# Test that readable directory is used as working directory
+# /Users is readable by all users
+((TESTS_RUN++)) || true
+output=$(cd /Users && echo "pwd ; exit" | "$SV" s 2>&1)
+if [[ "$output" == *"/Users"* ]]; then
+    pass "readable directory is used as working directory"
+else
+    fail "readable directory is used as working directory" "/Users" "$output"
+fi
+
+###############################################################################
+echo ""
 echo "=== Summary ==="
 ###############################################################################
 
@@ -171,3 +197,7 @@ echo -e "Failed: ${RED}$TESTS_FAILED${NC}"
 if [[ "$TESTS_FAILED" -gt 0 ]]; then
     exit 1
 fi
+
+END_TIME=$(date +%s.%N)
+ELAPSED_TIME=$(echo "$END_TIME - $START_TIME" | bc --mathlib | xargs printf "%.2f\n")
+echo -e "✅ Tests completed in $ELAPSED_TIME seconds!"

@@ -694,6 +694,9 @@ if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
     printf -v COMMAND_ARGS_STR '%q ' "${COMMAND_ARGS[@]}"
 fi
 
+# Unique session id for this invocation (used by shell init scripts)
+SV_SESSION_ID="${SV_SESSION_ID:-$(/usr/bin/uuidgen)}"
+
 # TMPDIR: claude (and perhaps other AI agents) creates temporary directories in locations
 # that are shared, e.g. /tmp/claude and /private/tmp/claude, which doesn't work when there
 # are multiple users running the agent on the same computer. Try to correct for this by
@@ -722,6 +725,7 @@ if [[ "$MODE" == "ssh" ]]; then
                 "COMMAND_ARGS=$COMMAND_ARGS_STR" \
                 "INITIAL_DIR=$INITIAL_DIR" \
                 "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
+                "SV_SESSION_ID=$SV_SESSION_ID" \
                 "VERBOSE=$VERBOSE" \
                 /bin/zsh -c 'export TMPDIR=$(mktemp -d); cd ~; exec /bin/zsh --login' || true
 else
@@ -751,6 +755,7 @@ else
             "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
+            "SV_SESSION_ID=$SV_SESSION_ID" \
             "VERBOSE=$VERBOSE" \
             /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
                 /bin/zsh -c 'export TMPDIR=$(mktemp -d); cd ~; exec /bin/zsh --login' || true
