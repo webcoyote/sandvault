@@ -67,6 +67,10 @@ readonly INSTALL_ORG="$HOME/.config/codeofhonor"
 readonly INSTALL_PRODUCT="$INSTALL_ORG/sandvault"
 readonly INSTALL_MARKER="$INSTALL_PRODUCT/install"
 
+# Session tracking for safe multi-instance cleanup
+readonly SESSION_DIR="$HOME/.local/state/sandvault"
+readonly SESSION_FILE="$SESSION_DIR/sandvault.count"
+
 readonly SSH_DIR="$HOME/.ssh"
 readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
 readonly SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
@@ -92,6 +96,7 @@ install_tools () {
     fi
 
     local TOOLS=()
+    TOOLS+=("flock")    # file locking
     TOOLS+=("git")      # version control
     TOOLS+=("netcat")   # test network connectivity
     TOOLS+=("node")     # npm used to install claude, codex, gemini
@@ -136,17 +141,34 @@ force_cleanup_sandvault_processes() {
     fi
 }
 
-cleanup_sandvault_processes() {
-    # Exit if other sandvault sessions are active
-    local session_count
-    # shellcheck disable=SC2009 # Consider using pgrep instead of grepping ps output
-    session_count=$(ps -u "$SANDVAULT_USER" -o command | grep -c "/bin/zsh --login" || true)
-    if [[ "${session_count:-0}" -ne 0 ]]; then
-        trace "$session_count $SANDVAULT_USER sessions still active; skipping cleanup"
-    else
-        # We're the last session, safe to cleanup all sandvault processes
-        force_cleanup_sandvault_processes
-    fi
+register_session() {
+    mkdir -p "$SESSION_DIR"
+    (
+        flock -x 200
+        local count
+        count=$(cat "$SESSION_FILE" 2>/dev/null || echo 0)
+        [[ "$count" =~ ^[0-9]+$ ]] || count=0
+        echo $((count + 1)) > "$SESSION_FILE"
+        trace "Session registered (count: $((count + 1)))"
+    ) 200>"$SESSION_FILE.flock"
+}
+
+unregister_session() {
+    mkdir -p "$SESSION_DIR"
+    (
+        flock -x 200
+        local count
+        count=$(cat "$SESSION_FILE" 2>/dev/null || echo 1)
+        [[ "$count" =~ ^[0-9]+$ ]] || count=1
+        echo $((count - 1)) > "$SESSION_FILE"
+        trace "Session unregistered (count: $((count - 1)))"
+        if [[ "$count" -le 1 ]]; then
+            trace "Last session exited; cleaning up sandvault processes"
+            force_cleanup_sandvault_processes
+        else
+            trace "Other sessions still active; skipping cleanup"
+        fi
+    ) 200>"$SESSION_FILE.flock"
 }
 
 configure_shared_folder_permssions() {
@@ -662,8 +684,9 @@ which are required to SSH to the Virtual Machine.
 \n
 EOF
 
-# Set up trap to cleanup processes on exit
-trap 'cleanup_sandvault_processes' EXIT
+# Register this session and set up trap to unregister on exit
+register_session
+trap 'unregister_session' EXIT
 
 # Prepare command args as a single string
 COMMAND_ARGS_STR=""
