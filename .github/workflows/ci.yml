@@ -41,7 +41,7 @@ jobs:
         run: chmod +x scripts/*.sh
 
       - name: Run Python Tests
-        run: ./scripts/test-python.sh
+        run: python -m pytest tests/python/ -v --tb=short
         env:
           PYTHONPATH: ${{ github.workspace }}/guest/home/user/.claude/hooks
 
