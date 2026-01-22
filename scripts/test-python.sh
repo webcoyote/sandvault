@@ -20,6 +20,7 @@ else
     else
         echo "Creating virtual environment..."
         python3 -m venv .venv
+        # shellcheck disable=SC1091  # .venv created at runtime
         source .venv/bin/activate
         pip install pytest
         pytest tests/python/ -v --tb=short
