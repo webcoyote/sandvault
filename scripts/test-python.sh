@@ -15,14 +15,16 @@ if command -v uv &> /dev/null; then
     uv run --with pytest pytest tests/python/ -v --tb=short
 else
     # Fallback: use python -m pytest to ensure correct environment
-    if python3 -c "import pytest" &> /dev/null; then
-        python3 -m pytest tests/python/ -v --tb=short
+    # Use 'python' (not python3) since setup-python action configures 'python'
+    PYTHON_CMD="${PYTHON:-python}"
+    if $PYTHON_CMD -c "import pytest" &> /dev/null; then
+        $PYTHON_CMD -m pytest tests/python/ -v --tb=short
     else
         echo "Creating virtual environment..."
-        python3 -m venv .venv
+        $PYTHON_CMD -m venv .venv
         # shellcheck disable=SC1091  # .venv created at runtime
         source .venv/bin/activate
         pip install pytest
-        python3 -m pytest tests/python/ -v --tb=short
+        $PYTHON_CMD -m pytest tests/python/ -v --tb=short
     fi
 fi

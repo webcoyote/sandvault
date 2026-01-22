@@ -42,6 +42,8 @@ jobs:
 
       - name: Run Python Tests
         run: ./scripts/test-python.sh
+        env:
+          PYTHON: python
 
   lint:
     name: Lint
