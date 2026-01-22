@@ -5,7 +5,7 @@ requires-python = ">=3.8"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
-pythonpath = ["hooks"]
+pythonpath = ["tests/hooks"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
