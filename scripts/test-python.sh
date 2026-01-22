@@ -17,21 +17,8 @@ export PYTHONPATH="$PROJECT_ROOT/guest/home/user/.claude/hooks${PYTHONPATH:+:$PY
 if command -v uv &> /dev/null; then
     uv run --with pytest pytest tests/python/ -v --tb=short
 else
-    # Fallback: use python -m pytest to ensure correct environment
-    # Use pythonLocation from setup-python action if available, otherwise fall back to PYTHON env var
-    if [[ -n "${pythonLocation:-}" ]]; then
-        PYTHON_CMD="${pythonLocation}/bin/python"
-    else
-        PYTHON_CMD="${PYTHON:-python}"
-    fi
-    if $PYTHON_CMD -c "import pytest" &> /dev/null; then
-        $PYTHON_CMD -m pytest tests/python/ -v --tb=short
-    else
-        echo "Creating virtual environment..."
-        $PYTHON_CMD -m venv .venv
-        # shellcheck disable=SC1091  # .venv created at runtime
-        source .venv/bin/activate
-        pip install pytest
-        $PYTHON_CMD -m pytest tests/python/ -v --tb=short
-    fi
+    # Fallback: use python -m pytest directly
+    # In CI, pytest should be pre-installed via the workflow
+    # Locally, user needs to have pytest installed or use uv
+    python -m pytest tests/python/ -v --tb=short
 fi
