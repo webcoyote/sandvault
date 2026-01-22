@@ -16,10 +16,12 @@ guest/home/.ssh/authorized_keys
 # User directory for storing files that are not committed
 guest/home/user/
 
-# Python cache directories
-**/__pycache__/
+# Python bytecode
+*.pyc
 
 # Test artifacts (kept inside tests/ directory)
 tests/.venv/
 tests/.pytest_cache/
+tests/.pycache/
+tests/.ruff_cache/
 tests/uv.lock

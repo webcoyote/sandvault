@@ -16,6 +16,7 @@ export PYTHONPATH="$TESTS_DIR/hooks${PYTHONPATH:+:$PYTHONPATH}"
 
 # Keep cache and venv inside tests directory
 export PYTEST_CACHE_DIR="$TESTS_DIR/.pytest_cache"
+export PYTHONPYCACHEPREFIX="$TESTS_DIR/.pycache"
 
 # Use uv to run pytest (handles virtual environment automatically)
 # This is consistent with how the project already runs Python scripts
