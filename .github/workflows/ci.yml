@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-bash:
+    name: Bash Tests
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh tests/bash/*.sh
+
+      - name: Run Bash Tests
+        run: ./scripts/test-bash.sh
+
+  test-python:
+    name: Python Tests
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
+
+      - name: Run Python Tests
+        run: ./scripts/test-python.sh
+
+  lint:
+    name: Lint
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: brew install shellcheck
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python linters
+        run: pip install ruff
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh tests/bash/*.sh
+
+      - name: Run All Linters
+        run: ./scripts/lint-all.sh
