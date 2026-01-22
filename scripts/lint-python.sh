@@ -21,7 +21,7 @@ if command -v uv &> /dev/null; then
     for dir in "${PYTHON_DIRS[@]}"; do
         if [[ -d "$dir" ]]; then
             echo "  Checking: $dir"
-            if ! uv run --with ruff ruff check "$dir" --config "$PROJECT_ROOT/pyproject.toml"; then
+            if ! uv run --with ruff ruff check "$dir" --config "$PROJECT_ROOT/tests/ruff.toml"; then
                 FAILED=1
             fi
         fi
@@ -31,7 +31,7 @@ elif command -v ruff &> /dev/null; then
     for dir in "${PYTHON_DIRS[@]}"; do
         if [[ -d "$dir" ]]; then
             echo "  Checking: $dir"
-            if ! ruff check "$dir" --config "$PROJECT_ROOT/pyproject.toml"; then
+            if ! ruff check "$dir" --config "$PROJECT_ROOT/tests/ruff.toml"; then
                 FAILED=1
             fi
         fi

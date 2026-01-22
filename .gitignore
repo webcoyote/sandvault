@@ -18,3 +18,8 @@ guest/home/user/
 
 # Python cache directories
 **/__pycache__/
+
+# Test artifacts (kept inside tests/ directory)
+tests/.venv/
+tests/.pytest_cache/
+tests/uv.lock

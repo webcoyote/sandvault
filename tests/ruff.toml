@@ -1,0 +1,6 @@
+line-length = 100
+target-version = "py38"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "C4", "UP"]
+ignore = ["E501"]

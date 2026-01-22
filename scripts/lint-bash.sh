@@ -14,10 +14,11 @@ if ! command -v shellcheck &> /dev/null; then
 fi
 
 FAILED=0
+SHELLCHECK_OPTS="--rcfile=$PROJECT_ROOT/tests/.shellcheckrc"
 
 # Lint main sv script
 echo "Checking: sv"
-if ! shellcheck "$PROJECT_ROOT/sv"; then
+if ! shellcheck "$SHELLCHECK_OPTS" "$PROJECT_ROOT/sv"; then
     FAILED=1
 fi
 
@@ -25,7 +26,7 @@ fi
 for script in "$PROJECT_ROOT/scripts"/*; do
     if [[ -f "$script" ]] && head -1 "$script" | grep -q "bash"; then
         echo "Checking: scripts/$(basename "$script")"
-        if ! shellcheck "$script"; then
+        if ! shellcheck "$SHELLCHECK_OPTS" "$script"; then
             FAILED=1
         fi
     fi
@@ -35,7 +36,7 @@ done
 for script in "$PROJECT_ROOT/guest/home/bin"/*; do
     if [[ -f "$script" ]] && head -1 "$script" | grep -q "bash"; then
         echo "Checking: guest/home/bin/$(basename "$script")"
-        if ! shellcheck "$script"; then
+        if ! shellcheck "$SHELLCHECK_OPTS" "$script"; then
             FAILED=1
         fi
     fi
@@ -45,7 +46,7 @@ done
 for script in "$PROJECT_ROOT/tests/bash"/*.sh; do
     if [[ -f "$script" ]]; then
         echo "Checking: tests/bash/$(basename "$script")"
-        if ! shellcheck "$script"; then
+        if ! shellcheck "$SHELLCHECK_OPTS" "$script"; then
             FAILED=1
         fi
     fi
