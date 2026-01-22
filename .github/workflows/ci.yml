@@ -34,8 +34,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          "$pythonLocation/bin/python" -m pip install --upgrade pip
-          "$pythonLocation/bin/python" -m pip install pytest
+          "${{ env.pythonLocation }}/bin/python" -m pip install --upgrade pip
+          "${{ env.pythonLocation }}/bin/python" -m pip install pytest
 
       - name: Make scripts executable
         run: chmod +x scripts/*.sh
@@ -59,7 +59,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python linters
-        run: "$pythonLocation/bin/python" -m pip install ruff
+        run: "${{ env.pythonLocation }}/bin/python" -m pip install ruff
 
       - name: Make scripts executable
         run: chmod +x scripts/*.sh tests/bash/*.sh
