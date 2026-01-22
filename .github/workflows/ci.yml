@@ -41,9 +41,7 @@ jobs:
         run: chmod +x scripts/*.sh
 
       - name: Run Python Tests
-        run: python -m pytest tests/python/ -v --tb=short
-        env:
-          PYTHONPATH: ${{ github.workspace }}/guest/home/user/.claude/hooks
+        run: ./scripts/test-python.sh
 
   lint:
     name: Lint
