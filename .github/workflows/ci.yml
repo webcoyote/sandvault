@@ -43,7 +43,7 @@ jobs:
       - name: Run Python Tests
         run: ./scripts/test-python.sh
         env:
-          PYTHONPATH: guest/home/user/.claude/hooks
+          PYTHONPATH: ${{ github.workspace }}/guest/home/user/.claude/hooks
 
   lint:
     name: Lint
