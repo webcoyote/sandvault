@@ -14,5 +14,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Build
+        run: ./sv -vvv build
+
       - name: Run Tests
         run: ./scripts/tests
