@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Tag the merge commit that introduced the current version.
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+PROJECT_PATH="./sv"
+
+# Determine default branch (origin/HEAD -> origin/<branch>, fallback to main/master).
+DEFAULT_BRANCH="$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+if [[ -n "$DEFAULT_BRANCH" ]]; then
+  DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
+else
+  if git show-ref --verify --quiet refs/heads/main; then
+    DEFAULT_BRANCH="main"
+  elif git show-ref --verify --quiet refs/heads/master; then
+    DEFAULT_BRANCH="master"
+  else
+    echo "Error: Unable to determine default branch (no origin/HEAD, main, or master)."
+    exit 1
+  fi
+fi
+
+# Require running on the default branch.
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]]; then
+  echo "Error: tag-version must be run on the default branch ($DEFAULT_BRANCH)."
+  exit 1
+fi
+
+# Ensure local default branch is in sync with origin if it exists.
+if git show-ref --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH"; then
+  if ! git merge-base --is-ancestor "origin/$DEFAULT_BRANCH" HEAD; then
+    echo "Error: Your branch is behind origin/$DEFAULT_BRANCH. Please pull before tagging."
+    exit 1
+  fi
+  if ! git merge-base --is-ancestor HEAD "origin/$DEFAULT_BRANCH"; then
+    echo "Error: Your branch is ahead of origin/$DEFAULT_BRANCH. Please push or reset before tagging."
+    exit 1
+  fi
+fi
+
+# Check the project file exists
+if [[ ! -f "$PROJECT_PATH" ]]; then
+  echo "ERROR: Cannot find $PROJECT_PATH"
+  exit 1
+fi
+
+# Get current version
+CURRENT_VERSION=$(awk -F'"' '/^readonly VERSION="[0-9.]*"/ {print $2; exit}' "$PROJECT_PATH")
+echo "Current version: $CURRENT_VERSION"
+
+# Find the commit that introduced this version.
+BUMP_COMMIT="$(git log -n1 --format=%H -S "readonly VERSION=\"$CURRENT_VERSION\"" -- "$PROJECT_PATH")"
+if [[ -z "$BUMP_COMMIT" ]]; then
+  echo "Error: Could not find a commit that set version $CURRENT_VERSION in $PROJECT_PATH."
+  exit 1
+fi
+
+# Find the merge commit on the default branch that introduced the bump commit.
+MERGE_COMMIT=""
+for m in $(git rev-list --first-parent --merges HEAD); do
+  if git merge-base --is-ancestor "$BUMP_COMMIT" "$m"; then
+    if ! git merge-base --is-ancestor "$BUMP_COMMIT" "$m^1"; then
+      MERGE_COMMIT="$m"
+      break
+    fi
+  fi
+done
+
+if [[ -z "$MERGE_COMMIT" ]]; then
+  echo "Error: Could not find a merge commit on $DEFAULT_BRANCH that introduced version $CURRENT_VERSION."
+  echo "If the version was fast-forwarded or squashed, tag the release manually."
+  exit 1
+fi
+
+if git rev-parse -q --verify "refs/tags/v$CURRENT_VERSION" >/dev/null; then
+  echo "Error: Tag v$CURRENT_VERSION already exists."
+  exit 1
+fi
+
+# Create tag on the merge commit.
+git tag -a "v$CURRENT_VERSION" "$MERGE_COMMIT" -m "Version $CURRENT_VERSION"
+#git push --tags
