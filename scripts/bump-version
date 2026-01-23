@@ -12,7 +12,7 @@ show_usage() {
     cat << EOF
 Usage: bump-version [TYPE]
 
-Bump the version number, commit changes, create a tag, and push to remote.
+Bump the version number, commit changes on a branch, and push for a PR.
 
 Arguments:
   TYPE        Version bump type: major, minor, or patch (default: patch)
@@ -30,6 +30,7 @@ Examples:
   bump-version major  # Bumps major version (e.g., 1.2.3 -> 2.0.0)
 
 Note: Requires a clean git workspace (no uncommitted changes or untracked files).
+      This script does not create or push tags; tagging should happen after merge.
 EOF
 }
 
@@ -88,15 +89,29 @@ echo "New version: $NEW_VERSION"
 # Update version
 sed -i '' "s/^readonly VERSION=\"$CURRENT_VERSION\"/readonly VERSION=\"$NEW_VERSION\"/" "$PROJECT_PATH"
 
+# Create a bump branch if currently on a protected default branch
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+case "$CURRENT_BRANCH" in
+  main|master)
+    BUMP_BRANCH="bump-version-v$NEW_VERSION"
+    if git show-ref --verify --quiet "refs/heads/$BUMP_BRANCH"; then
+      echo "Error: Branch $BUMP_BRANCH already exists."
+      echo "Please delete it or choose a different version."
+      exit 1
+    fi
+    git checkout -b "$BUMP_BRANCH"
+    ;;
+  *)
+    BUMP_BRANCH="$CURRENT_BRANCH"
+    ;;
+esac
+
 # Stage the changes
 git add -A
 
 # Commit with version message
 git commit -m "Bump version to $NEW_VERSION"
-git push
+git push -u origin "$BUMP_BRANCH"
 
-# Create tag
-git tag -a "v$NEW_VERSION" -m "Version $NEW_VERSION"
-git push --tags
-
-echo "✓ Version bumped to $NEW_VERSION"
+echo "✓ Version bumped to $NEW_VERSION on branch $BUMP_BRANCH"
+echo "Next: open a PR from $BUMP_BRANCH into your default branch."
