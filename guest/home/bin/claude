@@ -6,4 +6,5 @@ if [[ ! -x "$HOME/node_modules/bin/claude" ]]; then
     npm install --global --silent @anthropic-ai/claude-code@latest
 fi
 
+echo "$USER: running claude --dangerously-skip-permissions"
 exec "$HOME/node_modules/bin/claude" --dangerously-skip-permissions "$@"

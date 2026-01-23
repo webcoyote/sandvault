@@ -6,4 +6,5 @@ if [[ ! -x "$HOME/node_modules/bin/codex" ]]; then
     npm install --global --silent @openai/codex@latest
 fi
 
+echo "$USER: running codex --dangerously-bypass-approvals-and-sandbox"
 exec "$HOME/node_modules/bin/codex" --dangerously-bypass-approvals-and-sandbox "$@"

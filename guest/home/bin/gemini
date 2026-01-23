@@ -6,4 +6,5 @@ if [[ ! -x "$HOME/node_modules/bin/gemini" ]]; then
     npm install --global --silent @google/gemini-cli
 fi
 
+echo "$USER: running gemini --yolo"
 exec "$HOME/node_modules/bin/gemini" --yolo "$@"
