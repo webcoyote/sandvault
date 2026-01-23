@@ -14,12 +14,6 @@ if [[ -n "${SV_SESSION_ID:-}" ]]; then
     fi
 fi
 
-# Add sandvault and user bin directories
-[[ -d "$HOME/bin" ]] && path=("$HOME/bin" $path)
-[[ -d "$HOME/.local/bin" ]] && path=("$HOME/.local/bin" $path)
-[[ -d "$HOME/user/bin" ]] && path=("$HOME/user/bin" $path)
-[[ -d "$HOME/user/.local/bin" ]] && path=("$HOME/user/.local/bin" $path)
-export PATH
 
 # Load user configuration
 [[ -f "$HOME/user/.zshenv" ]] && source "$HOME/user/.zshenv"
