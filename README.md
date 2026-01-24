@@ -53,6 +53,11 @@ sv gemini
 # Or a shell
 # shortcut: sv s
 sv shell
+
+# Pass additional argument(s) to the agent using '--'
+sv claude -- --continue
+sv codex  -- --resume
+sv gemini -- --debug
 ```
 
 SandVault has limited access to your computer:
@@ -64,6 +69,20 @@ SandVault has limited access to your computer:
 - no access: /Users/*                       -- other user directories
 ```
 
+## Troubleshooting
+
+If your sandbox is misbehaving you can fix it with a rebuild or uninstall/reinstall. They're both safe and will not delete files in the shared sandbox folder.
+
+```bash
+# Rebuild
+sv --rebuild shell  # rebuild and run a shell
+sv -r claude        # rebuild and run an agent
+sv -r build         # rebuild but don't run a command
+
+# Uninstall then reinstall
+sv uninstall
+sv gemini
+```
 
 ## Custom Configuration
 
@@ -93,15 +112,15 @@ sv shell [PATH]
 
 # Open Claude Code in sandvault
 # shortcut: sv cl
-sv claude [PATH]
+sv claude [PATH] [-- ARGUMENTS]
 
 # Open OpenAI Codex in sandvault
 # shortcut: sv co
-sv codex [PATH]
+sv codex [PATH] [-- ARGUMENTS]
 
 # Open Google Gemini in sandvault
 # shortcut: sv g
-sv gemini [PATH]
+sv gemini [PATH] [-- ARGUMENTS]
 
 # Build sandvault
 # shortcut: sv b
