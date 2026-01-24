@@ -685,8 +685,9 @@ which are required to SSH to the Virtual Machine.
 EOF
 
 # Register this session and set up trap to unregister on exit
+sv_exit_code=0
 register_session
-trap 'unregister_session' EXIT
+trap 'sv_exit_code=$?; set +e; unregister_session; exit $sv_exit_code' EXIT
 
 # TMPDIR: claude (and perhaps other AI agents) creates temporary directories in locations
 # that are shared, e.g. /tmp/claude and /private/tmp/claude, which doesn't work when there
@@ -723,7 +724,7 @@ if [[ "$MODE" == "ssh" ]]; then
     fi
 
     debug "SSH $SANDVAULT_USER@$HOSTNAME"
-    ssh \
+    if ssh \
         -q \
         -t \
         -o StrictHostKeyChecking=no \
@@ -738,7 +739,12 @@ if [[ "$MODE" == "ssh" ]]; then
                 "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
                 "SV_SESSION_ID=$SV_SESSION_ID" \
                 "VERBOSE=$VERBOSE" \
-                /bin/zsh -c "$ZSH_COMMAND" || true
+                /bin/zsh -c "$ZSH_COMMAND"
+    then
+        :
+    else
+        exit $?
+    fi
 else
     # First verify that passwordless sudo is working
     trace "Checking passwordless sudo"
@@ -753,7 +759,7 @@ else
     # Use env to ensure the environment is cleared, otherwise PATH carries over
     # Use sandbox-exec to restrict access to external drives
     debug "Shell $SANDVAULT_USER@$HOSTNAME"
-    sudo \
+    if sudo \
         --login \
         --set-home \
         --user="$SANDVAULT_USER" \
@@ -769,5 +775,10 @@ else
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "VERBOSE=$VERBOSE" \
             /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
-                /bin/zsh -c "$ZSH_COMMAND" || true
+                /bin/zsh -c "$ZSH_COMMAND"
+    then
+        :
+    else
+        exit $?
+    fi
 fi
