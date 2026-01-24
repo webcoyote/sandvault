@@ -33,12 +33,12 @@ fail() {
 
 # Run command in sandbox and capture output
 sandbox_run() {
-    echo "$1 ; exit" | "$SV" s 2>&1
+    echo "$1 ; exit" | "$SV" s 2>&1 || true
 }
 
 # Run command in sandbox via CLI args
 sandbox_run_args() {
-    "$SV" s -- "$@" 2>&1
+    "$SV" s -- "$@" 2>&1 || true
 }
 
 # Test that sandbox output contains expected string
@@ -67,6 +67,24 @@ assert_sandbox_args_contains() {
         pass "$name"
     else
         fail "$name" "contains '$expected'" "$output"
+    fi
+}
+
+# Test that sandbox command returns expected exit code
+assert_sandbox_exit_code() {
+    local name="$1"
+    local expected="$2"
+    shift 2
+    ((TESTS_RUN++)) || true
+    local output status
+    set +e
+    output=$("$SV" s -- "$@" 2>&1)
+    status=$?
+    set -e
+    if [[ "$status" -eq "$expected" ]]; then
+        pass "$name"
+    else
+        fail "$name" "$expected" "$status | $output"
     fi
 }
 
@@ -238,6 +256,7 @@ echo "=== Shell Args Tests ==="
 
 assert_sandbox_args_contains "sv s -- invalid command errors" "definitely-not-a-command-xyz" "command not found"
 assert_sandbox_args_contains "sv s -- printf preserves quoted args" "printf" "%s\\n" "a b" "c d" $'a b\nc d'
+assert_sandbox_exit_code "sv s -- exit 33 returns 33" 33 exit 33
 
 ###############################################################################
 echo ""
