@@ -36,6 +36,11 @@ sandbox_run() {
     echo "$1 ; exit" | "$SV" s 2>&1
 }
 
+# Run command in sandbox via CLI args
+sandbox_run_args() {
+    "$SV" s -- "$@" 2>&1
+}
+
 # Test that sandbox output contains expected string
 assert_sandbox_contains() {
     local name="$1"
@@ -44,6 +49,20 @@ assert_sandbox_contains() {
     ((TESTS_RUN++)) || true
     local output
     output=$(sandbox_run "$cmd")
+    if [[ "$output" == *"$expected"* ]]; then
+        pass "$name"
+    else
+        fail "$name" "contains '$expected'" "$output"
+    fi
+}
+
+assert_sandbox_args_contains() {
+    local name="$1"
+    shift
+    local expected="${*: -1}"
+    local output
+    ((TESTS_RUN++)) || true
+    output=$(sandbox_run_args "${@:1:$#-1}")
     if [[ "$output" == *"$expected"* ]]; then
         pass "$name"
     else
@@ -211,6 +230,14 @@ if [[ "$output" == *"/Users"* ]]; then
 else
     fail "readable directory is used as working directory" "/Users" "$output"
 fi
+
+###############################################################################
+echo ""
+echo "=== Shell Args Tests ==="
+###############################################################################
+
+assert_sandbox_args_contains "sv s -- invalid command errors" "definitely-not-a-command-xyz" "command not found"
+assert_sandbox_args_contains "sv s -- printf preserves quoted args" "printf" "%s\\n" "a b" "c d" $'a b\nc d'
 
 ###############################################################################
 echo ""

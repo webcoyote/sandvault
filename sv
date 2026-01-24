@@ -688,19 +688,30 @@ EOF
 register_session
 trap 'unregister_session' EXIT
 
+# TMPDIR: claude (and perhaps other AI agents) creates temporary directories in locations
+# that are shared, e.g. /tmp/claude and /private/tmp/claude, which doesn't work when there
+# are multiple users running the agent on the same computer.
+# Fix: set TMPDIR after the shell has started running.
+ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; exec /bin/zsh --login"
+
 # Prepare command args as a single string
 COMMAND_ARGS_STR=""
 if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
     printf -v COMMAND_ARGS_STR '%q ' "${COMMAND_ARGS[@]}"
+
+    # When the user requests running shell (instead of an AI agent) then convert
+    # COMMAND_ARGS to a command that will be run by the shell.
+    #
+    # Example: sv shell -- echo foo
+    # Runs:    exec /bin/zsh --login -c 'echo foo'
+    if [[ "$COMMAND" == "" ]]; then
+        ZSH_COMMAND="$ZSH_COMMAND -c '${COMMAND_ARGS_STR}'"
+        COMMAND_ARGS_STR=""
+    fi
 fi
 
 # Unique session id for this invocation (used by shell init scripts)
 SV_SESSION_ID="${SV_SESSION_ID:-$(/usr/bin/uuidgen)}"
-
-# TMPDIR: claude (and perhaps other AI agents) creates temporary directories in locations
-# that are shared, e.g. /tmp/claude and /private/tmp/claude, which doesn't work when there
-# are multiple users running the agent on the same computer. Try to correct for this by
-# setting TMPDIR.
 
 if [[ "$MODE" == "ssh" ]]; then
     trace "Checking SSH connectivity"
@@ -727,7 +738,7 @@ if [[ "$MODE" == "ssh" ]]; then
                 "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
                 "SV_SESSION_ID=$SV_SESSION_ID" \
                 "VERBOSE=$VERBOSE" \
-                /bin/zsh -c 'export TMPDIR=$(mktemp -d); cd ~; exec /bin/zsh --login' || true
+                /bin/zsh -c "$ZSH_COMMAND" || true
 else
     # First verify that passwordless sudo is working
     trace "Checking passwordless sudo"
@@ -758,5 +769,5 @@ else
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "VERBOSE=$VERBOSE" \
             /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
-                /bin/zsh -c 'export TMPDIR=$(mktemp -d); cd ~; exec /bin/zsh --login' || true
+                /bin/zsh -c "$ZSH_COMMAND" || true
 fi
