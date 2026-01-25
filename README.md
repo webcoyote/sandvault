@@ -1,17 +1,37 @@
 # SandVault
 
-**Run Claude Code, OpenAI Codex, and Google Gemini safely in a sandboxed macOS user account**
+**Run Claude Code, OpenAI Codex, Google Gemini and shell commands safely in a sandboxed macOS user account**
 
-SandVault creates an isolated user account ("sandvault-$USER") with restricted permissions for running AI agents with limited system access. This provides a lightweight alternative to VMs while maintaining security through macOS's built-in user isolation.
+SandVault creates an isolated user account (`sandvault-$USER`) with restricted permissions for running AI agents with limited system access. This provides a lightweight alternative to virtual machines while maintaining security through macOS built-in user isolation.
 
 
 ## Features
 
-- **Development ready** - Includes Claude Code, OpenAI Codex, Google Gemini, Node.js, Python, uv, and Homebrew
+- **AI ready** - Includes Claude Code, OpenAI Codex, Google Gemini
+- **Fast context switching** - No VM overhead; instant user switching
+- **Passwordless** - switch accounts without a prompt (after setup)
 - **Shared workspace** - joint access to `/Users/Shared/sv-$USER`
-- **Fast context switching** - No VM overhead, instant user switching
-- **Passwordless** - switch accounts or use SSH without a prompt (after setup)
 - **Clean uninstall** - Complete removal with `sv uninstall`
+
+
+## Security Model
+
+SandVault has limited access to your computer:
+
+- Cannot access your home directory
+- Runs with standard user privileges
+- Cannot modify system files
+- Has no access to mounted drives
+
+```
+- writable:  /Users/Shared/sv-$USER         -- only accessible by you & sandvault-$USER
+- writable:  /Users/sandvault-$USER         -- sandvault's home directory
+- readable:  /usr, /bin, /etc, /opt         -- system directories
+- no access: /Users/*                       -- other user directories
+
+- writable:  /Volumes/Macintosh HD          -- accessible as per file permissions
+- no access: /Volumes/*                     -- cannot access mounted/remote/network drives
+```
 
 
 ## Installation
@@ -53,35 +73,67 @@ sv gemini
 # Or a shell
 # shortcut: sv s
 sv shell
-
-# Pass additional argument(s) to the agent using '--'
-sv claude -- --continue
-sv codex  -- --resume
-sv gemini -- --debug
 ```
 
-SandVault has limited access to your computer:
 
+## Advanced commands
+
+```bash
+# Run shell command in sandvault and exit
+# Example:
+#   $ sv shell /Users -- pwd
+#   /Users
+sv shell [PATH] -- [COMMAND [ARGUMENTS]]
+
+
+# Send input via stdin
+# Example:
+#   $ echo "pwd ; exit" | sv shell /Users
+#   /Users
+cat FILE1    | sv shell
+cat FILE2    | sv gemini
+echo "input" | sv claude
+
+
+# Run AI agent with additional arguments
+# Example:
+#   $ sv claude -- --continue
+#   ... runs agent and continues last conversation
+sv claude [PATH] [-- ARGUMENTS]
+
+
+# Build sandvault without running a command
+sv build                    # fast build
+sv build --rebuild          # full build
+
+
+# Connect via SSH instead of terminal
+# Example:
+#   $ sv shell --ssh
+sv --ssh shell
+sv --ssh codex
+
+
+# Management
+sv uninstall          # Remove sandvault (but keep any files in shared directory)
+sv --rebuild ...      # Force rebuild
+sv --version          # Show version
+sv --help             # Show help
 ```
-- writable:  /Users/Shared/sv-$USER         -- only accessible by you & sandvault-$USER
-- writable:  /Users/sandvault-$USER         -- sandvault's home directory
-- readable:  /usr, /bin, /etc, /opt         -- system directories
-- no access: /Users/*                       -- other user directories
-```
+
 
 ## Troubleshooting
 
 If your sandbox is misbehaving you can fix it with a rebuild or uninstall/reinstall. They're both safe and will not delete files in the shared sandbox folder.
 
 ```bash
-# Rebuild
-sv --rebuild shell  # rebuild and run a shell
-sv -r claude        # rebuild and run an agent
-sv -r build         # rebuild but don't run a command
+# Force rebuild
+sv --rebuild build
+
 
 # Uninstall then reinstall
 sv uninstall
-sv gemini
+sv build
 ```
 
 ## Custom Configuration
@@ -101,52 +153,6 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Maintains a clean separation between trusted and untrusted code
 
 SandVault uses macOS's Unix heritage and user account system to create a simple but effective sandbox.
-
-
-## Commands
-
-```bash
-# Open shell (zsh) in sandvault
-# shortcut: sv s
-sv shell [PATH]
-
-# Open Claude Code in sandvault
-# shortcut: sv cl
-sv claude [PATH] [-- ARGUMENTS]
-
-# Open OpenAI Codex in sandvault
-# shortcut: sv co
-sv codex [PATH] [-- ARGUMENTS]
-
-# Open Google Gemini in sandvault
-# shortcut: sv g
-sv gemini [PATH] [-- ARGUMENTS]
-
-# Build sandvault
-# shortcut: sv b
-sv build
-
-# SSH mode
-sv --ssh ...          # Connect via SSH instead of sudo
-
-# Management
-sv uninstall          # Remove sandvault (but keep any files in shared directory)
-sv --rebuild ...      # Force rebuild
-sv --version          # Show version
-sv --help             # Show help
-```
-
-
-## Security Model
-
-The sandvault user:
-
-- Cannot access your home directory
-- Runs with standard user privileges
-- Cannot modify system files
-- Has its own isolated home directory
-
-This provides defense in depth when running untrusted code or experimenting with new tools.
 
 
 # Alternatives
