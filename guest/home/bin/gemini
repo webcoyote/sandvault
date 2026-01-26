@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ ! -x "$HOME/node_modules/bin/gemini" ]]; then
-    echo >&2 "Installing gemini..."
-    npm install --global --silent @google/gemini-cli
+if [[ -x "$HOMEBREW_PREFIX/bin/gemini" ]]; then
+    gemini="$HOMEBREW_PREFIX/bin/gemini"
+elif [[ -x "$HOME/node_modules/bin/gemini" ]]; then
+    gemini="$HOME/node_modules/bin/gemini"
+else
+    echo >&2 "gemini is not installed. Run: \`sv gemini\` to install it."
+    exit 1
 fi
 
 echo "$USER: running gemini --yolo"
-exec "$HOME/node_modules/bin/gemini" --yolo "$@"
+exec "$gemini" --yolo "$@"

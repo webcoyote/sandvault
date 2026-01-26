@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ ! -x "$HOME/node_modules/bin/codex" ]]; then
-    echo >&2 "Installing codex..."
-    npm install --global --silent @openai/codex@latest
+if [[ -x "$HOMEBREW_PREFIX/bin/codex" ]]; then
+    codex="$HOMEBREW_PREFIX/bin/codex"
+elif [[ -x "$HOME/node_modules/bin/codex" ]]; then
+    codex="$HOME/node_modules/bin/codex"
+else
+    echo >&2 "codex is not installed. Run: \`sv codex\` to install it."
+    exit 1
 fi
 
 echo "$USER: running codex --dangerously-bypass-approvals-and-sandbox"
-exec "$HOME/node_modules/bin/codex" --dangerously-bypass-approvals-and-sandbox "$@"
+exec "$codex" --dangerously-bypass-approvals-and-sandbox "$@"
