@@ -129,11 +129,16 @@ assert_sandbox_path_order() {
     local after="$3"
     ((TESTS_RUN++)) || true
     local output path pos_before pos_after
-    output=$(sandbox_run "echo \$PATH")
+    output=$(sandbox_run "printf '%s' \"\$PATH\"")
+    output="${output%%$'\n'*}"
+    if [[ -z "$output" ]]; then
+        fail "$name" "PATH output" "<empty>"
+        return
+    fi
     path=":$output:"
-    pos_before=$(awk -v p="$path" -v b=":$before:" 'BEGIN { print index(p, b) }')
-    pos_after=$(awk -v p="$path" -v b=":$after:" 'BEGIN { print index(p, b) }')
-    if [[ "$pos_before" -gt 0 && "$pos_after" -gt 0 && "$pos_before" -lt "$pos_after" ]]; then
+    pos_before="${path%%:$before:*}"
+    pos_after="${path%%:$after:*}"
+    if [[ "$pos_before" != "$path" && "$pos_after" != "$path" && ${#pos_before} -lt ${#pos_after} ]]; then
         pass "$name"
     else
         fail "$name" "$before before $after" "$output"

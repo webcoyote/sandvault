@@ -87,10 +87,9 @@ defaults write com.apple.dt.Xcode IDECustomDerivedDataLocation ".DerivedData"
 USER_DIR="$SCRIPT_DIR/user"
 if [[ -d "$USER_DIR" ]]; then
     debug "Copying user directory contents to $HOME"
-   # Use the full path to the Homebrew rsync binary:
-    # - macOS' default rsync has different options
-    # - Homebrew's rsync may not be linked into the PATH
-    "$(brew --prefix rsync)/bin/rsync" \
+    # Use the system rsync to avoid Homebrew dependencies.
+    # - Homebrew's rsync has different options
+    /usr/bin/rsync \
         --quiet \
         --archive \
         --exclude='.git' \
