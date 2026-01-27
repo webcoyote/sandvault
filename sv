@@ -575,17 +575,28 @@ sudo chown "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER"
 sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 
 # Copy files preserving permissions for contents only
-# (trailing slash on destination ensures it isn't modified)
 # Use the system rsync to avoid Homebrew dependencies.
+# Perform rsync from within the destination directory so that the paths
+# passed through xargs to chown are correct.
+#
+# Use tr to convert newlines to null terminators to pass to xargs -0
+#
+# In the event that no files need to be synchronized, send ":" to xargs to avoid error
+#
+# Use OSX chown, not GNU chown, because I've tested that it works
+cd "/Users/$SANDVAULT_USER/"
 /usr/bin/rsync \
-    --quiet \
+    --itemize-changes \
+    --out-format="%n" \
     --links \
     --checksum \
     --recursive \
     --perms \
     --times \
-    "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/"
-sudo /usr/sbin/chown -R "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER"
+    "$WORKSPACE/guest/home/." \
+    "." \
+    | (tr '\n' '\0' || echo :) \
+    | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     # shellcheck disable=SC2154 # SUDOERS_BUILD_HOME_SCRIPT_CONTENTS is referenced but not assigned (yes it is)
