@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ ! -x "$HOME/node_modules/bin/claude" ]]; then
-    echo >&2 "Installing claude..."
-    npm install --global --silent @anthropic-ai/claude-code@latest
+
+if [[ -x "$HOMEBREW_PREFIX/bin/claude" ]]; then
+    claude="$HOMEBREW_PREFIX/bin/claude"
+elif [[ -x "$HOME/node_modules/bin/claude" ]]; then
+    claude="$HOME/node_modules/bin/claude"
+else
+    echo >&2 "claude is not installed. Run: \`sv claude\` to install it."
+    exit 1
 fi
 
 echo "$USER: running claude --dangerously-skip-permissions"
-exec "$HOME/node_modules/bin/claude" --dangerously-skip-permissions "$@"
+exec "$claude" --dangerously-skip-permissions "$@"

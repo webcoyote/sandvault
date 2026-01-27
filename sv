@@ -88,35 +88,75 @@ show_version() {
     exit 0
 }
 
+brew_shellenv() {
+    case "$(uname -m)" in
+        arm64)
+            if [[ -x /opt/homebrew/bin/brew ]]; then
+                eval "$(/opt/homebrew/bin/brew shellenv)"
+                return 0
+            fi
+            ;;
+        x86_64)
+            if [[ -x /usr/local/bin/brew ]]; then
+                eval "$(/usr/local/bin/brew shellenv)"
+                return 0
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+ensure_brew() {
+    # shellcheck disable=SC2310 # brew_shellenv intentionally used in condition
+    if brew_shellenv; then
+        return 0
+    fi
+    debug "Installing Homebrew..."
+    env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # shellcheck disable=SC2310 # brew_shellenv intentionally used in || condition
+    brew_shellenv || abort "Homebrew install failed."
+}
+
+ensure_brew_tool() {
+    local tool="$1"
+    local cli_name="${2:-$tool}"
+    # shellcheck disable=SC2310 # brew_shellenv intentionally used in || condition
+    brew_shellenv || true
+    if command -v "$cli_name" &>/dev/null; then
+        return 0
+    fi
+    ensure_brew
+    debug "Installing $tool with Homebrew..."
+    if [[ "$VERBOSE" -lt 3 ]]; then
+        brew install --quiet "$tool"
+    else
+        brew install "$tool"
+    fi
+    if command -v "$cli_name" &>/dev/null; then
+        return 0
+    fi
+    warn "Homebrew installed $tool, but no '$cli_name' CLI was found in PATH. Will use \$HOME/node_modules/bin/$cli_name if present."
+    return 0
+}
+
 install_tools () {
-    # Install Homebrew
-    if ! command -v brew &> /dev/null ; then
-        debug "Installing Homebrew..."
-        /usr/bin/env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    fi
-
-    local TOOLS=()
-    TOOLS+=("flock")    # file locking
-    TOOLS+=("git")      # version control
-    TOOLS+=("node")     # npm used to install claude, codex, gemini
-    TOOLS+=("python")   # python used for claude hooks
-    TOOLS+=("rsync")    # file synchronization
-    TOOLS+=("uv")       # run python scripts with uv
-
-    # Only install tools if necessary
-    local LIST_COUNT
-    local BREW_COUNT
-    LIST_COUNT="$(echo "${TOOLS[@]}" | wc -w)"
-    BREW_COUNT="$(brew list --versions "${TOOLS[@]}" | awk '{print $1}' | wc -w || true)"
-    if [[ "$LIST_COUNT" != "$BREW_COUNT" ]]; then
-        debug "Installing tools..."
-        trace "brew install " "${TOOLS[@]}" "..."
-        if [[ "$VERBOSE" -lt 3 ]]; then
-            brew install --quiet "${TOOLS[@]}"
-        else
-            brew install "${TOOLS[@]}"
-        fi
-    fi
+    # Install homebrew tools only when the user invokes them.
+    case "${COMMAND:-}" in
+        claude)
+            ensure_brew_tool "claude-code" "claude"
+            ;;
+        codex)
+            ensure_brew_tool "codex" "codex"
+            ;;
+        gemini)
+            ensure_brew_tool "gemini-cli" "gemini"
+            ;;
+        *)
+            # No tool installation needed for other commands
+            ;;
+    esac
 }
 
 force_cleanup_sandvault_processes() {
@@ -142,32 +182,39 @@ force_cleanup_sandvault_processes() {
 
 register_session() {
     mkdir -p "$SESSION_DIR"
-    (
-        flock -x 200
-        local count
-        count=$(cat "$SESSION_FILE" 2>/dev/null || echo 0)
+    local new_count
+    # shellcheck disable=SC2016 # Single quotes intentional - variables expand in inner bash
+    new_count=$(/usr/bin/lockf "$SESSION_FILE.lock" /bin/bash -c '
+        session_file=$1
+        count=$(cat "$session_file" 2>/dev/null || echo 0)
         [[ "$count" =~ ^[0-9]+$ ]] || count=0
-        echo $((count + 1)) > "$SESSION_FILE"
-        trace "Session registered (count: $((count + 1)))"
-    ) 200>"$SESSION_FILE.flock"
+        new_count=$((count + 1))
+        echo "$new_count" > "$session_file"
+        echo "$new_count"
+    ' bash "$SESSION_FILE")
+    trace "Session registered (count: $new_count)"
 }
 
 unregister_session() {
     mkdir -p "$SESSION_DIR"
-    (
-        flock -x 200
-        local count
-        count=$(cat "$SESSION_FILE" 2>/dev/null || echo 1)
+    local prev_count
+    local new_count
+    # shellcheck disable=SC2016 # Single quotes intentional - variables expand in inner bash
+    read -r prev_count new_count < <(/usr/bin/lockf "$SESSION_FILE.lock" /bin/bash -c '
+        session_file=$1
+        count=$(cat "$session_file" 2>/dev/null || echo 1)
         [[ "$count" =~ ^[0-9]+$ ]] || count=1
-        echo $((count - 1)) > "$SESSION_FILE"
-        trace "Session unregistered (count: $((count - 1)))"
-        if [[ "$count" -le 1 ]]; then
-            trace "Last session exited; cleaning up sandvault processes"
-            force_cleanup_sandvault_processes
-        else
-            trace "Other sessions still active; skipping cleanup"
-        fi
-    ) 200>"$SESSION_FILE.flock"
+        new_count=$((count - 1))
+        echo "$new_count" > "$session_file"
+        echo "$count $new_count"
+    ' bash "$SESSION_FILE")
+    trace "Session unregistered (count: $new_count)"
+    if [[ "$prev_count" -le 1 ]]; then
+        trace "Last session exited; cleaning up sandvault processes"
+        force_cleanup_sandvault_processes
+    else
+        trace "Other sessions still active; skipping cleanup"
+    fi
 }
 
 configure_shared_folder_permssions() {
@@ -536,19 +583,28 @@ sudo chown "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER"
 sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 
 # Copy files preserving permissions for contents only
-# (trailing slash on destination ensures it isn't modified)
-# Use the full path to the homebrew rsync binary:
-# - macOS' default rsync has different options
-# - Homebrew rsync may not be linked into the PATH
-"$(brew --prefix rsync)/bin/rsync" \
-    --quiet \
+# Use the system rsync to avoid Homebrew dependencies.
+# Perform rsync from within the destination directory so that the paths
+# passed through xargs to chown are correct.
+#
+# Use tr to convert newlines to null terminators to pass to xargs -0
+#
+# In the event that no files need to be synchronized, send ":" to xargs to avoid error
+#
+# Use OSX chown, not GNU chown, because I've tested that it works
+cd "/Users/$SANDVAULT_USER/"
+/usr/bin/rsync \
+    --itemize-changes \
+    --out-format="%n" \
     --links \
     --checksum \
     --recursive \
     --perms \
     --times \
-    --chown="$SANDVAULT_USER:$SANDVAULT_GROUP" \
-    "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/"
+    "$WORKSPACE/guest/home/." \
+    "." \
+    | (tr '\n' '\0' || echo :) \
+    | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     # shellcheck disable=SC2154 # SUDOERS_BUILD_HOME_SCRIPT_CONTENTS is referenced but not assigned (yes it is)
@@ -758,6 +814,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "VERBOSE=$VERBOSE" \
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
                 /bin/zsh -c "$ZSH_COMMAND"
     then
@@ -794,6 +851,7 @@ else
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "VERBOSE=$VERBOSE" \
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
                 /bin/zsh -c "$ZSH_COMMAND"
     then
