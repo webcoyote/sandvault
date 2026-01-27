@@ -109,17 +109,20 @@ brew_shellenv() {
 }
 
 ensure_brew() {
+    # shellcheck disable=SC2310 # brew_shellenv intentionally used in condition
     if brew_shellenv; then
         return 0
     fi
     debug "Installing Homebrew..."
     env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # shellcheck disable=SC2310 # brew_shellenv intentionally used in || condition
     brew_shellenv || abort "Homebrew install failed."
 }
 
 ensure_brew_tool() {
     local tool="$1"
     local cli_name="${2:-$tool}"
+    # shellcheck disable=SC2310 # brew_shellenv intentionally used in || condition
     brew_shellenv || true
     if command -v "$cli_name" &>/dev/null; then
         return 0
@@ -150,6 +153,9 @@ install_tools () {
         gemini)
             ensure_brew_tool "gemini-cli" "gemini"
             ;;
+        *)
+            # No tool installation needed for other commands
+            ;;
     esac
 }
 
@@ -177,6 +183,7 @@ force_cleanup_sandvault_processes() {
 register_session() {
     mkdir -p "$SESSION_DIR"
     local new_count
+    # shellcheck disable=SC2016 # Single quotes intentional - variables expand in inner bash
     new_count=$(/usr/bin/lockf "$SESSION_FILE.lock" /bin/bash -c '
         session_file=$1
         count=$(cat "$session_file" 2>/dev/null || echo 0)
@@ -192,6 +199,7 @@ unregister_session() {
     mkdir -p "$SESSION_DIR"
     local prev_count
     local new_count
+    # shellcheck disable=SC2016 # Single quotes intentional - variables expand in inner bash
     read -r prev_count new_count < <(/usr/bin/lockf "$SESSION_FILE.lock" /bin/bash -c '
         session_file=$1
         count=$(cat "$session_file" 2>/dev/null || echo 1)
