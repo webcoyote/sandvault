@@ -98,7 +98,6 @@ install_tools () {
     local TOOLS=()
     TOOLS+=("flock")    # file locking
     TOOLS+=("git")      # version control
-    TOOLS+=("netcat")   # test network connectivity
     TOOLS+=("node")     # npm used to install claude, codex, gemini
     TOOLS+=("python")   # python used for claude hooks
     TOOLS+=("rsync")    # file synchronization
@@ -716,11 +715,28 @@ SV_SESSION_ID="${SV_SESSION_ID:-$(/usr/bin/uuidgen)}"
 
 if [[ "$MODE" == "ssh" ]]; then
     trace "Checking SSH connectivity"
-    if ! nc -z "$HOSTNAME" 22 ; then
-        # shellcheck disable=SC2154 # LOCAL_NETWORK_ERROR is referenced but not assigned (yes it is)
-        error "$LOCAL_NETWORK_ERROR"
-        read -n 1 -s -r -p "Press any key to open System Settings"
-        open "/System/Library/PreferencePanes/Security.prefPane"
+    if ! ssh_check_output=$(ssh \
+        -o BatchMode=yes \
+        -o ConnectTimeout=2 \
+        -o ConnectionAttempts=1 \
+        -o LogLevel=ERROR \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -i "$SSH_KEYFILE_PRIV" \
+        "$SANDVAULT_USER@$HOSTNAME" \
+        exit 0 2>&1)
+    then
+        if echo "$ssh_check_output" | /usr/bin/grep -qiE "permission denied|authentication failed"; then
+            error "SSH authentication failed for $SANDVAULT_USER@$HOSTNAME."
+            error "Verify your SSH key is installed and authorized on the host."
+        else
+            # shellcheck disable=SC2154 # LOCAL_NETWORK_ERROR is referenced but not assigned (yes it is)
+            error "$LOCAL_NETWORK_ERROR"
+            debug "$ssh_check_output"
+            read -n 1 -s -r -p "Press any key to open System Settings"
+            open "/System/Library/PreferencePanes/Security.prefPane"
+        fi
+        exit 1
     fi
 
     debug "SSH $SANDVAULT_USER@$HOSTNAME"
