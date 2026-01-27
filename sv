@@ -747,14 +747,18 @@ if [[ "$MODE" == "ssh" ]]; then
         -o UserKnownHostsFile=/dev/null \
         -i "$SSH_KEYFILE_PRIV" \
         "$SANDVAULT_USER@$HOSTNAME" \
-        /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
-            /usr/bin/env \
-                "COMMAND=$COMMAND" \
-                "COMMAND_ARGS=$COMMAND_ARGS_STR" \
-                "INITIAL_DIR=$INITIAL_DIR" \
-                "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
-                "SV_SESSION_ID=$SV_SESSION_ID" \
-                "VERBOSE=$VERBOSE" \
+        /usr/bin/env -i \
+            "HOME=/Users/$SANDVAULT_USER" \
+            "USER=$SANDVAULT_USER" \
+            "SHELL=/bin/zsh" \
+            "TERM=${TERM:-}" \
+            "COMMAND=$COMMAND" \
+            "COMMAND_ARGS=$COMMAND_ARGS_STR" \
+            "INITIAL_DIR=$INITIAL_DIR" \
+            "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
+            "SV_SESSION_ID=$SV_SESSION_ID" \
+            "VERBOSE=$VERBOSE" \
+            /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
                 /bin/zsh -c "$ZSH_COMMAND"
     then
         :
@@ -779,7 +783,7 @@ else
         --login \
         --set-home \
         --user="$SANDVAULT_USER" \
-        env -i \
+        /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
             "SHELL=/bin/zsh" \
