@@ -3,7 +3,6 @@
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)"
-readonly WORKSPACE="$SCRIPT_DIR"
 
 
 ###############################################################################
@@ -157,6 +156,26 @@ install_tools () {
             # No tool installation needed for other commands
             ;;
     esac
+}
+
+resolve_workspace() {
+    if [[ -d "$SCRIPT_DIR/.git" ]] || [[ -f "$SCRIPT_DIR/.git" ]] ; then
+        # Development mode: running from a git repo
+        if [[ -d "$SCRIPT_DIR/guest/home" ]]; then
+            echo "$SCRIPT_DIR"
+            return 0
+        fi
+    else
+        # Homebrew opt symlink
+        local candidate
+        candidate="$(brew --prefix sandvault)"
+        if [[ -d "$candidate/guest/home" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    fi
+
+    abort "Unable to find sandvault guest/home directory"
 }
 
 force_cleanup_sandvault_processes() {
@@ -413,6 +432,9 @@ INITIAL_DIR="$(cd "$INITIAL_DIR" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
 # Setup
 ###############################################################################
 install_tools
+
+WORKSPACE="$(resolve_workspace)"
+readonly WORKSPACE
 
 
 ###############################################################################
