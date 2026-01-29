@@ -82,4 +82,4 @@ fi
 
 # Create tag on the merge commit.
 git tag -a "v$CURRENT_VERSION" "$MERGE_COMMIT" -m "Version $CURRENT_VERSION"
-#git push --tags
+git push --tags
