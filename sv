@@ -615,8 +615,6 @@ EOF
     SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
 
 heredoc SUDOERS_CONTENT << EOF
-# Allow $USER to sudo to $SANDVAULT_USER without password and run any command as that user
-$USER ALL=($SANDVAULT_USER) NOPASSWD: ALL
 # Allow $USER to run $SUDOERS_BUILD_HOME_SCRIPT_NAME
 $USER ALL=(root) NOPASSWD: $SUDOERS_BUILD_HOME_SCRIPT_NAME
 # Allow $USER to kill $SANDVAULT_USER processes without password
