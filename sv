@@ -650,14 +650,17 @@ $USER ALL=(root) NOPASSWD: /bin/launchctl bootout user/$SANDVAULT_UID
 $USER ALL=(root) NOPASSWD: /usr/bin/pkill -9 -u $SANDVAULT_USER
 EOF
 
+    # Write to a root-owned temp file, validate, then atomically move into place.
+    SUDOERS_TMP="$(sudo /usr/bin/mktemp "$(dirname "$SUDOERS_FILE")/.sudoers.XXXXXXXX")"
     # shellcheck disable=SC2154 # SUDOERS_CONTENT is referenced but not assigned (yes it is)
-    echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_FILE" > /dev/null
-    sudo /bin/chmod 0440 "$SUDOERS_FILE"
+    echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_TMP" > /dev/null
+    sudo /bin/chmod 0440 "$SUDOERS_TMP"
 
-    # Validate the sudoers file
-    if ! sudo visudo -c -f "$SUDOERS_FILE" &>/dev/null; then
+    if sudo visudo -c -f "$SUDOERS_TMP" &>/dev/null; then
+        sudo /bin/mv -f "$SUDOERS_TMP" "$SUDOERS_FILE"
+    else
         error "Failed to create valid sudoers file"
-        sudo rm -f "$SUDOERS_FILE"
+        sudo rm -f "$SUDOERS_TMP"
         abort "Sudoers configuration failed"
     fi
 fi
