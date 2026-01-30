@@ -637,10 +637,14 @@ EOF
     SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
 
 heredoc SUDOERS_CONTENT << EOF
-# Allow $USER to run any command as $SANDVAULT_USER without password
-$USER ALL=($SANDVAULT_USER) NOPASSWD: ALL
-# Allow $USER to run $SUDOERS_BUILD_HOME_SCRIPT_NAME
+# Allow $USER to run these commands as $SANDVAULT_USER without password
+$USER ALL=($SANDVAULT_USER) NOPASSWD: /bin/zsh
+$USER ALL=($SANDVAULT_USER) NOPASSWD: /usr/bin/env
+$USER ALL=($SANDVAULT_USER) NOPASSWD: /usr/bin/true
+
+# Allow $USER to run $SUDOERS_BUILD_HOME_SCRIPT_NAME to sync home directory
 $USER ALL=(root) NOPASSWD: $SUDOERS_BUILD_HOME_SCRIPT_NAME
+
 # Allow $USER to kill $SANDVAULT_USER processes without password
 $USER ALL=(root) NOPASSWD: /bin/launchctl bootout user/$SANDVAULT_UID
 $USER ALL=(root) NOPASSWD: /usr/bin/pkill -9 -u $SANDVAULT_USER
@@ -847,7 +851,7 @@ if [[ "$MODE" == "ssh" ]]; then
 else
     # First verify that passwordless sudo is working
     trace "Checking passwordless sudo"
-    if ! sudo --non-interactive --user="$SANDVAULT_USER" true 2>/dev/null; then
+    if ! sudo --non-interactive --user="$SANDVAULT_USER" /usr/bin/true ; then
         error "Passwordless sudo to $SANDVAULT_USER user is not configured correctly."
         error "Please run: ${BASH_SOURCE[0]} build --rebuild"
         exit 1
