@@ -285,9 +285,18 @@ run_tests() {
     echo "  === Shell Args Tests ($mode_label) ==="
     ###############################################################################
 
-    assert_sandbox_args_contains "sv s -- invalid command errors" "definitely-not-a-command-xyz" "command not found"
-    assert_sandbox_args_contains "sv s -- printf preserves quoted args" "printf" "%s\\n" "a b" "c d" $'a b\nc d'
-    assert_sandbox_exit_code "sv s -- exit 33 returns 33" 33 exit 33
+	assert_sandbox_args_contains "sv s -- invalid command errors" "definitely-not-a-command-xyz" "command not found"
+	assert_sandbox_args_contains "sv s -- printf preserves quoted args" "printf" "%s\\n" "a b" "c d" $'a b\nc d'
+	assert_sandbox_exit_code "sv s -- exit 33 returns 33" 33 exit 33
+	((TESTS_RUN++)) || true
+	set +e
+	output=$(echo "ABC" | sv_cmd s -- tr 'A-Z' 'a-z' 2>&1)
+	set -e
+	if [[ "$output" =~ ^abc ]]; then
+	    pass "sv s -- stdin piping works correctly"
+	else
+	    fail "sv s -- stdin piping works correctly" "abc" "$output"
+	fi
 
     ###############################################################################
     echo ""
@@ -306,7 +315,7 @@ run_tests() {
 # Ensure that the shell doesn't have sudo permissions
 sudo --reset-timestamp
 
-for sv_mode in "ssh" "default" ; do
+for sv_mode in "default" "ssh"; do
     if [[ "$sv_mode" == "ssh" ]]; then
         SV_CMD=("$SV_BASE" "--ssh")
         mode_label="sv --ssh"
