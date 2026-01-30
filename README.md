@@ -112,6 +112,8 @@ sv build --rebuild          # full build
 #   $ sv shell --ssh
 sv --ssh shell
 sv --ssh codex
+#
+# Note: stdin piping works in SSH mode too (e.g. echo "pwd ; exit" | sv --ssh shell).
 
 
 # Management

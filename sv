@@ -637,23 +637,30 @@ EOF
     SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
 
 heredoc SUDOERS_CONTENT << EOF
-# Allow $USER to run any command as $SANDVAULT_USER without password
-$USER ALL=($SANDVAULT_USER) NOPASSWD: ALL
-# Allow $USER to run $SUDOERS_BUILD_HOME_SCRIPT_NAME
+# Allow $USER to run these commands as $SANDVAULT_USER without password
+$USER ALL=($SANDVAULT_USER) NOPASSWD: /bin/zsh
+$USER ALL=($SANDVAULT_USER) NOPASSWD: /usr/bin/env
+$USER ALL=($SANDVAULT_USER) NOPASSWD: /usr/bin/true
+
+# Allow $USER to run $SUDOERS_BUILD_HOME_SCRIPT_NAME to sync home directory
 $USER ALL=(root) NOPASSWD: $SUDOERS_BUILD_HOME_SCRIPT_NAME
+
 # Allow $USER to kill $SANDVAULT_USER processes without password
 $USER ALL=(root) NOPASSWD: /bin/launchctl bootout user/$SANDVAULT_UID
 $USER ALL=(root) NOPASSWD: /usr/bin/pkill -9 -u $SANDVAULT_USER
 EOF
 
+    # Write to a root-owned temp file, validate, then atomically move into place.
+    SUDOERS_TMP="$(sudo /usr/bin/mktemp "$(dirname "$SUDOERS_FILE")/.sudoers.XXXXXXXX")"
     # shellcheck disable=SC2154 # SUDOERS_CONTENT is referenced but not assigned (yes it is)
-    echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_FILE" > /dev/null
-    sudo /bin/chmod 0440 "$SUDOERS_FILE"
+    echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_TMP" > /dev/null
+    sudo /bin/chmod 0440 "$SUDOERS_TMP"
 
-    # Validate the sudoers file
-    if ! sudo visudo -c -f "$SUDOERS_FILE" &>/dev/null; then
+    if sudo visudo -c -f "$SUDOERS_TMP" &>/dev/null; then
+        sudo /bin/mv -f "$SUDOERS_TMP" "$SUDOERS_FILE"
+    else
         error "Failed to create valid sudoers file"
-        sudo rm -f "$SUDOERS_FILE"
+        sudo rm -f "$SUDOERS_TMP"
         abort "Sudoers configuration failed"
     fi
 fi
@@ -774,6 +781,7 @@ ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; exec /bin/zsh --login"
 
 # Prepare command args as a single string
 COMMAND_ARGS_STR=""
+SHELL_COMMAND_MODE=false
 if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
     printf -v COMMAND_ARGS_STR '%q ' "${COMMAND_ARGS[@]}"
 
@@ -785,6 +793,7 @@ if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
     if [[ "$COMMAND" == "" ]]; then
         ZSH_COMMAND="$ZSH_COMMAND -c '${COMMAND_ARGS_STR}'"
         COMMAND_ARGS_STR=""
+        SHELL_COMMAND_MODE=true
     fi
 fi
 
@@ -792,6 +801,16 @@ fi
 SV_SESSION_ID="${SV_SESSION_ID:-$(/usr/bin/uuidgen)}"
 
 if [[ "$MODE" == "ssh" ]]; then
+    # Only allocate a TTY for interactive shells.
+    SSH_TTY_OPT="-t"
+    if [[ ! -t 0 || "$SHELL_COMMAND_MODE" == "true" ]]; then
+        SSH_TTY_OPT="-T"
+    fi
+    
+    # Escape single quotes for a remote shell context.
+    ZSH_COMMAND_SSH=$(printf '%s' "$ZSH_COMMAND" | sed "s/'/'\"'\"'/g")
+    ZSH_COMMAND_SSH="'$ZSH_COMMAND_SSH'"
+    
     trace "Checking SSH connectivity"
     if ! ssh_check_output=$(ssh \
         -o BatchMode=yes \
@@ -800,6 +819,7 @@ if [[ "$MODE" == "ssh" ]]; then
         -o LogLevel=ERROR \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
+        -n \
         -i "$SSH_KEYFILE_PRIV" \
         "$SANDVAULT_USER@$HOSTNAME" \
         exit 0 2>&1)
@@ -818,9 +838,15 @@ if [[ "$MODE" == "ssh" ]]; then
     fi
 
     debug "SSH $SANDVAULT_USER@$HOSTNAME"
+    
+    # SSH requires TWO layers of shell parsing: local shell → SSH → remote shell → /bin/zsh
+    # The extra single quotes protect the command through SSH's remote shell parsing.
+    # Without them, the remote shell would word-split the command, causing incorrect execution.
+    # Example: "'export TMPDIR=...'" becomes a single arg after local expansion, then the remote
+    # shell strips the outer quotes, passing 'export TMPDIR=...' correctly to /bin/zsh -c
     if ssh \
         -q \
-        -t \
+        "$SSH_TTY_OPT" \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -i "$SSH_KEYFILE_PRIV" \
@@ -838,7 +864,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "VERBOSE=$VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
-                /bin/zsh -c "$ZSH_COMMAND"
+                /bin/zsh -c "$ZSH_COMMAND_SSH"
     then
         :
     else
@@ -847,7 +873,7 @@ if [[ "$MODE" == "ssh" ]]; then
 else
     # First verify that passwordless sudo is working
     trace "Checking passwordless sudo"
-    if ! sudo --non-interactive --user="$SANDVAULT_USER" true 2>/dev/null; then
+    if ! sudo --non-interactive --user="$SANDVAULT_USER" /usr/bin/true ; then
         error "Passwordless sudo to $SANDVAULT_USER user is not configured correctly."
         error "Please run: ${BASH_SOURCE[0]} build --rebuild"
         exit 1
@@ -858,6 +884,11 @@ else
     # Use env to ensure the environment is cleared, otherwise PATH carries over
     # Use sandbox-exec to restrict access to external drives
     debug "Shell $SANDVAULT_USER@$HOSTNAME"
+    
+    # sudo requires only ONE layer of shell parsing: local shell → /bin/zsh
+    # Simple double quotes "$ZSH_COMMAND" are sufficient because sudo passes arguments
+    # directly to the command without an intermediate shell parsing layer.
+    # This is different from SSH (see above) which requires extra quoting.
     if sudo \
         --login \
         --set-home \
