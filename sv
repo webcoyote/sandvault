@@ -245,18 +245,18 @@ configure_shared_folder_permssions() {
     # causes: "chmod: the -R and -h options may not be specified together"
     if [[ "$enable" != "false" ]]; then
         # Make workspace accessible to $USER and $SANDVAULT_GROUP only
-        trace "Configuring $SHARED_WORKSPACE permissions..."
-        sudo /bin/chmod 0770 "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE: set owner to $USER:$SANDVAULT_GROUP"
         sudo /usr/sbin/chown -f -R "$USER:$SANDVAULT_GROUP" "$SHARED_WORKSPACE"
+        trace "Configuring $SHARED_WORKSPACE permissions..."
+        sudo /bin/chmod 0770 "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE: add $SANDVAULT_RIGHTS (recursively)"
         sudo find "$SHARED_WORKSPACE" -print0 | xargs -0 sudo /bin/chmod -h +a "$SANDVAULT_RIGHTS"
     else
         # Make workspace accessible to $USER only
-        trace "Configuring $SHARED_WORKSPACE permissions..."
-        sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE: restoring owner to $USER:$(id -gn)"
         sudo /usr/sbin/chown -f -R "$USER:$(id -gn)" "$SHARED_WORKSPACE"
+        trace "Configuring $SHARED_WORKSPACE permissions..."
+        sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE: remove $SANDVAULT_RIGHTS (recursively)"
         sudo find "$SHARED_WORKSPACE" -print0 2>/dev/null | xargs -0 sudo /bin/chmod -h -a "$SANDVAULT_RIGHTS" 2>/dev/null || true
     fi
