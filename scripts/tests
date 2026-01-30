@@ -4,7 +4,7 @@ set -Eeuo pipefail
 START_TIME=$(date +%s.%N)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SV="$SCRIPT_DIR/../sv"
+SV_BASE="$SCRIPT_DIR/../sv"
 HOST_USER="$USER"
 HOST_HOME="$HOME"
 SANDVAULT_USER="sandvault-$HOST_USER"
@@ -21,24 +21,33 @@ TESTS_FAILED=0
 
 pass() {
     ((TESTS_PASSED++)) || true
-    echo -e "${GREEN}PASS${NC}: $1"
+    echo -e "  ${GREEN}PASS${NC}: $1"
 }
 
 fail() {
     ((TESTS_FAILED++)) || true
-    echo -e "${RED}FAIL${NC}: $1"
-    [[ -n "${2:-}" ]] && echo "  Expected: $2"
-    [[ -n "${3:-}" ]] && echo "  Got: $3"
+    echo -e "  ${RED}FAIL${NC}: $1"
+    echo "    Expected: ${2:-}"
+    echo "    Got: ${3:-}"
+}
+
+# Run sv command with current mode
+sv_cmd() {
+    "${SV_CMD[@]}" "$@"
 }
 
 # Run command in sandbox and capture output
 sandbox_run() {
-    echo "$1 ; exit" | "$SV" s 2>&1 || true
+    set +e
+    echo "$1 ; exit" | sv_cmd s 2>&1
+    set -e
 }
 
 # Run command in sandbox via CLI args
 sandbox_run_args() {
-    "$SV" s -- "$@" 2>&1 || true
+    set +e
+    sv_cmd s -- "$@" 2>&1
+    set -e
 }
 
 # Test that sandbox output contains expected string
@@ -78,7 +87,7 @@ assert_sandbox_exit_code() {
     ((TESTS_RUN++)) || true
     local output status
     set +e
-    output=$("$SV" s -- "$@" 2>&1)
+    output=$(sv_cmd s -- "$@" 2>&1)
     status=$?
     set -e
     if [[ "$status" -eq "$expected" ]]; then
@@ -149,144 +158,165 @@ assert_sandbox_path_order() {
 ###############################################################################
 # Setup
 ###############################################################################
+run_tests() {
+    local mode_label="$1"
+    TESTS_RUN=0
+    TESTS_PASSED=0
+    TESTS_FAILED=0
+
+    echo "=== MODE: $mode_label ==="
+
+    ###############################################################################
+    echo "  === CLI Argument Tests ($mode_label) ==="
+    ###############################################################################
+
+    # --version
+    ((TESTS_RUN++)) || true
+    output=$(sv_cmd --version 2>&1)
+    if [[ "$output" == *"version"* ]]; then pass "--version shows version"; else fail "--version shows version"; fi
+
+    # --help
+    ((TESTS_RUN++)) || true
+    output=$(sv_cmd --help 2>&1)
+    if [[ "$output" == *"Usage:"* ]]; then pass "--help shows usage"; else fail "--help shows usage"; fi
+
+    # Unknown option
+    ((TESTS_RUN++)) || true
+    set +e
+    output=$(sv_cmd --bogus 2>&1)
+    set -e
+    if [[ "$output" == *"Unknown option"* ]]; then pass "unknown option rejected"; else fail "unknown option rejected"; fi
+
+    ###############################################################################
+    echo ""
+    echo "  === Sandbox Identity Tests ($mode_label) ==="
+    ###############################################################################
+
+    # Verify we're running as sandvault user, not host user
+    assert_sandbox_contains "running as sandvault user" "whoami" "$SANDVAULT_USER"
+
+    # Verify HOME is sandvault's home (single quotes intentional - evaluated in sandbox)
+    # shellcheck disable=SC2016
+    assert_sandbox_contains "HOME is sandvault home" 'echo $HOME' "/Users/sandvault-$USER"
+    # shellcheck disable=SC2016
+    assert_sandbox_not_contains "HOME is not host home" 'echo $HOME' "$HOST_HOME"
+
+    ###############################################################################
+    echo ""
+    echo "  === Sandbox PATH Tests ($mode_label) ==="
+    ###############################################################################
+
+    assert_sandbox_path_order "\$USER/bin precedes /opt/homebrew/bin" "$SANDVAULT_HOME/bin" "/opt/homebrew/bin"
+
+    ###############################################################################
+    echo ""
+    echo "  === Sandbox Escape Tests: Host User Files ($mode_label) ==="
+    ###############################################################################
+
+    # Cannot read host user's home directory
+    assert_sandbox_fails "cannot ls host home" "ls $HOST_HOME"
+    assert_sandbox_fails "cannot read host .zshrc" "cat $HOST_HOME/.zshrc"
+    assert_sandbox_fails "cannot read host .ssh" "ls $HOST_HOME/.ssh"
+
+    # Cannot read other users' directories
+    assert_sandbox_fails "cannot ls /Users/root" "ls /Users/root"
+
+    ###############################################################################
+    echo ""
+    echo "  === Sandbox Escape Tests: /Volumes (External Drives) ($mode_label) ==="
+    ###############################################################################
+
+    # sandbox-exec should block /Volumes access (except Macintosh HD)
+    assert_sandbox_fails "cannot ls /Volumes" "ls /Volumes"
+    assert_sandbox_fails "cannot read /Volumes" "cat /Volumes/test 2>&1"
+
+    ###############################################################################
+    echo ""
+    echo "  === Sandbox Escape Tests: Sensitive System Files ($mode_label) ==="
+    ###############################################################################
+
+    # Should not be able to read shadow password file or other sensitive files
+    assert_sandbox_fails "cannot read /etc/sudoers" "cat /etc/sudoers"
+    assert_sandbox_fails "cannot read /etc/master.passwd" "cat /etc/master.passwd"
+
+    ###############################################################################
+    echo ""
+    echo "  === Sandbox Allowed Access Tests ($mode_label) ==="
+    ###############################################################################
+
+    # Should be able to access shared workspace
+    SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
+    assert_sandbox_contains "can access shared workspace" "ls $SHARED_WORKSPACE" "SANDVAULT-README"
+
+    # Should be able to run basic commands
+    assert_sandbox_contains "can run echo" "echo hello" "hello"
+
+    pushd /Users &>/dev/null
+    assert_sandbox_contains "can run pwd" "pwd" "$PWD"
+    pushd &>/dev/null
+
+    ###############################################################################
+    echo ""
+    echo "  === Initial Directory Tests ($mode_label) ==="
+    ###############################################################################
+
+    # Test that unreadable directory falls back to SHARED_WORKSPACE
+    # Host user's home directory should not be readable by sandvault user
+    ((TESTS_RUN++)) || true
+    output=$(cd "$HOST_HOME" && echo "pwd ; exit" | sv_cmd s 2>&1)
+    if [[ "$output" == *"$SHARED_WORKSPACE"* ]]; then
+        pass "unreadable directory falls back to SHARED_WORKSPACE"
+    else
+        fail "unreadable directory falls back to SHARED_WORKSPACE" "$SHARED_WORKSPACE" "$output"
+    fi
+
+    # Test that readable directory is used as working directory
+    # /Users is readable by all users
+    ((TESTS_RUN++)) || true
+    output=$(cd /Users && echo "pwd ; exit" | sv_cmd s 2>&1)
+    if [[ "$output" == *"/Users"* ]]; then
+        pass "readable directory is used as working directory"
+    else
+        fail "readable directory is used as working directory" "/Users" "$output"
+    fi
+
+    ###############################################################################
+    echo ""
+    echo "  === Shell Args Tests ($mode_label) ==="
+    ###############################################################################
+
+    assert_sandbox_args_contains "sv s -- invalid command errors" "definitely-not-a-command-xyz" "command not found"
+    assert_sandbox_args_contains "sv s -- printf preserves quoted args" "printf" "%s\\n" "a b" "c d" $'a b\nc d'
+    assert_sandbox_exit_code "sv s -- exit 33 returns 33" 33 exit 33
+
+    ###############################################################################
+    echo ""
+    echo "  === Summary ($mode_label) ==="
+    ###############################################################################
+
+    echo "Tests run: $TESTS_RUN"
+    echo -e "Passed: ${GREEN}$TESTS_PASSED${NC}"
+    echo -e "Failed: ${RED}$TESTS_FAILED${NC}"
+
+    if [[ "$TESTS_FAILED" -gt 0 ]]; then
+        exit 1
+    fi
+}
+
 # Ensure that the shell doesn't have sudo permissions
-echo "=== Resetting sudo timestamp"
 sudo --reset-timestamp
 
+for sv_mode in "ssh" "default" ; do
+    if [[ "$sv_mode" == "ssh" ]]; then
+        SV_CMD=("$SV_BASE" "--ssh")
+        mode_label="sv --ssh"
+    else
+        SV_CMD=("$SV_BASE")
+        mode_label="sv"
+    fi
 
-###############################################################################
-echo "=== CLI Argument Tests ==="
-###############################################################################
-
-# --version
-((TESTS_RUN++)) || true
-output=$("$SV" --version 2>&1)
-if [[ "$output" == *"version"* ]]; then pass "--version shows version"; else fail "--version shows version"; fi
-
-# --help
-((TESTS_RUN++)) || true
-output=$("$SV" --help 2>&1)
-if [[ "$output" == *"Usage:"* ]]; then pass "--help shows usage"; else fail "--help shows usage"; fi
-
-# Unknown option
-((TESTS_RUN++)) || true
-output=$("$SV" --bogus 2>&1) || true
-if [[ "$output" == *"Unknown option"* ]]; then pass "unknown option rejected"; else fail "unknown option rejected"; fi
-
-###############################################################################
-echo ""
-echo "=== Sandbox Identity Tests ==="
-###############################################################################
-
-# Verify we're running as sandvault user, not host user
-assert_sandbox_contains "running as sandvault user" "whoami" "$SANDVAULT_USER"
-
-# Verify HOME is sandvault's home (single quotes intentional - evaluated in sandbox)
-# shellcheck disable=SC2016
-assert_sandbox_contains "HOME is sandvault home" 'echo $HOME' "/Users/sandvault-$USER"
-# shellcheck disable=SC2016
-assert_sandbox_not_contains "HOME is not host home" 'echo $HOME' "$HOST_HOME"
-
-###############################################################################
-echo ""
-echo "=== Sandbox PATH Tests ==="
-###############################################################################
-
-assert_sandbox_path_order "\$USER/bin precedes /opt/homebrew/bin" "$SANDVAULT_HOME/bin" "/opt/homebrew/bin"
-
-###############################################################################
-echo ""
-echo "=== Sandbox Escape Tests: Host User Files ==="
-###############################################################################
-
-# Cannot read host user's home directory
-assert_sandbox_fails "cannot ls host home" "ls $HOST_HOME"
-assert_sandbox_fails "cannot read host .zshrc" "cat $HOST_HOME/.zshrc"
-assert_sandbox_fails "cannot read host .ssh" "ls $HOST_HOME/.ssh"
-
-# Cannot read other users' directories
-assert_sandbox_fails "cannot ls /Users/root" "ls /Users/root"
-
-###############################################################################
-echo ""
-echo "=== Sandbox Escape Tests: /Volumes (External Drives) ==="
-###############################################################################
-
-# sandbox-exec should block /Volumes access (except Macintosh HD)
-assert_sandbox_fails "cannot ls /Volumes" "ls /Volumes"
-assert_sandbox_fails "cannot read /Volumes" "cat /Volumes/test 2>&1"
-
-###############################################################################
-echo ""
-echo "=== Sandbox Escape Tests: Sensitive System Files ==="
-###############################################################################
-
-# Should not be able to read shadow password file or other sensitive files
-assert_sandbox_fails "cannot read /etc/sudoers" "cat /etc/sudoers"
-assert_sandbox_fails "cannot read /etc/master.passwd" "cat /etc/master.passwd"
-
-###############################################################################
-echo ""
-echo "=== Sandbox Allowed Access Tests ==="
-###############################################################################
-
-# Should be able to access shared workspace
-SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
-assert_sandbox_contains "can access shared workspace" "ls $SHARED_WORKSPACE" "SANDVAULT-README"
-
-# Should be able to run basic commands
-assert_sandbox_contains "can run echo" "echo hello" "hello"
-
-pushd /Users &>/dev/null
-assert_sandbox_contains "can run pwd" "pwd" "$PWD"
-pushd &>/dev/null
-
-###############################################################################
-echo ""
-echo "=== Initial Directory Tests ==="
-###############################################################################
-
-# Test that unreadable directory falls back to SHARED_WORKSPACE
-# Host user's home directory should not be readable by sandvault user
-((TESTS_RUN++)) || true
-output=$(cd "$HOST_HOME" && echo "pwd ; exit" | "$SV" s 2>&1)
-if [[ "$output" == *"$SHARED_WORKSPACE"* ]]; then
-    pass "unreadable directory falls back to SHARED_WORKSPACE"
-else
-    fail "unreadable directory falls back to SHARED_WORKSPACE" "$SHARED_WORKSPACE" "$output"
-fi
-
-# Test that readable directory is used as working directory
-# /Users is readable by all users
-((TESTS_RUN++)) || true
-output=$(cd /Users && echo "pwd ; exit" | "$SV" s 2>&1)
-if [[ "$output" == *"/Users"* ]]; then
-    pass "readable directory is used as working directory"
-else
-    fail "readable directory is used as working directory" "/Users" "$output"
-fi
-
-###############################################################################
-echo ""
-echo "=== Shell Args Tests ==="
-###############################################################################
-
-assert_sandbox_args_contains "sv s -- invalid command errors" "definitely-not-a-command-xyz" "command not found"
-assert_sandbox_args_contains "sv s -- printf preserves quoted args" "printf" "%s\\n" "a b" "c d" $'a b\nc d'
-assert_sandbox_exit_code "sv s -- exit 33 returns 33" 33 exit 33
-
-###############################################################################
-echo ""
-echo "=== Summary ==="
-###############################################################################
-
-echo "Tests run: $TESTS_RUN"
-echo -e "Passed: ${GREEN}$TESTS_PASSED${NC}"
-echo -e "Failed: ${RED}$TESTS_FAILED${NC}"
-
-if [[ "$TESTS_FAILED" -gt 0 ]]; then
-    exit 1
-fi
+    run_tests "$mode_label"
+done
 
 END_TIME=$(date +%s.%N)
 ELAPSED_TIME=$(echo "$END_TIME - $START_TIME" | bc --mathlib | xargs printf "%.2f\n")

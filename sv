@@ -781,6 +781,7 @@ ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; exec /bin/zsh --login"
 
 # Prepare command args as a single string
 COMMAND_ARGS_STR=""
+SHELL_COMMAND_MODE=false
 if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
     printf -v COMMAND_ARGS_STR '%q ' "${COMMAND_ARGS[@]}"
 
@@ -792,6 +793,7 @@ if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
     if [[ "$COMMAND" == "" ]]; then
         ZSH_COMMAND="$ZSH_COMMAND -c '${COMMAND_ARGS_STR}'"
         COMMAND_ARGS_STR=""
+        SHELL_COMMAND_MODE=true
     fi
 fi
 
@@ -799,6 +801,16 @@ fi
 SV_SESSION_ID="${SV_SESSION_ID:-$(/usr/bin/uuidgen)}"
 
 if [[ "$MODE" == "ssh" ]]; then
+    # Only allocate a TTY for interactive shells.
+    SSH_TTY_OPT="-t"
+    if [[ ! -t 0 || "$SHELL_COMMAND_MODE" == "true" ]]; then
+        SSH_TTY_OPT="-T"
+    fi
+    
+    # Escape single quotes for a remote shell context.
+    ZSH_COMMAND_SSH=$(printf '%s' "$ZSH_COMMAND" | sed "s/'/'\"'\"'/g")
+    ZSH_COMMAND_SSH="'$ZSH_COMMAND_SSH'"
+    
     trace "Checking SSH connectivity"
     if ! ssh_check_output=$(ssh \
         -o BatchMode=yes \
@@ -807,6 +819,7 @@ if [[ "$MODE" == "ssh" ]]; then
         -o LogLevel=ERROR \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
+        -n \
         -i "$SSH_KEYFILE_PRIV" \
         "$SANDVAULT_USER@$HOSTNAME" \
         exit 0 2>&1)
@@ -825,9 +838,15 @@ if [[ "$MODE" == "ssh" ]]; then
     fi
 
     debug "SSH $SANDVAULT_USER@$HOSTNAME"
+    
+    # SSH requires TWO layers of shell parsing: local shell → SSH → remote shell → /bin/zsh
+    # The extra single quotes protect the command through SSH's remote shell parsing.
+    # Without them, the remote shell would word-split the command, causing incorrect execution.
+    # Example: "'export TMPDIR=...'" becomes a single arg after local expansion, then the remote
+    # shell strips the outer quotes, passing 'export TMPDIR=...' correctly to /bin/zsh -c
     if ssh \
         -q \
-        -t \
+        "$SSH_TTY_OPT" \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -i "$SSH_KEYFILE_PRIV" \
@@ -845,7 +864,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "VERBOSE=$VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
-                /bin/zsh -c "$ZSH_COMMAND"
+                /bin/zsh -c "$ZSH_COMMAND_SSH"
     then
         :
     else
@@ -865,6 +884,11 @@ else
     # Use env to ensure the environment is cleared, otherwise PATH carries over
     # Use sandbox-exec to restrict access to external drives
     debug "Shell $SANDVAULT_USER@$HOSTNAME"
+    
+    # sudo requires only ONE layer of shell parsing: local shell → /bin/zsh
+    # Simple double quotes "$ZSH_COMMAND" are sufficient because sudo passes arguments
+    # directly to the command without an intermediate shell parsing layer.
+    # This is different from SSH (see above) which requires extra quoting.
     if sudo \
         --login \
         --set-home \
