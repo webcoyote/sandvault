@@ -318,15 +318,19 @@ MODE=shell
 COMMAND_ARGS=()
 
 show_help() {
-    appname=$(basename "${BASH_SOURCE[0]}")
-    echo "Usage: $appname [options] command [-- args...]"
+    echo "SandVault $VERSION by Patrick Wyatt <pat@codeofhonor.com>"
+    echo "Project home page: https://github.com/webcoyote/sandvault"
+    echo
+    echo "SandVault (sv) manages a limited user account to sandbox shell commands and AI agents,"
+    echo "providing a lightweight alternative to application isolation using virtual machines."
+    echo
+    echo "Usage: sv [options] command [-- args ...]"
     echo ""
     echo "Options:"
-    echo "  -s, --ssh            Use SSH to connect"
-    echo "  -r, --rebuild        Rebuild all files & configuration"
-    echo "  -v, --verbose        Enable verbose output (repeat for more verbosity)"
-    echo "  -vv                  Set verbosity level 2"
-    echo "  -vvv                 Set verbosity level 3"
+    echo "  -s, --ssh            Connect via SSH [default: use account impersonation]"
+    echo "  -r, --rebuild        Rebuild configuration and file permissions/ACLs"
+    echo "  -v, --verbose        Enable verbose output"
+    echo "  -vv / -vvv           More verbose / even more verbose"
     echo "  -h, --help           Show this help message"
     echo "  --version            Show version information"
     echo ""
@@ -338,7 +342,7 @@ show_help() {
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove sandvault; keep shared files"
     echo ""
-    echo "Arguments after -- are passed to command (claude, gemini, codex)"
+    echo "Arguments after -- are passed to the command (claude, gemini, codex, shell)"
     exit 0
 }
 
