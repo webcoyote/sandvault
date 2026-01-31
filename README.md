@@ -2,7 +2,7 @@
 
 **Run Claude Code, OpenAI Codex, Google Gemini and shell commands safely in a sandboxed macOS user account**
 
-SandVault creates an isolated user account (`sandvault-$USER`) with restricted permissions for running AI agents with limited system access. This provides a lightweight alternative to virtual machines while maintaining security through macOS built-in user isolation.
+SandVault (sv) manages a limited user account to sandbox shell commands and AI agents, providing a lightweight alternative to application isolation using virtual machines.
 
 
 ## Features
@@ -46,12 +46,14 @@ Install via git:
 
 ```bash
 # Clone the repository
-git clone https://github.com/webcoyote/sandvault
-cd sandvault
+  git clone https://github.com/webcoyote/sandvault
 
-# Add to your shell configuration for easy access
-echo >> ~/.zshrc  'alias sv="/path/to/where/you/cloned/sandvault/sv"'
-echo >> ~/.bashrc 'alias sv="/path/to/where/you/cloned/sandvault/sv"'
+# Option 1: add the sandvault directory to your path
+  export PATH="$PATH:/path/to/where/you/cloned/sandvault"
+
+# Option 2: add to your shell configuration for easy access
+  echo >> ~/.zshrc  'alias sv="/path/to/where/you/cloned/sandvault/sv"'
+  echo >> ~/.bashrc 'alias sv="/path/to/where/you/cloned/sandvault/sv"'
 ```
 
 
@@ -60,67 +62,83 @@ echo >> ~/.bashrc 'alias sv="/path/to/where/you/cloned/sandvault/sv"'
 ```bash
 # Run Claude Code in the sandbox
 # shortcut: sv cl
-sv claude
+  sv claude
 
 # Run OpenAI Codex in the sandbox
 # shortcut: sv co
-sv codex
+  sv codex
 
 # Run Google Gemini in the sandbox
 # shortcut: sv g
-sv gemini
+  sv gemini
 
-# Or a shell
+# Run command shell in the sandbox
 # shortcut: sv s
-sv shell
+  sv shell
 ```
 
 
-## Advanced commands
+## Connect via SSH
+
+The default mode for sandvault runs commands as a limited user (basically `sudo -u sandbox-$USER COMMAND`). Sandvault also configures the limited sandvault account so that you can run commands via SSH (basically `ssh sandbox-$USER@$HOSTNAME`), and everything works the same. Use the `-s` or `--ssh` option to use SSH mode with `sv`, or use `tmux` or `screen` (for users so inclined).
+
+```bash
+# Run using impersonation
+# sv COMMAND
+  sv codex
+
+# Run using ssh
+# sv -s/--ssh COMMAND
+  sv --ssh gemini
+```
+
+## Advanced Commands
 
 ```bash
 # Run shell command in sandvault and exit
+# Usage:
+#  sv shell [PATH] -- [SHELL_COMMAND]
 # Example:
-#   $ sv shell /Users -- pwd
-#   /Users
-sv shell [PATH] -- [COMMAND [ARGUMENTS]]
+  sv shell /Users -- pwd      # output: /Users
+
+
+# Run AI agent with optional arguments
+# Usage:
+#   sv <agent> [PATH] [-- AGENT_ARGUMENTS]
+# Example:
+  sv gemini -- --continue
 
 
 # Send input via stdin
-# Example:
-#   $ echo "pwd ; exit" | sv shell /Users
-#   /Users
-cat FILE1    | sv shell
-cat FILE2    | sv gemini
-echo "input" | sv claude
+# Usage:
+#   <producer> | sv shell [PATH] [-- SHELL_COMMAND]
+# Examples:
+  echo "pwd ; exit" | sv shell /Users       # output: /Users
+
+  echo ABC | sv shell -- tr 'A-Z' 'a-z'     # output: abc
+
+  cat PROMPT.md | sv gemini
+```
+
+## Maintenance Commands
+
+```bash
+# Build sandvault but do not run a command
+  sv build
+  sv b
 
 
-# Run AI agent with additional arguments
-# Example:
-#   $ sv claude -- --continue
-#   ... runs agent and continues last conversation
-sv claude [PATH] [-- ARGUMENTS]
+# Rebuild sandvault, including updating all file permissions and ACLs in the shared volume
+  sv build --rebuild
+  sv b -r
+
+# Uninstall sandvault (does not delete files in the shared volume)
+  sv uninstall
 
 
-# Build sandvault without running a command
-sv build                    # fast build
-sv build --rebuild          # full build
-
-
-# Connect via SSH instead of terminal
-# Example:
-#   $ sv shell --ssh
-sv --ssh shell
-sv --ssh codex
-#
-# Note: stdin piping works in SSH mode too (e.g. echo "pwd ; exit" | sv --ssh shell).
-
-
-# Management
-sv uninstall          # Remove sandvault (but keep any files in shared directory)
-sv --rebuild ...      # Force rebuild
-sv --version          # Show version
-sv --help             # Show help
+# Misc commands
+  sv --version
+  sv --help
 ```
 
 
@@ -138,9 +156,10 @@ sv uninstall
 sv build
 ```
 
+
 ## Custom Configuration
 
-SandVault supports custom configuration; see `./guest/home/README.md`.
+SandVault supports custom configuration; see [`./guest/home/README.md`](./guest/home/README.md).
 
 
 ## Why SandVault?

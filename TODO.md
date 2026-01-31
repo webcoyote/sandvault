@@ -1,1 +1,2 @@
 - running as ssh or sudo doesn't allow running iOS simulator
+- sandbox-exec to further limit write access to only home and shared folder
