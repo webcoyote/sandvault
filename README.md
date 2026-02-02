@@ -92,6 +92,7 @@ The default mode for sandvault runs commands as a limited user (basically `sudo 
   sv --ssh gemini
 ```
 
+
 ## Advanced Commands
 
 ```bash
@@ -119,6 +120,7 @@ The default mode for sandvault runs commands as a limited user (basically `sudo 
 
   cat PROMPT.md | sv gemini
 ```
+
 
 ## Maintenance Commands
 
@@ -157,9 +159,29 @@ sv build
 ```
 
 
+### Fix the security popup
+
+![macOS security keychain login dialog](https://webcoyote.github.io/images/shared/sandvault/security-keychain.jpg)
+
+If you see a security popup above, it may be because files in the shared sandvault directory don't have the correct ACLs, which occurs when another user's files are copied into the sandvault shared directory (`/Users/Shared/sv-$USER`). This can be corrected by running the rebuild command `sv --rebuild build`, or adding the rebuild flag to any command, e.g. `sv -r shell`. This only needs to be done once.
+
+
 ## Custom Configuration
 
 SandVault supports custom configuration; see [`./guest/home/README.md`](./guest/home/README.md).
+
+
+## Running GUI Applications
+
+TL;DR: Sorry, macOS security limitations prevent this from working.
+
+It would be great to be able to run GUI applications (e.g. browsers, Claude Desktop) in the sandbox account to limit their access to main account resources.
+
+The issue seems to be that an application cannot report to a WindowServer that's owned by a different user.
+
+Internet posts suggest it's possible using `sudo su` and `sudo launchctl bsexec`, but those answers are from long ago and it seems likely that Apple improvements to macOS security have closed those doors.
+
+In the event you do find a solution, send a PR please :)
 
 
 ## Why SandVault?
