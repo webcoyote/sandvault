@@ -18,22 +18,35 @@ NC='\033[0m'
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
+RESULTS_DIR=""
+PARALLEL_JOBS=0
+GUARD_FIFO=""
+GUARD_PID=""
+GUARD_FD=""
+TEST_PIDS=()
+
+write_result() {
+    local status="$1"
+    local name="$2"
+    local expected="${3:-}"
+    local got="${4:-}"
+    printf '%s' "$status" > "$RESULTS_DIR/$TEST_ID.status"
+    printf '%s' "$name" > "$RESULTS_DIR/$TEST_ID.name"
+    printf '%s' "$expected" > "$RESULTS_DIR/$TEST_ID.expected"
+    printf '%s' "$got" > "$RESULTS_DIR/$TEST_ID.got"
+}
 
 pass() {
-    ((TESTS_PASSED++)) || true
-    echo -e "  ${GREEN}PASS${NC}: $1"
+    write_result "PASS" "$1"
 }
 
 fail() {
-    ((TESTS_FAILED++)) || true
-    echo -e "  ${RED}FAIL${NC}: $1"
-    echo "    Expected: ${2:-}"
-    echo "    Got: ${3:-}"
+    write_result "FAIL" "$1" "${2:-}" "${3:-}"
 }
 
 # Run sv command with current mode
 sv_cmd() {
-    "${SV_CMD[@]}" "$@"
+    "${SV_CMD[@]}" --no-build "$@"
 }
 
 # Run command in sandbox and capture output
@@ -55,7 +68,6 @@ assert_sandbox_contains() {
     local name="$1"
     local cmd="$2"
     local expected="$3"
-    ((TESTS_RUN++)) || true
     local output
     output=$(sandbox_run "$cmd")
     if [[ "$output" == *"$expected"* ]]; then
@@ -68,10 +80,11 @@ assert_sandbox_contains() {
 assert_sandbox_args_contains() {
     local name="$1"
     shift
-    local expected="${*: -1}"
     local output
-    ((TESTS_RUN++)) || true
-    output=$(sandbox_run_args "${@:1:$#-1}")
+    local args=("$@")
+    local expected="${args[${#args[@]}-1]}"
+    unset 'args[${#args[@]}-1]'
+    output=$(sandbox_run_args "${args[@]}")
     if [[ "$output" == *"$expected"* ]]; then
         pass "$name"
     else
@@ -84,7 +97,6 @@ assert_sandbox_exit_code() {
     local name="$1"
     local expected="$2"
     shift 2
-    ((TESTS_RUN++)) || true
     local output status
     set +e
     output=$(sv_cmd s -- "$@" 2>&1)
@@ -102,7 +114,6 @@ assert_sandbox_not_contains() {
     local name="$1"
     local cmd="$2"
     local forbidden="$3"
-    ((TESTS_RUN++)) || true
     local output
     output=$(sandbox_run "$cmd")
     if [[ "$output" != *"$forbidden"* ]]; then
@@ -116,7 +127,6 @@ assert_sandbox_not_contains() {
 assert_sandbox_fails() {
     local name="$1"
     local cmd="$2"
-    ((TESTS_RUN++)) || true
     local output
     output=$(sandbox_run "$cmd")
     # Check for common error indicators
@@ -136,7 +146,6 @@ assert_sandbox_path_order() {
     local name="$1"
     local before="$2"
     local after="$3"
-    ((TESTS_RUN++)) || true
     local output path pos_before pos_after
     output=$(sandbox_run "printf '%s' \"\$PATH\"")
     output="${output%%$'\n'*}"
@@ -163,158 +172,288 @@ run_tests() {
     TESTS_RUN=0
     TESTS_PASSED=0
     TESTS_FAILED=0
+    RESULTS_DIR=$(mktemp -d)
+    PARALLEL_JOBS="${SV_TEST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)}"
+    if [[ -z "$PARALLEL_JOBS" || "$PARALLEL_JOBS" -lt 1 ]]; then
+        PARALLEL_JOBS=$(sysctl -n hw.ncpu 2>/dev/null || true)
+    fi
+    if [[ -z "$PARALLEL_JOBS" || "$PARALLEL_JOBS" -lt 1 ]]; then
+        PARALLEL_JOBS=4
+    fi
+
+    wait_for_slot() {
+        while :; do
+            local running=0
+            local pid
+            for pid in "${TEST_PIDS[@]-}"; do
+                if kill -0 "$pid" 2>/dev/null; then
+                    ((running++)) || true
+                fi
+            done
+            if [[ "$running" -lt "$PARALLEL_JOBS" ]]; then
+                break
+            fi
+            sleep 0.05
+        done
+    }
+
+    queue_test() {
+        wait_for_slot
+        ((TESTS_RUN++)) || true
+        local id
+        id=$(printf "%04d" "$TESTS_RUN")
+        (
+            set +e
+            TEST_ID="$id"
+            "$@"
+        ) &
+        TEST_PIDS+=("$!")
+    }
+
+    collect_results() {
+        local pid
+        for pid in "${TEST_PIDS[@]-}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+        local i id status name expected got
+        for i in $(seq 1 "$TESTS_RUN"); do
+            id=$(printf "%04d" "$i")
+            status=$(cat "$RESULTS_DIR/$id.status" 2>/dev/null || echo "FAIL")
+            name=$(cat "$RESULTS_DIR/$id.name" 2>/dev/null || echo "missing test result $id")
+            expected=$(cat "$RESULTS_DIR/$id.expected" 2>/dev/null || true)
+            got=$(cat "$RESULTS_DIR/$id.got" 2>/dev/null || true)
+            if [[ "$status" == "PASS" ]]; then
+                ((TESTS_PASSED++)) || true
+                echo -e "  ${GREEN}PASS${NC}: $name"
+            else
+                ((TESTS_FAILED++)) || true
+                echo -e "  ${RED}FAIL${NC}: $name"
+                echo "    Expected: ${expected:-}"
+                echo "    Got: ${got:-}"
+            fi
+        done
+        rm -rf "$RESULTS_DIR"
+        TEST_PIDS=()
+    }
 
     echo "=== MODE: $mode_label ==="
 
     ###############################################################################
-    echo "  === CLI Argument Tests ($mode_label) ==="
+    # CLI Argument Tests
     ###############################################################################
 
     # --version
-    ((TESTS_RUN++)) || true
-    output=$(sv_cmd --version 2>&1)
-    if [[ "$output" == *"version"* ]]; then pass "--version shows version"; else fail "--version shows version"; fi
+    test_version() {
+        local output
+        output=$(sv_cmd --version 2>&1)
+        if [[ "$output" == *"version"* ]]; then pass "--version shows version"; else fail "--version shows version"; fi
+    }
+    queue_test test_version
 
     # --help
-    ((TESTS_RUN++)) || true
-    output=$(sv_cmd --help 2>&1)
-    if [[ "$output" == *"Usage:"* ]]; then pass "--help shows usage"; else fail "--help shows usage"; fi
+    test_help() {
+        local output
+        output=$(sv_cmd --help 2>&1)
+        if [[ "$output" == *"Usage:"* ]]; then pass "--help shows usage"; else fail "--help shows usage"; fi
+    }
+    queue_test test_help
 
     # Unknown option
-    ((TESTS_RUN++)) || true
-    set +e
-    output=$(sv_cmd --bogus 2>&1)
-    set -e
-    if [[ "$output" == *"Unknown option"* ]]; then pass "unknown option rejected"; else fail "unknown option rejected"; fi
+    test_unknown_option() {
+        local output
+        set +e
+        output=$(sv_cmd --bogus 2>&1)
+        set -e
+        if [[ "$output" == *"Unknown option"* ]]; then pass "unknown option rejected"; else fail "unknown option rejected"; fi
+    }
+    queue_test test_unknown_option
 
     ###############################################################################
-    echo ""
-    echo "  === Sandbox Identity Tests ($mode_label) ==="
+    # Sandbox Identity Tests
     ###############################################################################
 
     # Verify we're running as sandvault user, not host user
-    assert_sandbox_contains "running as sandvault user" "whoami" "$SANDVAULT_USER"
+    queue_test assert_sandbox_contains "running as sandvault user" "whoami" "$SANDVAULT_USER"
 
     # Verify HOME is sandvault's home (single quotes intentional - evaluated in sandbox)
     # shellcheck disable=SC2016
-    assert_sandbox_contains "HOME is sandvault home" 'echo $HOME' "/Users/sandvault-$USER"
+    queue_test assert_sandbox_contains "HOME is sandvault home" 'echo $HOME' "/Users/sandvault-$USER"
     # shellcheck disable=SC2016
-    assert_sandbox_not_contains "HOME is not host home" 'echo $HOME' "$HOST_HOME"
+    queue_test assert_sandbox_not_contains "HOME is not host home" 'echo $HOME' "$HOST_HOME"
 
     ###############################################################################
-    echo ""
-    echo "  === Sandbox PATH Tests ($mode_label) ==="
+    # Sandbox PATH Tests
     ###############################################################################
 
-    assert_sandbox_path_order "\$USER/bin precedes /opt/homebrew/bin" "$SANDVAULT_HOME/bin" "/opt/homebrew/bin"
+    queue_test assert_sandbox_path_order "\$USER/bin precedes /opt/homebrew/bin" "$SANDVAULT_HOME/bin" "/opt/homebrew/bin"
 
     ###############################################################################
-    echo ""
-    echo "  === Sandbox Escape Tests: Host User Files ($mode_label) ==="
+    # Sandbox Escape Tests: Host User Files
     ###############################################################################
 
     # Cannot read host user's home directory
-    assert_sandbox_fails "cannot ls host home" "ls $HOST_HOME"
-    assert_sandbox_fails "cannot read host .zshrc" "cat $HOST_HOME/.zshrc"
-    assert_sandbox_fails "cannot read host .ssh" "ls $HOST_HOME/.ssh"
+    queue_test assert_sandbox_fails "cannot ls host home" "ls $HOST_HOME"
+    queue_test assert_sandbox_fails "cannot read host .zshrc" "cat $HOST_HOME/.zshrc"
+    queue_test assert_sandbox_fails "cannot read host .ssh" "ls $HOST_HOME/.ssh"
 
     # Cannot read other users' directories
-    assert_sandbox_fails "cannot ls /Users/root" "ls /Users/root"
+    queue_test assert_sandbox_fails "cannot ls /Users/root" "ls /Users/root"
 
     ###############################################################################
-    echo ""
-    echo "  === Sandbox Escape Tests: /Volumes (External Drives) ($mode_label) ==="
+    # Sandbox Escape Tests: /Volumes (External Drives)
     ###############################################################################
 
     # sandbox-exec should block /Volumes access (except Macintosh HD)
-    assert_sandbox_fails "cannot ls /Volumes" "ls /Volumes"
-    assert_sandbox_fails "cannot read /Volumes" "cat /Volumes/test 2>&1"
+    queue_test assert_sandbox_fails "cannot ls /Volumes" "ls /Volumes"
+    queue_test assert_sandbox_fails "cannot read /Volumes" "cat /Volumes/test 2>&1"
 
     ###############################################################################
-    echo ""
-    echo "  === Sandbox Escape Tests: Sensitive System Files ($mode_label) ==="
+    # Sandbox Escape Tests: Sensitive System Files
     ###############################################################################
 
     # Should not be able to read shadow password file or other sensitive files
-    assert_sandbox_fails "cannot read /etc/sudoers" "cat /etc/sudoers"
-    assert_sandbox_fails "cannot read /etc/master.passwd" "cat /etc/master.passwd"
+    queue_test assert_sandbox_fails "cannot read /etc/sudoers" "cat /etc/sudoers"
+    queue_test assert_sandbox_fails "cannot read /etc/master.passwd" "cat /etc/master.passwd"
 
     ###############################################################################
-    echo ""
-    echo "  === Sandbox Allowed Access Tests ($mode_label) ==="
+    # Sandbox Allowed Access Tests
     ###############################################################################
 
     # Should be able to access shared workspace
     SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
-    assert_sandbox_contains "can access shared workspace" "ls $SHARED_WORKSPACE" "SANDVAULT-README"
+    queue_test assert_sandbox_contains "can access shared workspace" "ls $SHARED_WORKSPACE" "SANDVAULT-README"
 
     # Should be able to run basic commands
-    assert_sandbox_contains "can run echo" "echo hello" "hello"
+    queue_test assert_sandbox_contains "can run echo" "echo hello" "hello"
 
-    pushd /Users &>/dev/null
-    assert_sandbox_contains "can run pwd" "pwd" "$PWD"
-    pushd &>/dev/null
+    test_pwd() {
+        pushd /Users &>/dev/null
+        assert_sandbox_contains "can run pwd" "pwd" "$PWD"
+        popd &>/dev/null
+    }
+    queue_test test_pwd
 
     ###############################################################################
-    echo ""
-    echo "  === Initial Directory Tests ($mode_label) ==="
+    # Initial Directory Tests
     ###############################################################################
 
     # Test that unreadable directory falls back to SHARED_WORKSPACE
     # Host user's home directory should not be readable by sandvault user
-    ((TESTS_RUN++)) || true
-    output=$(cd "$HOST_HOME" && echo "pwd ; exit" | sv_cmd s 2>&1)
-    if [[ "$output" == *"$SHARED_WORKSPACE"* ]]; then
-        pass "unreadable directory falls back to SHARED_WORKSPACE"
-    else
-        fail "unreadable directory falls back to SHARED_WORKSPACE" "$SHARED_WORKSPACE" "$output"
-    fi
+    test_unreadable_dir_fallback() {
+        local output
+        output=$(cd "$HOST_HOME" && echo "pwd ; exit" | sv_cmd s 2>&1)
+        if [[ "$output" == *"$SHARED_WORKSPACE"* ]]; then
+            pass "unreadable directory falls back to SHARED_WORKSPACE"
+        else
+            fail "unreadable directory falls back to SHARED_WORKSPACE" "$SHARED_WORKSPACE" "$output"
+        fi
+    }
+    queue_test test_unreadable_dir_fallback
 
     # Test that readable directory is used as working directory
     # /Users is readable by all users
-    ((TESTS_RUN++)) || true
-    output=$(cd /Users && echo "pwd ; exit" | sv_cmd s 2>&1)
-    if [[ "$output" == *"/Users"* ]]; then
-        pass "readable directory is used as working directory"
-    else
-        fail "readable directory is used as working directory" "/Users" "$output"
-    fi
+    test_readable_dir_used() {
+        local output
+        output=$(cd /Users && echo "pwd ; exit" | sv_cmd s 2>&1)
+        if [[ "$output" == *"/Users"* ]]; then
+            pass "readable directory is used as working directory"
+        else
+            fail "readable directory is used as working directory" "/Users" "$output"
+        fi
+    }
+    queue_test test_readable_dir_used
 
     ###############################################################################
-    echo ""
-    echo "  === Shell Args Tests ($mode_label) ==="
+    # Shell Args Tests
     ###############################################################################
 
-	assert_sandbox_args_contains "sv s -- invalid command errors" "definitely-not-a-command-xyz" "command not found"
-	assert_sandbox_args_contains "sv s -- printf preserves quoted args" "printf" "%s\\n" "a b" "c d" $'a b\nc d'
-	assert_sandbox_exit_code "sv s -- exit 33 returns 33" 33 exit 33
-	((TESTS_RUN++)) || true
-	set +e
-	output=$(echo "ABC" | sv_cmd s -- tr 'A-Z' 'a-z' 2>&1)
-	set -e
-	if [[ "$output" =~ ^abc ]]; then
-	    pass "sv s -- stdin piping works correctly"
-	else
-	    fail "sv s -- stdin piping works correctly" "abc" "$output"
-	fi
+    queue_test assert_sandbox_args_contains "sv s -- invalid command errors" "definitely-not-a-command-xyz" "command not found"
+    queue_test assert_sandbox_args_contains "sv s -- printf preserves quoted args" "printf" "%s\\n" "a b" "c d" $'a b\nc d'
+    queue_test assert_sandbox_exit_code "sv s -- exit 33 returns 33" 33 exit 33
+    test_stdin_piping() {
+        local output
+        set +e
+        output=$(echo "ABC" | sv_cmd s -- tr 'A-Z' 'a-z' 2>&1)
+        set -e
+        if [[ "$output" =~ ^abc ]]; then
+            pass "sv s -- stdin piping works correctly"
+        else
+            fail "sv s -- stdin piping works correctly" "abc" "$output"
+        fi
+    }
+    queue_test test_stdin_piping
 
     ###############################################################################
-    echo ""
-    echo "  === Summary ($mode_label) ==="
+    # Summary
     ###############################################################################
 
-    echo "Tests run: $TESTS_RUN"
+    collect_results
+
     echo -e "Passed: ${GREEN}$TESTS_PASSED${NC}"
     echo -e "Failed: ${RED}$TESTS_FAILED${NC}"
 
     if [[ "$TESTS_FAILED" -gt 0 ]]; then
         exit 1
     fi
+
 }
 
-# Ensure that the shell doesn't have sudo permissions
+
+###############################################################################
+# Test setup
+###############################################################################
+# Build sandbox
+"$(SV_BASE)" build
+
+# Ensure that the shell doesn't have sudo permissions for tests
 sudo --reset-timestamp
 
+
+###############################################################################
+# Guard Session
+# Keep a session open to avoid teardown while other tests initialize.
+###############################################################################
+start_guard() {
+    GUARD_FIFO="$(mktemp -u)"
+    mkfifo "$GUARD_FIFO"
+    GUARD_FD=9
+    exec 9<>"$GUARD_FIFO"
+    sv --no-build s <&9 >/dev/null 2>&1 &
+    GUARD_PID=$!
+
+    # Give the guard session a moment to initialize.
+    sleep 0.2
+    if ! kill -0 "$GUARD_PID" 2>/dev/null; then
+        rm -f "$GUARD_FIFO"
+        GUARD_FIFO=""
+        GUARD_PID=""
+        echo "  Guard session failed to start"
+        exit 1
+    fi
+}
+
+cleanup_guard() {
+    if [[ -n "$GUARD_FIFO" && -n "$GUARD_PID" ]]; then
+        if [[ -n "$GUARD_FD" ]]; then
+            printf 'exit\n' 1>&9 2>/dev/null || true
+            exec 9>&- 2>/dev/null || true
+        else
+            printf 'exit\n' > "$GUARD_FIFO" 2>/dev/null || true
+        fi
+        wait "$GUARD_PID" 2>/dev/null || true
+        rm -f "$GUARD_FIFO" 2>/dev/null || true
+        GUARD_FIFO=""
+        GUARD_PID=""
+        GUARD_FD=""
+    fi
+}
+
+
+###############################################################################
+# Run tests
+###############################################################################
+trap cleanup_guard EXIT
+start_guard
 for sv_mode in "default" "ssh"; do
     if [[ "$sv_mode" == "ssh" ]]; then
         SV_CMD=("$SV_BASE" "--ssh")
@@ -326,7 +465,12 @@ for sv_mode in "default" "ssh"; do
 
     run_tests "$mode_label"
 done
+cleanup_guard
 
+
+###############################################################################
+# Cleanup
+###############################################################################
 END_TIME=$(date +%s.%N)
 ELAPSED_TIME=$(echo "$END_TIME - $START_TIME" | bc --mathlib | xargs printf "%.2f\n")
 echo -e "✅ Tests completed in $ELAPSED_TIME seconds!"
