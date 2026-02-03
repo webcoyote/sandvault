@@ -33,6 +33,38 @@ abort () {
 # EOF
 heredoc(){ IFS=$'\n' read -r -d '' "${1}" || true; }
 
+git_config_set_if_changed() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    local values=()
+
+    while IFS= read -r line; do
+        values+=("$line")
+    done < <(git config -f "$file" --get-all "$key" 2>/dev/null || true)
+    if [[ ${#values[@]} -eq 1 && "${values[0]}" == "$value" ]]; then
+        return 0
+    fi
+
+    git config set -f "$file" "$key" "$value"
+}
+
+git_config_require_value() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    local values=()
+
+    while IFS= read -r line; do
+        values+=("$line")
+    done < <(git config -f "$file" --get-all "$key" 2>/dev/null || true)
+    if [[ ${#values[@]} -eq 1 && "${values[0]}" == "$value" ]]; then
+        return 0
+    fi
+
+    abort "--no-build set: git config $key in $file would change"
+}
+
 
 ###############################################################################
 # Preconditions
@@ -49,7 +81,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.1.14"
+readonly VERSION="1.1.15"
 
 # Each user on the computer can have their own sandvault
 readonly SANDVAULT_USER="sandvault-$USER"
@@ -121,6 +153,12 @@ ensure_brew() {
 ensure_brew_tool() {
     local tool="$1"
     local cli_name="${2:-$tool}"
+    if [[ "${NO_BUILD:-false}" != "false" ]]; then
+        if command -v "$cli_name" &>/dev/null; then
+            return 0
+        fi
+        abort "--no-build set: missing $cli_name; refusing to install $tool"
+    fi
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in || condition
     brew_shellenv || true
     if command -v "$cli_name" &>/dev/null; then
@@ -314,6 +352,7 @@ uninstall() {
 # Parse command line
 ###############################################################################
 REBUILD=false
+NO_BUILD=false
 MODE=shell
 COMMAND_ARGS=()
 
@@ -332,6 +371,7 @@ show_help() {
     echo "  -v, --verbose        Enable verbose output"
     echo "  -vv / -vvv           More verbose / even more verbose"
     echo "  -h, --help           Show this help message"
+    echo "  --no-build           Refuse to make any sandbox changes; error if changes are needed"
     echo "  --version            Show version information"
     echo ""
     echo "Commands:"
@@ -379,6 +419,10 @@ while [[ $# -gt 0 ]]; do
             ((VERBOSE+=3)) || true
             shift
             ;;
+        --no-build)
+            NO_BUILD=true
+            shift
+            ;;
         -h|--help)
             show_help
             ;;
@@ -419,6 +463,9 @@ case "${1:-}" in
         COMMAND=build
         ;;
     u|uninstall)
+        if [[ "$NO_BUILD" != "false" ]]; then
+            abort "--no-build set: refusing to uninstall"
+        fi
         uninstall
         exit 0
         ;;
@@ -426,6 +473,10 @@ case "${1:-}" in
         show_help
         ;;
 esac
+
+if [[ "$NO_BUILD" != "false" ]] && [[ "$COMMAND" == "build" ]]; then
+    abort "--no-build set: refusing to build sandvault"
+fi
 INITIAL_DIR="${INITIAL_DIR:-$PWD}"
 
 # Resolve symlinks to get the real path
@@ -448,6 +499,10 @@ if [[ ! -f "$INSTALL_MARKER" ]]; then
     # Since this is a full rebuild, provide more feedback
     VERBOSE=$(( VERBOSE > 1 ? VERBOSE : 1 ))
     REBUILD=true
+fi
+
+if [[ "$NO_BUILD" != "false" ]] && [[ "$REBUILD" != "false" ]]; then
+    abort "--no-build set: sandvault is not fully installed (run without --no-build)"
 fi
 
 if [[ "$REBUILD" != "false" ]]; then
@@ -673,6 +728,9 @@ fi
 ###############################################################################
 # Configure sandbox-exec
 ###############################################################################
+if [[ "$NO_BUILD" != "false" ]] && [[ ! -f "$SANDBOX_PROFILE" ]]; then
+    abort "--no-build set: sandbox profile is missing"
+fi
 if [[ "$REBUILD" != "false" ]] || [[ ! -f "$SANDBOX_PROFILE" ]]; then
     debug "Configuring passwordless access to $SANDVAULT_USER..."
 
@@ -701,6 +759,9 @@ fi
 # Create passwordless SSH key with permission to remotely login to guest
 ###############################################################################
 if [[ ! -f "$SSH_KEYFILE_PRIV" ]] || [[ ! -f "$SSH_KEYFILE_PUB" ]]; then
+    if [[ "$NO_BUILD" != "false" ]]; then
+        abort "--no-build set: SSH keypair is missing"
+    fi
     trace "Creating SSH key files..."
     mkdir -p "$SSH_DIR"
     /bin/chmod 0700 "$SSH_DIR"
@@ -714,10 +775,19 @@ fi
 # Add SSH public key to host's authorized_keys
 trace "Configuring remote SSH access"
 GUEST_AUTHORIZED_KEYS="$WORKSPACE/guest/home/.ssh/authorized_keys"
-mkdir -p "$(dirname "$GUEST_AUTHORIZED_KEYS")"
-/bin/chmod 0700 "$(dirname "$GUEST_AUTHORIZED_KEYS")"
-cp "$SSH_KEYFILE_PUB" "$GUEST_AUTHORIZED_KEYS"
-/bin/chmod 0600 "$GUEST_AUTHORIZED_KEYS"
+if [[ "$NO_BUILD" != "false" ]]; then
+    if [[ ! -f "$GUEST_AUTHORIZED_KEYS" ]]; then
+        abort "--no-build set: $GUEST_AUTHORIZED_KEYS is missing"
+    fi
+    if ! cmp -s "$SSH_KEYFILE_PUB" "$GUEST_AUTHORIZED_KEYS"; then
+        abort "--no-build set: SSH authorized_keys would change"
+    fi
+else
+    mkdir -p "$(dirname "$GUEST_AUTHORIZED_KEYS")"
+    /bin/chmod 0700 "$(dirname "$GUEST_AUTHORIZED_KEYS")"
+    cp "$SSH_KEYFILE_PUB" "$GUEST_AUTHORIZED_KEYS"
+    /bin/chmod 0600 "$GUEST_AUTHORIZED_KEYS"
+fi
 
 
 ###############################################################################
@@ -728,24 +798,38 @@ trace "Configuring git..."
 # Get git config from host
 GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
 GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
-git config set -f "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
-git config set -f "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
-git config set -f "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
+if [[ "$NO_BUILD" != "false" ]]; then
+    git_config_require_value "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
+    git_config_require_value "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
+    git_config_require_value "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
+else
+    git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
+    git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
+    git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
+fi
 
 
 ###############################################################################
 # Copy guest/home/. to sandvault $HOME
 ###############################################################################
-debug "Configure $SANDVAULT_USER home directory..."
-sudo "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+if [[ "$NO_BUILD" == "false" ]]; then
+    debug "Configure $SANDVAULT_USER home directory..."
+    sudo "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+fi
 
 
 ###############################################################################
 # Mark installation as complete
 ###############################################################################
-debug "Creating installation marker..."
-mkdir -p "$(dirname "$INSTALL_MARKER")"
-date > "$INSTALL_MARKER"
+if [[ "$NO_BUILD" != "false" ]]; then
+    if [[ ! -f "$INSTALL_MARKER" ]]; then
+        abort "--no-build set: install marker is missing"
+    fi
+else
+    debug "Creating installation marker..."
+    mkdir -p "$(dirname "$INSTALL_MARKER")"
+    date > "$INSTALL_MARKER"
+fi
 
 
 ###############################################################################
