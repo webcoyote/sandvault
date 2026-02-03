@@ -1,4 +1,5 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# Use "system bash" (v3.2) to validate compatibility
 # Test the sv CLI and sandbox security
 set -Eeuo pipefail
 START_TIME=$(date +%s.%N)
@@ -402,8 +403,8 @@ run_tests() {
 ###############################################################################
 # Test setup
 ###############################################################################
-# Build sandbox
-"$(SV_BASE)" build
+# Build sandbox with system bash to check compatibility
+/bin/bash "$SV_BASE" build
 
 # Ensure that the shell doesn't have sudo permissions for tests
 sudo --reset-timestamp
@@ -418,7 +419,7 @@ start_guard() {
     mkfifo "$GUARD_FIFO"
     GUARD_FD=9
     exec 9<>"$GUARD_FIFO"
-    sv --no-build s <&9 >/dev/null 2>&1 &
+    "${SV_CMD[@]}" --no-build s <&9 >/dev/null 2>&1 &
     GUARD_PID=$!
 
     # Give the guard session a moment to initialize.
@@ -452,18 +453,34 @@ cleanup_guard() {
 ###############################################################################
 # Run tests
 ###############################################################################
+SYSTEM_BASH="/bin/bash"
+BREW_BASH=""
+if [[ -x /opt/homebrew/bin/bash ]]; then
+    BREW_BASH="/opt/homebrew/bin/bash"
+elif [[ -x /usr/local/bin/bash ]]; then
+    BREW_BASH="/usr/local/bin/bash"
+fi
+
+# Default command for the guard session (set before start_guard).
+SV_CMD=("$SYSTEM_BASH" "$SV_BASE")
 trap cleanup_guard EXIT
 start_guard
-for sv_mode in "default" "ssh"; do
-    if [[ "$sv_mode" == "ssh" ]]; then
-        SV_CMD=("$SV_BASE" "--ssh")
-        mode_label="sv --ssh"
-    else
-        SV_CMD=("$SV_BASE")
-        mode_label="sv"
-    fi
 
-    run_tests "$mode_label"
+for bash_path in "$SYSTEM_BASH" "$BREW_BASH"; do
+    if [[ -z "$bash_path" ]]; then
+        continue
+    fi
+    for sv_mode in "default" "ssh"; do
+        if [[ "$sv_mode" == "ssh" ]]; then
+            SV_CMD=("$bash_path" "$SV_BASE" "--ssh")
+            mode_label="$bash_path sv --ssh"
+        else
+            SV_CMD=("$bash_path" "$SV_BASE")
+            mode_label="$bash_path sv"
+        fi
+
+        run_tests "$mode_label"
+    done
 done
 cleanup_guard
 
