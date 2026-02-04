@@ -81,13 +81,13 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.1.16"
+readonly VERSION="1.1.17"
 
 # Each user on the computer can have their own sandvault
 readonly SANDVAULT_USER="sandvault-$USER"
 readonly SANDVAULT_GROUP="sandvault-$USER"
 readonly SHARED_WORKSPACE="/Users/Shared/sv-$USER"
-readonly SANDVAULT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit"
+readonly SANDVAULT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
 
 # Create sudoers.d file for passwordless sudo to sandvault user
 readonly SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
