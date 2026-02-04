@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Test the project
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+"$SCRIPT_DIR/build"
+
+if [[ -n "${SV_SESSION_ID:-}" ]]; then
+    echo "xcodeproject project testing in sandvault sandbox"
+fi
+
+output="$(".build/Build/Products/Debug/XcodebuildApp")"
+if [[ "$output" == "Hello world" ]]; then
+    echo "PASS: output matched"
+else
+    echo "FAIL: expected 'Hello world', got '$output'"
+    exit 1
+fi

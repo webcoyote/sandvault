@@ -1,0 +1,12 @@
+#!/bin/bash
+# Cleanup build files
+set -Eeuo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+shopt -s nullglob
+for dir in *; do
+    [[ -d "$dir" ]] || continue
+    rm -rf "$dir/.build" -rf || true
+done
+shopt -u nullglob
