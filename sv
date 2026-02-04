@@ -746,14 +746,32 @@ if [[ "$REBUILD" != "false" ]] || [[ ! -f "$SANDBOX_PROFILE" ]]; then
     #
     # The profile file is owned by root so sandvault user cannot modify it.
     debug "Creating sandbox profile..."
-heredoc SANDBOX_PROFILE_CONTENT << 'EOF'
-;; Sandbox profile for sandvault - restricts access to external drives
+heredoc SANDBOX_PROFILE_CONTENT << EOF
+;; Sandbox profile for sandvault
 (version 1)
 (allow default)
-(deny file-read* (subpath "/Volumes"))
-(deny file-write* (subpath "/Volumes"))
-(allow file-read* (subpath "/Volumes/Macintosh HD"))
-(allow file-write* (subpath "/Volumes/Macintosh HD"))
+
+;; restrict writes to everything
+(deny file-write*
+    (subpath "/"))
+
+;; restrict reads to Volumes to prevent access to removable disks,
+;; but ensure the main disk is readable via Volumes.
+(deny file-read*
+    (subpath "/Volumes"))
+(allow file-read*
+    (subpath "/Volumes/Macintosh HD"))
+
+;; Allow writes to sandvault home, shared workspace, temporary directories.
+;; Allow writes to devices, which are protected by unix permissions
+(allow file-write*
+    (subpath "$SHARED_WORKSPACE")
+    (subpath "/Users/$SANDVAULT_USER")
+    (subpath "/tmp")
+    (subpath "/private/tmp")
+    (subpath "/var/folders")
+    (subpath "/private/var/folders")
+    (subpath "/dev"))
 EOF
     # shellcheck disable=SC2154
     echo "$SANDBOX_PROFILE_CONTENT" | sudo tee "$SANDBOX_PROFILE" > /dev/null

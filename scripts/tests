@@ -50,34 +50,42 @@ sv_cmd() {
     "${SV_CMD[@]}" --no-build "$@"
 }
 
-# Run command in sandbox and capture output
-sandbox_run() {
+# Run command in sandbox via stdin
+sandbox_run_with_pipe() {
     set +e
     echo "$1 ; exit" | sv_cmd s 2>&1
+    status=$?
     set -e
+    return "$status"
 }
 
-# Run command in sandbox via CLI args
-sandbox_run_args() {
+# Run command in sandbox via args
+sandbox_run_with_args() {
     set +e
     sv_cmd s -- "$@" 2>&1
+    status=$?
     set -e
+    return "$status"
 }
 
 # Test that sandbox output contains expected string
-assert_sandbox_contains() {
+assert_sandbox_pipe_contains() {
     local name="$1"
     local cmd="$2"
     local expected="$3"
     local output
-    output=$(sandbox_run "$cmd")
-    if [[ "$output" == *"$expected"* ]]; then
+    set +e
+    output=$(sandbox_run_with_pipe "$cmd")
+    status=$?
+    set -e
+    if [[ "$status" -eq 0 && "$output" == *"$expected"* ]]; then
         pass "$name"
     else
-        fail "$name" "contains '$expected'" "$output"
+        fail "$name" "contains '$expected'" "$status | $output"
     fi
 }
 
+# Test that sandbox output contains expected string
 assert_sandbox_args_contains() {
     local name="$1"
     shift
@@ -85,11 +93,14 @@ assert_sandbox_args_contains() {
     local args=("$@")
     local expected="${args[${#args[@]}-1]}"
     unset 'args[${#args[@]}-1]'
-    output=$(sandbox_run_args "${args[@]}")
-    if [[ "$output" == *"$expected"* ]]; then
+    set +e
+    output=$(sandbox_run_with_args "${args[@]}")
+    status=$?
+    set -e
+    if [[ "$status" -eq 0 && "$output" == *"$expected"* ]]; then
         pass "$name"
     else
-        fail "$name" "contains '$expected'" "$output"
+        fail "$name" "contains '$expected'" "$status | $output"
     fi
 }
 
@@ -116,11 +127,14 @@ assert_sandbox_not_contains() {
     local cmd="$2"
     local forbidden="$3"
     local output
-    output=$(sandbox_run "$cmd")
-    if [[ "$output" != *"$forbidden"* ]]; then
+    set +e
+    output=$(sandbox_run_with_pipe "$cmd")
+    status=$?
+    set -e
+    if [[ "$status" -eq 0 && "$output" != *"$forbidden"* ]]; then
         pass "$name"
     else
-        fail "$name" "should not contain '$forbidden'" "$output"
+        fail "$name" "should not contain '$forbidden'" "$status | $output"
     fi
 }
 
@@ -129,16 +143,14 @@ assert_sandbox_fails() {
     local name="$1"
     local cmd="$2"
     local output
-    output=$(sandbox_run "$cmd")
-    # Check for common error indicators
-    if [[ "$output" == *"denied"* ]] || \
-       [[ "$output" == *"Permission denied"* ]] || \
-       [[ "$output" == *"Operation not permitted"* ]] || \
-       [[ "$output" == *"No such file"* ]] || \
-       [[ "$output" == *"not permitted"* ]]; then
+    set +e
+    output=$(sandbox_run_with_pipe "$cmd")
+    status=$?
+    set -e
+    if [[ "$status" -ne 0 ]]; then
         pass "$name"
     else
-        fail "$name" "command should fail" "$output"
+        fail "$name" "command should fail" "$status | $output"
     fi
 }
 
@@ -148,7 +160,7 @@ assert_sandbox_path_order() {
     local before="$2"
     local after="$3"
     local output path pos_before pos_after
-    output=$(sandbox_run "printf '%s' \"\$PATH\"")
+    output=$(sandbox_run_with_pipe "printf '%s' \"\$PATH\"")
     output="${output%%$'\n'*}"
     if [[ -z "$output" ]]; then
         fail "$name" "PATH output" "<empty>"
@@ -274,11 +286,11 @@ run_tests() {
     ###############################################################################
 
     # Verify we're running as sandvault user, not host user
-    queue_test assert_sandbox_contains "running as sandvault user" "whoami" "$SANDVAULT_USER"
+    queue_test assert_sandbox_pipe_contains "running as sandvault user" "whoami" "$SANDVAULT_USER"
 
     # Verify HOME is sandvault's home (single quotes intentional - evaluated in sandbox)
     # shellcheck disable=SC2016
-    queue_test assert_sandbox_contains "HOME is sandvault home" 'echo $HOME' "/Users/sandvault-$USER"
+    queue_test assert_sandbox_pipe_contains "HOME is sandvault home" 'echo $HOME' "/Users/sandvault-$USER"
     # shellcheck disable=SC2016
     queue_test assert_sandbox_not_contains "HOME is not host home" 'echo $HOME' "$HOST_HOME"
 
@@ -293,12 +305,22 @@ run_tests() {
     ###############################################################################
 
     # Cannot read host user's home directory
-    queue_test assert_sandbox_fails "cannot ls host home" "ls $HOST_HOME"
-    queue_test assert_sandbox_fails "cannot read host .zshrc" "cat $HOST_HOME/.zshrc"
-    queue_test assert_sandbox_fails "cannot read host .ssh" "ls $HOST_HOME/.ssh"
+    queue_test assert_sandbox_fails "cannot ls host home" "ls '$HOST_HOME'"
+    queue_test assert_sandbox_fails "cannot read host .zshrc" "cat '$HOST_HOME/.zshrc'"
+    queue_test assert_sandbox_fails "cannot read host .ssh" "ls '$HOST_HOME/.ssh'"
 
     # Cannot read other users' directories
-    queue_test assert_sandbox_fails "cannot ls /Users/root" "ls /Users/root"
+    queue_test assert_sandbox_fails "cannot ls /Users/root" "ls '/Users/root'"
+
+    # Cannot write HOMEBREW directory
+    BREW_PREFIX="$(brew --prefix)"
+    queue_test assert_sandbox_fails "cannot write Homebrew files" "rm '$BREW_PREFIX/LICENSE.txt'"
+    queue_test assert_sandbox_args_contains "can read homebrew files" cat "$BREW_PREFIX/LICENSE.txt" "Copyright"
+
+    # Cannot write Applications directory
+    BREW_PREFIX="$(brew --prefix)"
+    queue_test assert_sandbox_fails "cannot write Applications directory" "touch 'Applications/test.txt'"
+
 
     ###############################################################################
     # Sandbox Escape Tests: /Volumes (External Drives)
@@ -322,14 +344,18 @@ run_tests() {
 
     # Should be able to access shared workspace
     SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
-    queue_test assert_sandbox_contains "can access shared workspace" "ls $SHARED_WORKSPACE" "SANDVAULT-README"
+    queue_test assert_sandbox_pipe_contains "can access shared workspace" "ls $SHARED_WORKSPACE" "SANDVAULT-README"
+    queue_test assert_sandbox_exit_code "sv s -- touch SANDVAULT-README.md" 0 touch -c "$SHARED_WORKSPACE/SANDVAULT-README.md"
+
+    # Should be able to access home directory
+    queue_test assert_sandbox_exit_code "sv s -- touch $SANDVAULT_HOME/README.md" 0 touch -c "$SANDVAULT_HOME/README.md"
 
     # Should be able to run basic commands
-    queue_test assert_sandbox_contains "can run echo" "echo hello" "hello"
+    queue_test assert_sandbox_pipe_contains "can run echo" "echo hello" "hello"
 
     test_pwd() {
         pushd /Users &>/dev/null
-        assert_sandbox_contains "can run pwd" "pwd" "$PWD"
+        assert_sandbox_pipe_contains "can run pwd" "pwd" "$PWD"
         popd &>/dev/null
     }
     queue_test test_pwd
@@ -368,7 +394,7 @@ run_tests() {
     # Shell Args Tests
     ###############################################################################
 
-    queue_test assert_sandbox_args_contains "sv s -- invalid command errors" "definitely-not-a-command-xyz" "command not found"
+    queue_test assert_sandbox_fails "cannot run invalid command" "definitely-not-a-command-xyz"
     queue_test assert_sandbox_args_contains "sv s -- printf preserves quoted args" "printf" "%s\\n" "a b" "c d" $'a b\nc d'
     queue_test assert_sandbox_exit_code "sv s -- exit 33 returns 33" 33 exit 33
     test_stdin_piping() {

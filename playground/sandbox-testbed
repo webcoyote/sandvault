@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Simple sandbox runner for quick tests
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+SANDVAULT_USER="sandvault-$USER"
+
+if ! id "$SANDVAULT_USER" >/dev/null 2>&1; then
+  echo "sandbox user '$SANDVAULT_USER' not found. Run ./sv build first." >&2
+  exit 1
+fi
+
+if ! sudo --non-interactive --user="$SANDVAULT_USER" /usr/bin/true ; then
+  echo "passwordless sudo for '$SANDVAULT_USER' is not configured. Run ./sv build." >&2
+  exit 1
+fi
+
+build_profile() {
+  cat << EOF
+(version 1)
+(allow default)
+
+;; deny writes everywhere by default
+(deny file-write*
+  (subpath "/"))
+
+;; deny reads of external volumes (allow main disk path)
+(deny file-read*
+  (subpath "/Volumes"))
+(allow file-read*
+  (subpath "/Volumes/Macintosh HD"))
+
+;; allow writes to sandbox user home and temp paths
+(allow file-write*
+  (subpath "/Users/$SANDVAULT_USER")
+  (subpath "/tmp")
+  (subpath "/private/tmp")
+  (subpath "/var/folders")
+  (subpath "/private/var/folders")
+  (subpath "/dev"))
+
+;; allow basic process info queries
+(allow process-info*)
+(allow sysctl-read)
+
+;; allow process exec/fork (ps may require process info access)
+(allow process*)
+
+;; allow /bin/ps (setuid) to run without sandbox restrictions
+(allow process-exec
+  (literal "/bin/ps")
+  (with no-sandbox))
+EOF
+}
+
+# Create sandbox profile
+SANDBOX_PROFILE_CONTENT_RAW="$(build_profile)"
+# Strip comments/blank lines and compress whitespace for -p.
+SANDBOX_PROFILE_CONTENT="$(
+  printf '%s\n' "$SANDBOX_PROFILE_CONTENT_RAW" \
+    | /usr/bin/awk '
+      /^[[:space:]]*;;/ { next }     # drop comment lines
+      /^[[:space:]]*$/ { next }      # drop blank lines
+      { gsub(/[[:space:]]+/, " "); sub(/^ /,""); sub(/ $/,""); printf "%s ", $0 }
+    '
+)"
+
+# Keep parity with ./sv behavior: use a ZSH_COMMAND wrapper that can accept args.
+ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; exec /bin/zsh --login"
+if [[ $# -gt 0 ]]; then
+  printf -v COMMAND_ARGS_STR '%q ' "$@"
+  ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; exec ${COMMAND_ARGS_STR}"
+fi
+
+exec sudo \
+  --login \
+  --set-home \
+  --user="$SANDVAULT_USER" \
+  /usr/bin/sandbox-exec -p "$SANDBOX_PROFILE_CONTENT" \
+  /bin/zsh -c "$ZSH_COMMAND"
