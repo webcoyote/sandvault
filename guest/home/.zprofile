@@ -7,11 +7,26 @@ elif [[ ! -r "$PWD" ]]; then
     cd "$HOME"
 fi
 
-# Add sandvault and user bin directories
-[[ -d "$HOME/bin" ]] && path=("$HOME/bin" $path)
-[[ -d "$HOME/.local/bin" ]] && path=("$HOME/.local/bin" $path)
-[[ -d "$HOME/user/bin" ]] && path=("$HOME/user/bin" $path)
-[[ -d "$HOME/user/.local/bin" ]] && path=("$HOME/user/.local/bin" $path)
+# Setup Homebrew PATH
+case "$(uname -m)" in
+    arm64)
+        if [[ -x /opt/homebrew/bin/brew ]]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+        fi
+        ;;
+    x86_64)
+        if [[ -x /usr/local/bin/brew ]]; then
+            eval "$(/usr/local/bin/brew shellenv)"
+        fi
+        ;;
+    *)
+        echo >&2 "sv: error: unsupported architecture: $(uname -m)"
+        exit 1
+        ;;
+esac
+
+# Add sandvault and user bin directories; user directories take priority
+path=("$HOME/user/bin" "$HOME/user/.local/bin" "$HOME/bin" "$HOME/.local/bin" $path)
 export PATH
 
 # Load user configuration
