@@ -4,6 +4,10 @@
 
 SandVault (sv) manages a limited user account to sandbox shell commands and AI agents, providing a lightweight alternative to application isolation using virtual machines.
 
+NOTES:
+
+1. To use `xcodebuild` or other sandboxed applications inside sandvault, use the `-x` option. See the section [Sandboxes and xcodebuild](#Sandboxes-and-xcodebuild) for details.
+2. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
 
 ## Features
 
@@ -141,6 +145,36 @@ The default mode for sandvault runs commands as a limited user (basically `sudo 
 # Misc commands
   sv --version
   sv --help
+```
+
+
+## Sandboxes and xcodebuild
+
+As an additional layer of security, sandvault runs applications using `sandbox-exec`, which further limits what resources are accessible to the sandvault account.
+
+Some applications, like `Xcode` and `xcodebuild`, are designed to run inside a sandbox, and -- because macOS does not support nested (i.e. recursive) sandboxes -- they're unable to run inside sandvault.
+
+You can run sandvault without utilizing `sandbox-exec`:
+
+```bash
+# Disable sandbox-exec restrictions (still runs as sandvault user)
+  sv --no-sandbox codex
+  sv -x           claude
+  sv --no-sandbox shell $HOME/projects/my-app -- xcodebuild ...
+```
+
+Disabling `sandbox-exec` has the following security implications:
+
+- No protection against reading/writing removable drives (`/Volumes/...`)
+- No protection against writing files with `o+w` (`0002`) file permissions
+
+```bash
+# To find all files on your computer that are "world writable" (perms: `o+w` / 0002)
+# run this command from your account (not in sandvault):
+  find / \
+       -path "/Users/sandvault-$USER" -prune \
+    -o -path "/Users/sv-$USER" -prune \
+    -o -perm -o=w -print 2>/dev/null
 ```
 
 

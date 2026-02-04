@@ -353,6 +353,7 @@ uninstall() {
 ###############################################################################
 REBUILD=false
 NO_BUILD=false
+USE_SANDBOX=true
 MODE=shell
 COMMAND_ARGS=()
 
@@ -371,7 +372,8 @@ show_help() {
     echo "  -v, --verbose        Enable verbose output"
     echo "  -vv / -vvv           More verbose / even more verbose"
     echo "  -h, --help           Show this help message"
-    echo "  --no-build           Refuse to make any sandbox changes; error if changes are needed"
+    echo "  -n, --no-build       Refuse to make any sandbox changes; error if changes are needed"
+    echo "  -x, --no-sandbox     Disable sandbox-exec restrictions"
     echo "  --version            Show version information"
     echo ""
     echo "Commands:"
@@ -419,8 +421,12 @@ while [[ $# -gt 0 ]]; do
             ((VERBOSE+=3)) || true
             shift
             ;;
-        --no-build)
+        -n|--no-build)
             NO_BUILD=true
+            shift
+            ;;
+        -x|--no-sandbox)
+            USE_SANDBOX=false
             shift
             ;;
         -h|--help)
@@ -888,6 +894,13 @@ fi
 # Unique session id for this invocation (used by shell init scripts)
 SV_SESSION_ID="${SV_SESSION_ID:-$(/usr/bin/uuidgen)}"
 
+SANDBOX_EXEC=()
+if [[ "$USE_SANDBOX" != "false" ]]; then
+    SANDBOX_EXEC=(/usr/bin/sandbox-exec -f "$SANDBOX_PROFILE")
+else
+    debug "Sandbox disabled: running without sandbox-exec restrictions"
+fi
+
 if [[ "$MODE" == "ssh" ]]; then
     # Only allocate a TTY for interactive shells.
     SSH_TTY_OPT="-t"
@@ -951,8 +964,8 @@ if [[ "$MODE" == "ssh" ]]; then
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "VERBOSE=$VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
-            /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
-                /bin/zsh -c "$ZSH_COMMAND_SSH"
+            "${SANDBOX_EXEC[@]}" \
+            /bin/zsh -c "$ZSH_COMMAND_SSH"
     then
         :
     else
@@ -993,8 +1006,8 @@ else
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "VERBOSE=$VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
-            /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" \
-                /bin/zsh -c "$ZSH_COMMAND"
+            "${SANDBOX_EXEC[@]}" \
+            /bin/zsh -c "$ZSH_COMMAND"
     then
         :
     else
