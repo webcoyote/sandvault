@@ -3,4 +3,14 @@
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-exec "$SCRIPT_DIR/tests"
+ORANGE='\033[38;5;208m'
+NC='\033[0m'
+
+
+echo -e "${ORANGE}scripts/tests${NC}"
+"$SCRIPT_DIR/tests"
+
+echo
+
+echo -e "${ORANGE}tests/validate${NC}"
+"$SCRIPT_DIR/../tests/validate"

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Build the project
+set -Eeuo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+ARGS=()
+
+# Disable sandboxing when running inside sandvault to avoid nested sandbox-exec
+if [[ -n "${SV_SESSION_ID:-}" ]]; then
+    echo "swift project building in sandvault sandbox"
+    ARGS+=(--disable-sandbox)
+fi
+
+# Bash 3.2-safe: expand array only when set, with no empty arg
+swift build ${ARGS[@]+"${ARGS[@]}"} "$@"

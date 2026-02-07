@@ -1,0 +1,197 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		9116A04EDB8C4942B9DDA772 = {isa = PBXBuildFile; fileRef = FD811B54A8B8434AB7E85C15; };
+		A1B2C3D4E5F60718293A4B5C = {isa = PBXBuildFile; productRef = D4E5F60718293A4B5C6D7E8F; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		FD811B54A8B8434AB7E85C15 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		AB905DD7F47845A6B36684FA = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; path = XcodebuildApp; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		6F13F7C1DE064893B458B810 = {
+			isa = PBXGroup;
+			children = (
+				ACC79E6D5ED343AFBDDF0E2F,
+				13D9A54D524E4755BA18FFF7,
+			);
+			sourceTree = "<group>";
+		};
+		ACC79E6D5ED343AFBDDF0E2F = {
+			isa = PBXGroup;
+			children = (
+				FD811B54A8B8434AB7E85C15,
+			);
+			path = XcodebuildApp;
+			sourceTree = "<group>";
+		};
+		13D9A54D524E4755BA18FFF7 = {
+			isa = PBXGroup;
+			children = (
+				AB905DD7F47845A6B36684FA,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		7898B5218D65468AB23504A9 = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 40BEBE4803874F8C884A516F;
+			buildPhases = (
+				EB2555E5B6554440B8DE6AC5,
+				B2C3D4E5F60718293A4B5C6D,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = XcodebuildApp;
+			packageProductDependencies = (
+				D4E5F60718293A4B5C6D7E8F,
+			);
+			productName = XcodebuildApp;
+			productReference = AB905DD7F47845A6B36684FA;
+			productType = "com.apple.product-type.tool";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		DE12AE3216534790B5E95DA4 = {
+			isa = PBXProject;
+			buildConfigurationList = 5E1271CFC1324E3BAC1055E1;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+			);
+			mainGroup = 6F13F7C1DE064893B458B810;
+			packageReferences = (
+				C3D4E5F60718293A4B5C6D7E,
+			);
+			productRefGroup = 13D9A54D524E4755BA18FFF7;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7898B5218D65468AB23504A9,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		B2C3D4E5F60718293A4B5C6D = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1B2C3D4E5F60718293A4B5C,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		EB2555E5B6554440B8DE6AC5 = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9116A04EDB8C4942B9DDA772,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		622D9319D2B7413C99BD052B = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_NAME = XcodebuildApp;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		D1B814D2EE0440E1B9F526CE = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_NAME = XcodebuildApp;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		BFE3F3ECAC60498886ACD919 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		BCB8D4E0598D479DACD950CE = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		40BEBE4803874F8C884A516F = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				622D9319D2B7413C99BD052B,
+				D1B814D2EE0440E1B9F526CE,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5E1271CFC1324E3BAC1055E1 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BFE3F3ECAC60498886ACD919,
+				BCB8D4E0598D479DACD950CE,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		C3D4E5F60718293A4B5C6D7E = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-algorithms.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.2.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D4E5F60718293A4B5C6D7E8F = {
+			isa = XCSwiftPackageProductDependency;
+			package = C3D4E5F60718293A4B5C6D7E;
+			productName = Algorithms;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = DE12AE3216534790B5E95DA4;
+}

@@ -4,10 +4,12 @@
 
 SandVault (sv) manages a limited user account to sandbox shell commands and AI agents, providing a lightweight alternative to application isolation using virtual machines.
 
-NOTES:
+TL;DR:
 
-1. To use `xcodebuild` or other sandboxed applications inside sandvault, use the `-x` option. See the section [Sandboxes and xcodebuild](#Sandboxes-and-xcodebuild) for details.
-2. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
+1. To run `xcodebuild` or `swift` see [Sandboxing xcodebuild and swift](#Sandboxing-xcodebuild-and-swift) for details.
+2. To run other sandboxed applications inside sandvault, use the `-x` option. See [Sandboxing other apps](#Sandboxing-other-apps) for details.
+3. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
+
 
 ## Features
 
@@ -148,18 +150,62 @@ The default mode for sandvault runs commands as a limited user (basically `sudo 
 ```
 
 
-## Sandboxes and xcodebuild
+## Nested sandboxes
 
-As an additional layer of security, sandvault runs applications using `sandbox-exec`, which further limits what resources are accessible to the sandvault account.
+In addition to running in a different macOS user account, sandvault also runs applications using macOS `sandbox-exec`, which further limits what resources are accessible.
 
-Some applications, like `Xcode` and `xcodebuild`, are designed to run inside a sandbox, and -- because macOS does not support nested (i.e. recursive) sandboxes -- they're unable to run inside sandvault.
+Some applications, like `swift`, already run inside a sandbox. Because macOS does not support nested (i.e. recursive) sandboxes, these applications fail to run.
 
-You can run sandvault without utilizing `sandbox-exec`:
+Read on for solutions.
+
+
+### Sandboxing xcodebuild and swift
+
+For `swift` (and `xcodebuild`, which runs `swift`), you can set the following variables in your build scripts to run inside sandvault:
+
+For `swift`:
 
 ```bash
-# Disable sandbox-exec restrictions (still runs as sandvault user)
-  sv --no-sandbox codex
+ARGS=()
+
+# Disable sandboxing when running inside sandvault to avoid nested sandbox-exec
+if [[ -n "${SV_SESSION_ID:-}" ]]; then
+    ARGS+=(--disable-sandbox)
+fi
+
+swift build "${ARGS[@]}" "$@"
+```
+
+For `xcodebuild`:
+
+```bash
+ARGS=()
+
+# Disable sandboxing when running inside sandvault to avoid nested sandbox-exec
+if [[ -n "${SV_SESSION_ID:-}" ]]; then
+    export SWIFTPM_DISABLE_SANDBOX=1
+    export SWIFT_BUILD_USE_SANDBOX=0
+    ARGS+=("-IDEPackageSupportDisableManifestSandbox=1")
+    ARGS+=("-IDEPackageSupportDisablePackageSandbox=1")
+    # shellcheck disable=SC2016 # Expressions don't expand in single quotes # that is intentional
+    ARGS+=('OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox')
+fi
+
+xcodebuild \
+    build \
+    "${ARGS[@]}" \
+    ...
+```
+
+
+### Sandboxing other apps
+
+If the app you intend to run does not support disabling it use of sandbox-exec like `xcodebuild` and `swift` you can run andvault without utilizing `sandbox-exec`:
+
+```bash
+# Disable use of sandbox-exec (app still runs as sandvault user) using -x / --no-sandbox
   sv -x           claude
+  sv --no-sandbox codex
   sv --no-sandbox shell $HOME/projects/my-app -- xcodebuild ...
 ```
 

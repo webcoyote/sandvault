@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Build the project
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+ARGS=()
+if [[ -z "${NO_XCSIFT:-}" ]] && command -v xcsift &>/dev/null; then
+    SIFT=(xcsift -WEq)
+else
+    ARGS+=("-quiet")
+    SIFT=(cat)
+fi
+
+# Disable sandboxing when running inside sandvault to avoid nested sandbox-exec
+if [[ -n "${SV_SESSION_ID:-}" ]]; then
+    echo "xcodeproject project building in sandvault sandbox"
+    export SWIFTPM_DISABLE_SANDBOX=1
+    export SWIFT_BUILD_USE_SANDBOX=0
+    ARGS+=("-IDEPackageSupportDisableManifestSandbox=1")
+    ARGS+=("-IDEPackageSupportDisablePackageSandbox=1")
+    # shellcheck disable=SC2016 # Expressions don't expand in single quotes # that is intentional
+    ARGS+=('OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox')
+fi
+
+# Bash 3.2-safe: expand array only when set, with no empty arg
+# Pin destination to avoid xcodebuild choosing among multiple macOS arches.
+DESTINATION="${XCODE_DESTINATION:-platform=macOS,arch=arm64}"
+xcodebuild \
+    build \
+    ${ARGS[@]+"${ARGS[@]}"} \
+    -destination "$DESTINATION" \
+    -project XcodebuildApp.xcodeproj \
+    -scheme XcodebuildApp \
+    -configuration Debug \
+    -derivedDataPath .build \
+    ALWAYS_SEARCH_USER_PATHS=NO \
+    -parallelizeTargets \
+    -jobs "$(sysctl -n hw.ncpu)" \
+    2>&1 | "${SIFT[@]}"
