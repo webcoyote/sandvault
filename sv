@@ -772,6 +772,18 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
     (subpath "/var/folders")
     (subpath "/private/var/folders")
     (subpath "/dev"))
+
+;; allow basic process info queries
+(allow process-info*)
+(allow sysctl-read)
+
+;; allow process exec/fork (ps may require process info access)
+(allow process*)
+
+;; allow /bin/ps (setuid) to run without sandbox restrictions
+(allow process-exec
+    (literal "/bin/ps")
+    (with no-sandbox))
 EOF
     # shellcheck disable=SC2154
     echo "$SANDBOX_PROFILE_CONTENT" | sudo tee "$SANDBOX_PROFILE" > /dev/null
