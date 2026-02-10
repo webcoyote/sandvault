@@ -25,14 +25,12 @@ if [[ -z "${SV_SESSION_ID:-}" && -z "${SV_TESTS_REEXEC:-}" ]]; then
             SANDBOX_TESTS_DIR="$(mktemp -d -p "$SHARED_WORKSPACE")"
             readonly SANDBOX_TESTS_DIR
             trap 'rm -rf "$SANDBOX_TESTS_DIR"' EXIT
-            git clone --depth 1 --no-local "$GIT_TOP_LEVEL_DIR" "$SANDBOX_TESTS_DIR"
+            git clone --depth 1 --no-local "$GIT_TOP_LEVEL_DIR" "$SANDBOX_TESTS_DIR" &>/dev/null
 
-            # GitHub actions uses Bash3.2 with not support for "realpath --relative-to"
+            # GitHub actions uses Bash3.2 which does not support for "realpath --relative-to"
             # SCRIPT_RELATIVE_PATH="$(realpath --relative-to="$GIT_TOP_LEVEL_DIR" "${BASH_SOURCE[0]}")"
-            # Strip the base path from the target path
-            # Add trailing slash so we don't get a leading slash in the result
-            BASE="$(readlink -f "$GIT_TOP_LEVEL_DIR")"
-            TARGET="$(readlink -f "${BASH_SOURCE[0]}")"
+            BASE="$(cd "$GIT_TOP_LEVEL_DIR" && pwd -P)"
+            TARGET="$(cd "$SCRIPT_DIR" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
             SCRIPT_RELATIVE_PATH="${TARGET#"$BASE/"}" # "tests/validate"
             if "$SANDBOX_TESTS_DIR/$SCRIPT_RELATIVE_PATH" "$@" ; then
                 exit 0
