@@ -5,15 +5,22 @@ trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+export VERBOSE
+
 "$SCRIPT_DIR/build"
 
 if [[ -n "${SV_SESSION_ID:-}" ]]; then
-    echo "xcodeproject project testing in sandvault sandbox"
+    if [[ "$VERBOSE" -ne 0 ]]; then
+        echo "xcodeproject project testing in sandvault sandbox"
+    fi
 fi
 
 output="$(".build/Build/Products/Debug/XcodebuildApp")"
 if [[ "$output" == "Hello world" ]]; then
-    echo "PASS: output matched"
+    if [[ "$VERBOSE" -ne 0 ]]; then
+        echo "PASS: output matched"
+    fi
 else
     echo "FAIL: expected 'Hello world', got '$output'"
     exit 1

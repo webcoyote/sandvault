@@ -5,18 +5,23 @@ trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
-ARGS=()
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
 
 # Disable sandboxing when running inside sandvault to avoid nested sandbox-exec
+ARGS=()
 if [[ -n "${SV_SESSION_ID:-}" ]]; then
-    echo "swift project testing in sandvault sandbox"
+    if [[ "$VERBOSE" -ne 0 ]]; then
+        echo "swift project testing in sandvault sandbox"
+    fi
     ARGS+=(--disable-sandbox)
 fi
 
 # Bash 3.2-safe: expand array only when set, with no empty arg
-output=$(swift run --quiet ${ARGS[@]+"${ARGS[@]}"} "$@" | tail -n 1)
+output=$(swift run --quiet ${ARGS[@]+"${ARGS[@]}"} | tail -n 1)
 if [[ "$output" == "Hello world" ]]; then
-    echo "PASS: output matched"
+    if [[ "$VERBOSE" -ne 0 ]]; then
+        echo "PASS: output matched"
+    fi
 else
     echo "FAIL: expected 'Hello world', got '$output'"
     exit 1
