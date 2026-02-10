@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Build a sandbox user ("sandvault") for running commands
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
@@ -654,7 +654,7 @@ if [[ "$REBUILD" != "false" ]]; then
     debug "Configuring passwordless access to $SANDVAULT_USER..."
 
 heredoc SUDOERS_BUILD_HOME_SCRIPT_CONTENTS << EOF
-#!/usr/bin/env bash
+#!/bin/bash
 set -Eeuo pipefail
 trap 'echo "\${BASH_SOURCE[0]}: line \$LINENO: \$BASH_COMMAND: exitcode \$?"' ERR
 

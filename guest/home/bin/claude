@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -Eeuo pipefail
 
-
+HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
 if [[ -x "$HOMEBREW_PREFIX/bin/claude" ]]; then
     claude="$HOMEBREW_PREFIX/bin/claude"
 elif [[ -x "$HOME/node_modules/bin/claude" ]]; then
