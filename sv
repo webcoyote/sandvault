@@ -18,12 +18,12 @@ readonly WORKSPACE
 ###############################################################################
 # Functions
 ###############################################################################
-[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+[[ "${SV_VERBOSE:-0}" =~ ^[0-9]+$ ]] && SV_VERBOSE="${SV_VERBOSE:-0}" || SV_VERBOSE=1
 trace () {
-    [[ "$VERBOSE" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
+    [[ "$SV_VERBOSE" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
 }
 debug () {
-    [[ "$VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
+    [[ "$SV_VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
 }
 info () {
     echo >&2 -e "ℹ️  \033[36m$*\033[0m"
@@ -176,7 +176,7 @@ ensure_brew_tool() {
     fi
     ensure_brew
     debug "Installing $tool with Homebrew..."
-    if [[ "$VERBOSE" -lt 3 ]]; then
+    if [[ "$SV_VERBOSE" -lt 3 ]]; then
         brew install --quiet "$tool"
     else
         brew install "$tool"
@@ -400,15 +400,15 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -v|--verbose)
-            ((VERBOSE++)) || true
+            ((SV_VERBOSE++)) || true
             shift
             ;;
         -vv)
-            ((VERBOSE+=2)) || true
+            ((SV_VERBOSE+=2)) || true
             shift
             ;;
         -vvv)
-            ((VERBOSE+=3)) || true
+            ((SV_VERBOSE+=3)) || true
             shift
             ;;
         -n|--no-build)
@@ -490,7 +490,7 @@ install_tools
 ###############################################################################
 if [[ ! -f "$INSTALL_MARKER" ]]; then
     # Since this is a full rebuild, provide more feedback
-    VERBOSE=$(( VERBOSE > 1 ? VERBOSE : 1 ))
+    SV_VERBOSE=$(( SV_VERBOSE > 1 ? SV_VERBOSE : 1 ))
     REBUILD=true
 fi
 
@@ -982,7 +982,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
-            "VERBOSE=$VERBOSE" \
+            "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${SANDBOX_EXEC[@]}" \
             /bin/zsh -c "$ZSH_COMMAND_SSH"
@@ -1024,7 +1024,7 @@ else
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
-            "VERBOSE=$VERBOSE" \
+            "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${SANDBOX_EXEC[@]}" \
             /bin/zsh -c "$ZSH_COMMAND"
