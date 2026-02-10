@@ -1,5 +1,6 @@
 #!/bin/bash
 set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
 HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
 if [[ -x "$HOMEBREW_PREFIX/bin/claude" ]]; then

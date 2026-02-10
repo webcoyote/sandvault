@@ -2,6 +2,7 @@
 # Use "system bash" (v3.2) to ensure compatibility with older versions
 # Run per-suite test scripts
 set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 START_TIME=$(date +%s.%N)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -84,10 +85,10 @@ echo -e "Failed: ${RED}$FAILED${NC}"
 
 echo "Tests run: $TOTAL"
 
-END_TIME=$(date +%s.%N)
-ELAPSED_TIME=$(echo "$END_TIME - $START_TIME" | bc --mathlib | xargs printf "%.2f\n")
-echo -e "✅ Tests completed in $ELAPSED_TIME seconds!"
-
 if [[ "$FAILED" -gt 0 ]]; then
     exit 1
 fi
+
+END_TIME=$(date +%s.%N)
+ELAPSED_TIME=$(echo "$END_TIME - $START_TIME" | bc --mathlib | xargs printf "%.2f\n")
+echo -e "✅ Tests completed in $ELAPSED_TIME seconds!"
