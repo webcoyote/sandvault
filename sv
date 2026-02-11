@@ -10,7 +10,9 @@ while [[ -L "$SOURCE" ]]; do
     SOURCE="$(readlink "$SOURCE")"
     [[ "$SOURCE" = /* ]] || SOURCE="$SOURCE_DIR/$SOURCE"
 done
-SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
+WORKSPACE="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
+readonly WORKSPACE
+
 
 
 ###############################################################################
@@ -202,26 +204,6 @@ install_tools () {
             # No tool installation needed for other commands
             ;;
     esac
-}
-
-resolve_workspace() {
-    if [[ -d "$SCRIPT_DIR/.git" ]] || [[ -f "$SCRIPT_DIR/.git" ]] ; then
-        # Development mode: running from a git repo
-        if [[ -d "$SCRIPT_DIR/guest/home" ]]; then
-            echo "$SCRIPT_DIR"
-            return 0
-        fi
-    else
-        # Homebrew opt symlink
-        local candidate
-        candidate="$(brew --prefix sandvault)"
-        if [[ -d "$candidate/guest/home" ]]; then
-            echo "$candidate"
-            return 0
-        fi
-    fi
-
-    abort "Unable to find sandvault guest/home directory"
 }
 
 force_cleanup_sandvault_processes() {
@@ -502,9 +484,6 @@ INITIAL_DIR="$(cd "$INITIAL_DIR" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
 ###############################################################################
 install_tools
 
-WORKSPACE="$(resolve_workspace)"
-readonly WORKSPACE
-
 
 ###############################################################################
 # Determine whether configuration is already complete
@@ -658,6 +637,9 @@ fi
 ###############################################################################
 # Configure passwordless sudo to switch to sandvault user
 ###############################################################################
+if [[ ! -d "$WORKSPACE/guest/home" ]]; then
+    abort "ERROR: '$WORKSPACE/guest/home' directory not found"
+fi
 if [[ "$REBUILD" != "false" ]]; then
     debug "Configuring passwordless access to $SANDVAULT_USER..."
 
