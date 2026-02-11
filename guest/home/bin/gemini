@@ -1,6 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
+HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
 if [[ -x "$HOMEBREW_PREFIX/bin/gemini" ]]; then
     gemini="$HOMEBREW_PREFIX/bin/gemini"
 elif [[ -x "$HOME/node_modules/bin/gemini" ]]; then

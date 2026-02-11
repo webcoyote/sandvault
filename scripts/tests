@@ -11,6 +11,8 @@ HOST_HOME="$HOME"
 SANDVAULT_USER="sandvault-$HOST_USER"
 SANDVAULT_HOME="/Users/$SANDVAULT_USER"
 
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -237,7 +239,9 @@ run_tests() {
             got=$(cat "$RESULTS_DIR/$id.got" 2>/dev/null || true)
             if [[ "$status" == "PASS" ]]; then
                 ((TESTS_PASSED++)) || true
-                echo -e "  ${GREEN}PASS${NC}: $name"
+                if [[ "$VERBOSE" -ne 0 ]]; then
+                    echo -e "  ${GREEN}PASS${NC}: $name"
+                fi
             else
                 ((TESTS_FAILED++)) || true
                 echo -e "  ${RED}FAIL${NC}: $name"
@@ -249,7 +253,9 @@ run_tests() {
         TEST_PIDS=()
     }
 
-    echo "=== MODE: $mode_label ==="
+    if [[ "$VERBOSE" -ne 0 ]]; then
+        echo "=== MODE: $mode_label ==="
+    fi
 
     ###############################################################################
     # CLI Argument Tests
@@ -416,8 +422,10 @@ run_tests() {
 
     collect_results
 
-    echo -e "Passed: ${GREEN}$TESTS_PASSED${NC}"
-    echo -e "Failed: ${RED}$TESTS_FAILED${NC}"
+    if [[ "$VERBOSE" -ne 0 ]]; then
+        echo -e "Passed: ${GREEN}$TESTS_PASSED${NC}"
+        echo -e "Failed: ${RED}$TESTS_FAILED${NC}"
+    fi
 
     if [[ "$TESTS_FAILED" -gt 0 ]]; then
         exit 1
@@ -516,4 +524,6 @@ cleanup_guard
 ###############################################################################
 END_TIME=$(date +%s.%N)
 ELAPSED_TIME=$(echo "$END_TIME - $START_TIME" | bc --mathlib | xargs printf "%.2f\n")
-echo -e "✅ Tests completed in $ELAPSED_TIME seconds!"
+if [[ "$VERBOSE" -ne 0 ]]; then
+    echo -e "✅ Tests completed in $ELAPSED_TIME seconds!"
+fi

@@ -10,8 +10,6 @@ jobs:
   test:
     name: Tests
     runs-on: macos-latest
-    env:
-      XCODE_DESTINATION: platform=macOS,arch=arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,5 +17,13 @@ jobs:
       - name: Build
         run: ./sv -vvv build
 
-      - name: Run Tests
-        run: ./scripts/validate
+      - name: SandVault Tests
+        env:
+          VERBOSE: 1
+        run: ./scripts/tests
+
+      - name: Swift/Xcode Tests
+        env:
+          XCODE_DESTINATION: platform=macOS,arch=arm64
+          VERBOSE: 1
+        run: ./tests/tests

@@ -1,14 +1,22 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Build the project
 set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
 ARGS=()
+if [[ "$VERBOSE" -eq 0 ]]; then
+    ARGS+=("--quiet")
+fi
 
 # Disable sandboxing when running inside sandvault to avoid nested sandbox-exec
 if [[ -n "${SV_SESSION_ID:-}" ]]; then
-    echo "swift project building in sandvault sandbox"
+    if [[ "$VERBOSE" -ne 0 ]]; then
+        echo "swift project building in sandvault sandbox"
+    fi
     ARGS+=(--disable-sandbox)
 fi
 

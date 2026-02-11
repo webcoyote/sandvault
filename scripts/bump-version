@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Update the version number
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR

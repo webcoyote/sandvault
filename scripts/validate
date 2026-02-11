@@ -1,16 +1,19 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Run scripts to validate application
 set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+export VERBOSE
 
 ORANGE='\033[38;5;208m'
 NC='\033[0m'
 
-
-echo -e "${ORANGE}scripts/tests${NC}"
+[[ "$VERBOSE" -ne 0 ]] && echo -e "${ORANGE}scripts/tests${NC}"
 "$SCRIPT_DIR/tests"
 
-echo
+[[ "$VERBOSE" -ne 0 ]] && echo
 
-echo -e "${ORANGE}tests/validate${NC}"
-"$SCRIPT_DIR/../tests/validate"
+[[ "$VERBOSE" -ne 0 ]] && echo -e "${ORANGE}tests/tests${NC}"
+"$SCRIPT_DIR/../tests/tests"

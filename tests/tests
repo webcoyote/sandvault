@@ -1,0 +1,183 @@
+#!/bin/bash
+# Use "system bash" (v3.2) to ensure compatibility with older versions
+# Run per-suite test scripts
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+START_TIME=$(date +%s.%N)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
+# We want to run the tests inside sandvault. However, sandvault
+# may not have access to $SCRIPT_DIR, so we may need to copy to a
+# temporary location that is accessible to sandvault-$USER
+if [[ -z "${SV_SESSION_ID:-}" && -z "${SV_TESTS_REEXEC:-}" ]]; then
+    # Hard-code sandvault shared directory location :(
+    readonly SHARED_WORKSPACE="/Users/Shared/sv-$USER"
+    case "$SCRIPT_DIR/" in
+        "$SHARED_WORKSPACE"/*) ;;
+        *)
+            # Do not recurse
+            export SV_TESTS_REEXEC=1
+
+            if [[ "$VERBOSE" -ne 0 ]]; then
+                echo "Cloning files to temporary folder in shared workspace"
+            fi
+            SRC_DIR="$(git rev-parse --show-toplevel)"
+            readonly SRC_DIR
+            DST_DIR="$(mktemp -d -p "$SHARED_WORKSPACE")"
+            readonly DST_DIR
+            trap 'rm -rf "$DST_DIR"' EXIT
+            # git clone --depth 1 --no-local "$SRC_DIR" "$DST_DIR" &>/dev/null
+            tar -c \
+                -C "$SRC_DIR" \
+                --exclude=".git" \
+                --exclude="*/.build/*" \
+                . | tar -xC "$DST_DIR"
+
+            # GitHub actions uses Bash3.2 which does not support for "realpath --relative-to"
+            # SCRIPT_RELATIVE_PATH="$(realpath --relative-to="$SRC_DIR" "${BASH_SOURCE[0]}")"
+            BASE="$(cd "$SRC_DIR" && pwd -P)"
+            TARGET="$(cd "$SCRIPT_DIR" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+            SCRIPT_RELATIVE_PATH="${TARGET#"$BASE/"}" # "tests/tests"
+            if "$DST_DIR/$SCRIPT_RELATIVE_PATH" ; then
+                exit 0
+            else
+                exit $?
+            fi
+            ;;
+    esac
+fi
+
+TOTAL=0
+PASSED=0
+FAILED=0
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+RESULTS_DIR=""
+PARALLEL_JOBS=0
+TEST_PIDS=()
+
+PARALLEL_JOBS="${SV_TEST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)}"
+if [[ -z "$PARALLEL_JOBS" || "$PARALLEL_JOBS" -lt 1 ]]; then
+    PARALLEL_JOBS=$(sysctl -n hw.ncpu 2>/dev/null || true)
+fi
+if [[ -z "$PARALLEL_JOBS" || "$PARALLEL_JOBS" -lt 1 ]]; then
+    PARALLEL_JOBS=4
+fi
+RESULTS_DIR="$(mktemp -d)"
+trap 'rm -rf "$RESULTS_DIR"' EXIT
+
+wait_for_slot() {
+    while :; do
+        local running=0
+        local pid
+        for pid in "${TEST_PIDS[@]-}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                ((running++)) || true
+            fi
+        done
+        if [[ "$running" -lt "$PARALLEL_JOBS" ]]; then
+            break
+        fi
+        sleep 0.05
+    done
+}
+
+queue_suite() {
+    local dir="$1"
+    local tests="$2"
+    local id
+
+    ((TOTAL++)) || true
+    id=$(printf "%04d" "$TOTAL")
+
+    printf '%s' "$dir" > "$RESULTS_DIR/$id.name"
+    printf '%s' "$tests" > "$RESULTS_DIR/$id.tests"
+
+    if [[ ! -x "$tests" ]]; then
+        printf '%s' "127" > "$RESULTS_DIR/$id.status"
+        printf '%s' "missing executable scripts/tests" > "$RESULTS_DIR/$id.output"
+        return
+    fi
+
+    wait_for_slot
+    (
+        set +e
+        # Run the tests in a sandbox
+        "../sv" shell -- "$tests" > "$RESULTS_DIR/$id.output" 2>&1
+        status=$?
+        printf '%s' "$status" > "$RESULTS_DIR/$id.status"
+    ) &
+    TEST_PIDS+=("$!")
+}
+
+collect_results() {
+    local pid
+    local i
+    local id
+    local dir
+    local tests
+    local status
+    local output_file
+
+    for pid in "${TEST_PIDS[@]-}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    for i in $(seq 1 "$TOTAL"); do
+        id=$(printf "%04d" "$i")
+        dir=$(cat "$RESULTS_DIR/$id.name" 2>/dev/null || echo "unknown")
+        tests=$(cat "$RESULTS_DIR/$id.tests" 2>/dev/null || echo "$dir/scripts/tests")
+        status=$(cat "$RESULTS_DIR/$id.status" 2>/dev/null || echo "1")
+        output_file="$RESULTS_DIR/$id.output"
+
+        if [[ "$VERBOSE" -ne 0 ]]; then
+            echo "=== $tests ==="
+            if [[ -f "$output_file" ]]; then
+                cat "$output_file"
+            fi
+        fi
+
+        if [[ "$status" -eq 0 ]]; then
+            ((PASSED++)) || true
+            if [[ "$VERBOSE" -ne 0 ]]; then
+                echo -e "  ${GREEN}PASS${NC}: $(basename "$dir")"
+            fi
+        else
+            ((FAILED++)) || true
+            echo -e "  ${RED}FAIL${NC}: $(basename "$dir") (exit $status)"
+        fi
+
+        if [[ "$VERBOSE" -ne 0 ]]; then
+            echo
+        fi
+    done
+}
+
+shopt -s nullglob
+for dir in *; do
+    [[ -d "$dir" ]] || continue
+    tests="$dir/scripts/tests"
+    queue_suite "$dir" "$tests"
+done
+shopt -u nullglob
+collect_results
+
+if [[ "$VERBOSE" -ne 0 ]]; then
+    echo -e "Passed: ${GREEN}$PASSED${NC}"
+    echo -e "Failed: ${RED}$FAILED${NC}"
+    echo "Tests run: $TOTAL"
+fi
+
+if [[ "$FAILED" -gt 0 ]]; then
+    exit 1
+fi
+
+END_TIME=$(date +%s.%N)
+ELAPSED_TIME=$(echo "$END_TIME - $START_TIME" | bc --mathlib | xargs printf "%.2f\n")
+if [[ "$VERBOSE" -ne 0 ]]; then
+    echo -e "✅ Tests completed in $ELAPSED_TIME seconds!"
+fi

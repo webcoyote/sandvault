@@ -1,19 +1,29 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Build a sandbox user ("sandvault") for running commands
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)"
+
+# perform "readlink -f", which is not supported in macOS system bash
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+    SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" = /* ]] || SOURCE="$SOURCE_DIR/$SOURCE"
+done
+WORKSPACE="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
+readonly WORKSPACE
+
 
 
 ###############################################################################
 # Functions
 ###############################################################################
-[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+[[ "${SV_VERBOSE:-0}" =~ ^[0-9]+$ ]] && SV_VERBOSE="${SV_VERBOSE:-0}" || SV_VERBOSE=1
 trace () {
-    [[ "$VERBOSE" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
+    [[ "$SV_VERBOSE" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
 }
 debug () {
-    [[ "$VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
+    [[ "$SV_VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
 }
 info () {
     echo >&2 -e "ℹ️  \033[36m$*\033[0m"
@@ -81,7 +91,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.1.19"
+readonly VERSION="1.1.20"
 
 # Each user on the computer can have their own sandvault
 readonly SANDVAULT_USER="sandvault-$USER"
@@ -166,7 +176,7 @@ ensure_brew_tool() {
     fi
     ensure_brew
     debug "Installing $tool with Homebrew..."
-    if [[ "$VERBOSE" -lt 3 ]]; then
+    if [[ "$SV_VERBOSE" -lt 3 ]]; then
         brew install --quiet "$tool"
     else
         brew install "$tool"
@@ -194,26 +204,6 @@ install_tools () {
             # No tool installation needed for other commands
             ;;
     esac
-}
-
-resolve_workspace() {
-    if [[ -d "$SCRIPT_DIR/.git" ]] || [[ -f "$SCRIPT_DIR/.git" ]] ; then
-        # Development mode: running from a git repo
-        if [[ -d "$SCRIPT_DIR/guest/home" ]]; then
-            echo "$SCRIPT_DIR"
-            return 0
-        fi
-    else
-        # Homebrew opt symlink
-        local candidate
-        candidate="$(brew --prefix sandvault)"
-        if [[ -d "$candidate/guest/home" ]]; then
-            echo "$candidate"
-            return 0
-        fi
-    fi
-
-    abort "Unable to find sandvault guest/home directory"
 }
 
 force_cleanup_sandvault_processes() {
@@ -410,15 +400,15 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -v|--verbose)
-            ((VERBOSE++)) || true
+            ((SV_VERBOSE++)) || true
             shift
             ;;
         -vv)
-            ((VERBOSE+=2)) || true
+            ((SV_VERBOSE+=2)) || true
             shift
             ;;
         -vvv)
-            ((VERBOSE+=3)) || true
+            ((SV_VERBOSE+=3)) || true
             shift
             ;;
         -n|--no-build)
@@ -494,16 +484,13 @@ INITIAL_DIR="$(cd "$INITIAL_DIR" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
 ###############################################################################
 install_tools
 
-WORKSPACE="$(resolve_workspace)"
-readonly WORKSPACE
-
 
 ###############################################################################
 # Determine whether configuration is already complete
 ###############################################################################
 if [[ ! -f "$INSTALL_MARKER" ]]; then
     # Since this is a full rebuild, provide more feedback
-    VERBOSE=$(( VERBOSE > 1 ? VERBOSE : 1 ))
+    SV_VERBOSE=$(( SV_VERBOSE > 1 ? SV_VERBOSE : 1 ))
     REBUILD=true
 fi
 
@@ -650,11 +637,14 @@ fi
 ###############################################################################
 # Configure passwordless sudo to switch to sandvault user
 ###############################################################################
+if [[ ! -d "$WORKSPACE/guest/home" ]]; then
+    abort "ERROR: '$WORKSPACE/guest/home' directory not found"
+fi
 if [[ "$REBUILD" != "false" ]]; then
     debug "Configuring passwordless access to $SANDVAULT_USER..."
 
 heredoc SUDOERS_BUILD_HOME_SCRIPT_CONTENTS << EOF
-#!/usr/bin/env bash
+#!/bin/bash
 set -Eeuo pipefail
 trap 'echo "\${BASH_SOURCE[0]}: line \$LINENO: \$BASH_COMMAND: exitcode \$?"' ERR
 
@@ -992,7 +982,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
-            "VERBOSE=$VERBOSE" \
+            "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${SANDBOX_EXEC[@]}" \
             /bin/zsh -c "$ZSH_COMMAND_SSH"
@@ -1034,7 +1024,7 @@ else
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
-            "VERBOSE=$VERBOSE" \
+            "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${SANDBOX_EXEC[@]}" \
             /bin/zsh -c "$ZSH_COMMAND"

@@ -1,11 +1,12 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Build the project
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
-ARGS=()
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
 if [[ -z "${NO_XCSIFT:-}" ]] && command -v xcsift &>/dev/null; then
     SIFT=(xcsift -WEq)
 else
@@ -15,7 +16,9 @@ fi
 
 # Disable sandboxing when running inside sandvault to avoid nested sandbox-exec
 if [[ -n "${SV_SESSION_ID:-}" ]]; then
-    echo "xcodeproject project building in sandvault sandbox"
+    if [[ "$VERBOSE" -ne 0 ]]; then
+        echo "xcodeproject project building in sandvault sandbox"
+    fi
     export SWIFTPM_DISABLE_SANDBOX=1
     export SWIFT_BUILD_USE_SANDBOX=0
     ARGS+=("-IDEPackageSupportDisableManifestSandbox=1")

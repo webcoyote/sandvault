@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Simple sandbox runner for quick tests
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
