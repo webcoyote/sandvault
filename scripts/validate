@@ -15,5 +15,5 @@ NC='\033[0m'
 
 [[ "$VERBOSE" -ne 0 ]] && echo
 
-[[ "$VERBOSE" -ne 0 ]] && echo -e "${ORANGE}tests/validate${NC}"
-"$SCRIPT_DIR/../tests/validate"
+[[ "$VERBOSE" -ne 0 ]] && echo -e "${ORANGE}tests/tests${NC}"
+"$SCRIPT_DIR/../tests/tests"
