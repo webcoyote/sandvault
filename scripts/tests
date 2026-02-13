@@ -6,8 +6,15 @@ START_TIME=$(date +%s.%N)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SV_BASE="$SCRIPT_DIR/../sv"
-HOST_USER="$USER"
-HOST_HOME="$HOME"
+
+# Each user on the computer can have their own sandvault.
+# Inside sandvault, USER will be sandvault-<name>, where name is the host-users's name.
+if [[ "$USER" == sandvault-* ]]; then
+    HOST_USER="${USER#sandvault-}"
+else
+    HOST_USER="$USER"
+fi
+HOST_HOME="$(dscl . -read "/Users/$HOST_USER" NFSHomeDirectory | cut -d' ' -f2)"
 SANDVAULT_USER="sandvault-$HOST_USER"
 SANDVAULT_HOME="/Users/$SANDVAULT_USER"
 
@@ -296,7 +303,7 @@ run_tests() {
 
     # Verify HOME is sandvault's home (single quotes intentional - evaluated in sandbox)
     # shellcheck disable=SC2016
-    queue_test assert_sandbox_pipe_contains "HOME is sandvault home" 'echo $HOME' "/Users/sandvault-$USER"
+    queue_test assert_sandbox_pipe_contains "HOME is sandvault home" 'echo $HOME' "$SANDVAULT_HOME"
     # shellcheck disable=SC2016
     queue_test assert_sandbox_not_contains "HOME is not host home" 'echo $HOME' "$HOST_HOME"
 
@@ -381,7 +388,13 @@ run_tests() {
             fail "unreadable directory falls back to SHARED_WORKSPACE" "$SHARED_WORKSPACE" "$output"
         fi
     }
-    queue_test test_unreadable_dir_fallback
+
+    # This test does not work when running inside sandvault
+    # because it's not possible to change directory into an
+    # unreadable directory to cause the failure.
+    if [[ -z "${SV_SESSION_ID:-}" ]]; then
+        queue_test test_unreadable_dir_fallback
+    fi
 
     # Test that readable directory is used as working directory
     # /Users is readable by all users
@@ -437,16 +450,17 @@ run_tests() {
 ###############################################################################
 # Test setup
 ###############################################################################
-# Build sandbox with system bash to check compatibility
-/bin/bash "$SV_BASE" build
+# Cannot build sandvault if already running inside sandvault
+if [[ -z "${SV_SESSION_ID:-}" ]]; then
+    "$SV_BASE" build
 
-# Ensure that the shell doesn't have sudo permissions for tests
-sudo --reset-timestamp
+    # Ensure that the shell doesn't have sudo permissions for tests
+    sudo --reset-timestamp
+fi
 
 
 ###############################################################################
 # Guard Session
-# Keep a session open to avoid teardown while other tests initialize.
 ###############################################################################
 start_guard() {
     GUARD_FIFO="$(mktemp -u)"
@@ -497,14 +511,26 @@ fi
 
 # Default command for the guard session (set before start_guard).
 SV_CMD=("$SYSTEM_BASH" "$SV_BASE")
-trap cleanup_guard EXIT
-start_guard
+
+CONNECT_MODES=("default")
+if [[ -z "${SV_SESSION_ID:-}" ]]; then
+    # Keep a session open to avoid teardown while other tests initialize
+    trap cleanup_guard EXIT
+    start_guard
+
+    # SSH mode not supported for nested sandvault yet (need to handle SSH-keys)
+    CONNECT_MODES+=("ssh")
+else
+    # If this script is already running inside sandvault then that parent
+    # process is already acting as a guard against teardown
+    true
+fi
 
 for bash_path in "$SYSTEM_BASH" "$BREW_BASH"; do
     if [[ -z "$bash_path" ]]; then
         continue
     fi
-    for sv_mode in "default" "ssh"; do
+    for sv_mode in "${CONNECT_MODES[@]}"; do
         if [[ "$sv_mode" == "ssh" ]]; then
             SV_CMD=("$bash_path" "$SV_BASE" "--ssh")
             mode_label="$bash_path sv --ssh"

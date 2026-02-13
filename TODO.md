@@ -1,3 +1,5 @@
-- running as ssh or sudo doesn't allow running iOS simulator
-- sandbox-exec to further limit write access to only home and shared folder
-- parallelize tests
+- running headless browser (docker/podman?)
+- allow running iOS simulator and Playwright via sandboxed MCP proxy
+
+- Even stricter sandbox:
+https://gist.github.com/eugene1g/ad3ff9783396e2cf35354689cc6473e1
