@@ -4,8 +4,13 @@ trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
 HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
 if [[ -x "$HOMEBREW_PREFIX/bin/claude" ]]; then
+    # Homebrew install
     claude="$HOMEBREW_PREFIX/bin/claude"
+elif [[ -x "$HOME/.local/bin/claude" ]]; then
+    # Claude native install
+    claude="$HOME/.local/bin/claude"
 elif [[ -x "$HOME/node_modules/bin/claude" ]]; then
+    # Deprecated
     claude="$HOME/node_modules/bin/claude"
 else
     echo >&2 "claude is not installed. Run: \`sv claude\` to install it."
