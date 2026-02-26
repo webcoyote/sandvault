@@ -269,6 +269,28 @@ install_tools () {
     esac
 }
 
+init_sandbox_run_for_repository() {
+    SANDBOX_RUN=()
+    if [[ "$NESTED" == "false" ]]; then
+        SANDBOX_RUN+=("sudo" "--non-interactive" "--user=$SANDVAULT_USER")
+    fi
+    SANDBOX_RUN+=(
+        "/usr/bin/env" "-i"
+        "HOME=/Users/$SANDVAULT_USER"
+        "USER=$SANDVAULT_USER"
+        "SHELL=/bin/zsh"
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+    )
+}
+
+sandbox_repository_git() {
+    "${SANDBOX_RUN[@]}" git -C "$INITIAL_DIR" "$@"
+}
+
+local_repository_git() {
+    git -C "$LOCAL_REPOSITORY" "$@"
+}
+
 force_cleanup_sandvault_processes() {
     if [[ "$NESTED" == "true" ]]; then
         return 0
@@ -413,7 +435,8 @@ NO_BUILD=false
 USE_SANDBOX=true
 MODE=shell
 COMMAND_ARGS=()
-INITIAL_DIR="$PWD"
+INITIAL_DIR=""
+CLONE_REPOSITORY=""
 
 show_help() {
     echo "SandVault $VERSION by Patrick Wyatt <pat@codeofhonor.com>"
@@ -432,6 +455,7 @@ show_help() {
     echo "  -h, --help           Show this help message"
     echo "  -n, --no-build       Refuse to make any sandbox changes; error if changes are needed"
     echo "  -x, --no-sandbox     Disable sandbox-exec restrictions"
+    echo "  -c, --clone URL|PATH Clone Git repository into sandvault home and open there"
     echo "  --version            Show version information"
     echo ""
     echo "Commands:"
@@ -486,6 +510,13 @@ while [[ $# -gt 0 ]]; do
         -x|--no-sandbox)
             USE_SANDBOX=false
             shift
+            ;;
+        -c|--clone)
+            if [[ $# -lt 2 ]]; then
+                abort "Missing argument for $1"
+            fi
+            CLONE_REPOSITORY="$2"
+            shift 2
             ;;
         -h|--help)
             show_help
@@ -543,8 +574,10 @@ esac
 readonly COMMAND
 
 # Resolve symlinks to get the real path
-INITIAL_DIR="$(cd "$INITIAL_DIR" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
-readonly INITIAL_DIR
+if [[ -n "$INITIAL_DIR" ]]; then
+    INITIAL_DIR="$(cd "$INITIAL_DIR" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
+fi
+readonly CLONE_REPOSITORY
 
 
 ###############################################################################
@@ -943,6 +976,103 @@ fi
 ###############################################################################
 # Run the application
 ###############################################################################
+if [[ -n "$CLONE_REPOSITORY" ]]; then
+    CLONE_SUPPORTED_COMMANDS=(shell claude codex gemini)
+    for supported_command in "${CLONE_SUPPORTED_COMMANDS[@]}"; do
+        if [[ "${COMMAND:-shell}" == "$supported_command" ]]; then
+            break
+        fi
+    done
+    if [[ "${COMMAND:-shell}" != "${supported_command:-}" ]]; then
+        abort "--clone is only supported with: ${CLONE_SUPPORTED_COMMANDS[*]}"
+    fi
+
+    if [[ -n "$INITIAL_DIR" ]]; then
+        abort "Cannot use [PATH] and --clone together; choose one"
+    fi
+    case "$(basename "${CLONE_REPOSITORY%/}")" in
+        ""|/|.|..)
+            abort "--clone path must include a directory name"
+            ;;
+    esac
+
+    init_sandbox_run_for_repository
+
+    if [[ -d "$CLONE_REPOSITORY" ]]; then
+        LOCAL_REPOSITORY="$(cd "$CLONE_REPOSITORY" && pwd -P)"
+        REPOSITORY_SOURCE_URL="$(local_repository_git remote get-url origin)"
+        REPOSITORY_CLONE_SOURCE="$LOCAL_REPOSITORY"
+        REPOSITORY_NAME="$(basename "$LOCAL_REPOSITORY")"
+    else
+        REPOSITORY_SOURCE_URL="$CLONE_REPOSITORY"
+        REPOSITORY_CLONE_SOURCE="$REPOSITORY_SOURCE_URL"
+        REPOSITORY_NAME="${REPOSITORY_SOURCE_URL%/}"
+    fi
+
+    [[ "$REPOSITORY_NAME" == *"://"* ]] && REPOSITORY_NAME="${REPOSITORY_NAME##*/}"
+    if [[ "$REPOSITORY_NAME" == *:* ]]; then
+        REPOSITORY_NAME="${REPOSITORY_NAME##*:}"
+    fi
+    REPOSITORY_NAME="${REPOSITORY_NAME##*/}"
+    REPOSITORY_NAME="${REPOSITORY_NAME%.git}"
+    if [[ -z "$REPOSITORY_NAME" ]]; then
+        abort "Could not determine repository name from --clone argument"
+    fi
+
+    INITIAL_DIR="/Users/$SANDVAULT_USER/repositories/$REPOSITORY_NAME"
+    "${SANDBOX_RUN[@]}" mkdir -p "$(dirname "$INITIAL_DIR")"
+
+    HOST_SOURCE_DIR="$(mktemp -d "/tmp/sv-source.XXXXXX")"
+    if git clone --mirror "$REPOSITORY_CLONE_SOURCE" "$HOST_SOURCE_DIR"; then
+        :
+    else
+        rm -rf "$HOST_SOURCE_DIR"
+        false
+    fi
+    chmod -R a+rX "$HOST_SOURCE_DIR"
+
+    if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
+        if "${SANDBOX_RUN[@]}" git \
+            -c "safe.directory=$HOST_SOURCE_DIR" \
+            -c "safe.directory=$HOST_SOURCE_DIR/.git" \
+            clone "$HOST_SOURCE_DIR" "$INITIAL_DIR"
+        then
+            :
+        else
+            rm -rf "$HOST_SOURCE_DIR"
+            false
+        fi
+    else
+        if "${SANDBOX_RUN[@]}" git \
+            -C "$INITIAL_DIR" \
+            -c "safe.directory=$HOST_SOURCE_DIR" \
+            -c "safe.directory=$HOST_SOURCE_DIR/.git" \
+            fetch "$HOST_SOURCE_DIR"
+        then
+            :
+        else
+            rm -rf "$HOST_SOURCE_DIR"
+            false
+        fi
+    fi
+    rm -rf "$HOST_SOURCE_DIR"
+
+    if sandbox_repository_git remote get-url origin &>/dev/null; then
+        sandbox_repository_git remote set-url origin "$REPOSITORY_SOURCE_URL"
+    else
+        sandbox_repository_git remote add origin "$REPOSITORY_SOURCE_URL"
+    fi
+
+    if [[ -n "${LOCAL_REPOSITORY:-}" ]]; then
+        if local_repository_git remote get-url sandvault &>/dev/null; then
+            local_repository_git remote set-url sandvault "$INITIAL_DIR"
+        else
+            local_repository_git remote add sandvault "$INITIAL_DIR"
+        fi
+    fi
+fi
+readonly INITIAL_DIR
+
 if [[ "$COMMAND" == "build" ]]; then
     exit 0
 fi
