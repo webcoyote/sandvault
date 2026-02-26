@@ -219,6 +219,13 @@ run_tests() {
         done
     }
 
+    wait_for_all_running_tests() {
+        local pid
+        for pid in "${TEST_PIDS[@]-}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+    }
+
     queue_test() {
         wait_for_slot
         ((TESTS_RUN++)) || true
@@ -233,10 +240,8 @@ run_tests() {
     }
 
     collect_results() {
-        local pid
-        for pid in "${TEST_PIDS[@]-}"; do
-            wait "$pid" 2>/dev/null || true
-        done
+        wait_for_all_running_tests
+
         local i id status name expected got
         for i in $(seq 1 "$TESTS_RUN"); do
             id=$(printf "%04d" "$i")
@@ -538,6 +543,8 @@ run_tests() {
         :
     else
         queue_test test_repository_clone_local
+        # Clone tests share the same destination repo name (`sandvault`) and race if parallelized.
+        wait_for_all_running_tests
         queue_test test_repository_clone_https
     fi
 
