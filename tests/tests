@@ -160,7 +160,7 @@ collect_results() {
 shopt -s nullglob
 for dir in *; do
     [[ -d "$dir" ]] || continue
-    tests="$dir/scripts/tests"
+    tests="$SCRIPT_DIR/$dir/scripts/tests"
     queue_suite "$dir" "$tests"
 done
 shopt -u nullglob
