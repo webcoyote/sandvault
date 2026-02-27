@@ -703,8 +703,26 @@ if [[ "$REBUILD" == "true" ]]; then
     #sudo dscl . -create "/Users/$SANDVAULT_USER" IsHidden 0
     #sudo dscl . -passwd "/Users/$SANDVAULT_USER" "sandvault"
 
-    # Remove sandvault user from "staff" group so it doesn't have access to most files
+    # Remove sandvault user from "staff" group so it doesn't have access to most files.
+    # On macOS this may require removing both username and GeneratedUID group entries.
+    trace "Removing $SANDVAULT_USER from staff group..."
+    SANDVAULT_GENERATED_UID=""
+    if dscl . -read "/Users/$SANDVAULT_USER" GeneratedUID &>/dev/null; then
+        SANDVAULT_GENERATED_UID="$(dscl . -read "/Users/$SANDVAULT_USER" GeneratedUID | awk '{print $2}')"
+    fi
     sudo dseditgroup -o edit -d "$SANDVAULT_USER" -t user staff 2>/dev/null || true
+    if [[ -n "$SANDVAULT_GENERATED_UID" ]]; then
+        sudo dscl . -delete "/Groups/staff" GroupMembers "$SANDVAULT_GENERATED_UID" 2>/dev/null || true
+    fi
+    sudo dscl . -delete "/Groups/staff" GroupMembership "$SANDVAULT_USER" 2>/dev/null || true
+    if sudo dscl . -read "/Groups/staff" GroupMembership 2>/dev/null | grep -Eq "(^|[[:space:]])$SANDVAULT_USER($|[[:space:]])"; then
+        abort "Failed to remove direct GroupMembership entry for $SANDVAULT_USER from staff group"
+    fi
+    if [[ -n "$SANDVAULT_GENERATED_UID" ]] && \
+       sudo dscl . -read "/Groups/staff" GroupMembers 2>/dev/null | grep -Eq "(^|[[:space:]])$SANDVAULT_GENERATED_UID($|[[:space:]])"
+    then
+        abort "Failed to remove direct GroupMembers entry for $SANDVAULT_USER from staff group"
+    fi
 
     # Add host user to the sandvault group
     trace "Adding $HOST_USER to $SANDVAULT_GROUP group..."
@@ -1023,38 +1041,90 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
 
     INITIAL_DIR="/Users/$SANDVAULT_USER/repositories/$REPOSITORY_NAME"
 
-    # Clone into a directory writable by user and readable by sandvault-user
-    (
-        # Use directory that both $USER and sandvault-$USER find valid
-        cd "$SHARED_WORKSPACE"
-        mkdir -p "$SHARED_WORKSPACE/tmp"
-        HOST_SOURCE_DIR="$(mktemp -d "$SHARED_WORKSPACE/tmp/sv-source.XXXXXX")"
-        trap '
-            cd "$SHARED_WORKSPACE"
-            "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR" || true
-            "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR/.git" || true
-            rm -rf "$HOST_SOURCE_DIR"
-        ' EXIT
-        "${SANDBOX_RUN[@]}" mkdir -p "$(dirname "$INITIAL_DIR")"
-        "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR"
-        "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR/.git"
-        git clone --mirror "$REPOSITORY_CLONE_SOURCE" "$HOST_SOURCE_DIR"
-        chmod -R a+rX "$HOST_SOURCE_DIR"
-        if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
-            "${SANDBOX_RUN[@]}" git clone "$HOST_SOURCE_DIR" "$INITIAL_DIR"
+    HOST_SOURCE_DIR=""
+    HOST_SOURCE_EXIT_TRAP=""
+    HOST_SOURCE_EXIT_TRAP_SET=false
+
+    if ! "${SANDBOX_RUN[@]}" git ls-remote "$REPOSITORY_CLONE_SOURCE" &>/dev/null; then
+        # Clone into a directory writable by user and readable by sandvault-user.
+        # We mirror-clone as the host user, then sandvault clones/fetches from that mirror.
+        # Reason: sandvault-user is intentionally restricted and often cannot read paths in
+        # the host user's home directory (or use the host user's Git credentials/keychain),
+        # so direct clone/fetch from the original source can fail.
+        HOST_SOURCE_DIR="$(mktemp -d "/tmp/sv-clone-$REPOSITORY_NAME.XXXXXX")"
+        HOST_SOURCE_EXIT_TRAP="$(trap -p EXIT || true)"
+        trap '[[ -n "${HOST_SOURCE_DIR:-}" ]] && rm -rf "$HOST_SOURCE_DIR"' EXIT
+        HOST_SOURCE_EXIT_TRAP_SET=true
+        if git clone --mirror --no-hardlinks "$REPOSITORY_CLONE_SOURCE" "$HOST_SOURCE_DIR"; then
+            :
         else
-            "${SANDBOX_RUN[@]}" git -C "$INITIAL_DIR" fetch "$HOST_SOURCE_DIR"
+            rm -rf "$HOST_SOURCE_DIR"
+            false
+        fi
+        # Keep mirror host-private first, then grant temporary read ACL to sandvault user.
+        chmod -R go-rwx "$HOST_SOURCE_DIR"
+        find "$HOST_SOURCE_DIR" -print0 | xargs -0 chmod -h +a \
+            "user:$SANDVAULT_USER allow read,readattr,readextattr,readsecurity,list,search,file_inherit,directory_inherit"
+        REPOSITORY_CLONE_SOURCE="$HOST_SOURCE_DIR"
+    fi
+
+    (
+        cd "$SHARED_WORKSPACE"
+        "${SANDBOX_RUN[@]}" mkdir -p "$(dirname "$INITIAL_DIR")"
+        if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
+            if "${SANDBOX_RUN[@]}" git \
+                -c "safe.directory=$REPOSITORY_CLONE_SOURCE" \
+                -c "safe.directory=$REPOSITORY_CLONE_SOURCE/.git" \
+                clone "$REPOSITORY_CLONE_SOURCE" "$INITIAL_DIR"
+            then
+                :
+            else
+                [[ -n "$HOST_SOURCE_DIR" ]] && rm -rf "$HOST_SOURCE_DIR"
+                false
+            fi
+        else
+            if sandbox_repository_git remote get-url origin &>/dev/null; then
+                sandbox_repository_git remote set-url origin "$REPOSITORY_CLONE_SOURCE"
+            else
+                sandbox_repository_git remote add origin "$REPOSITORY_CLONE_SOURCE"
+            fi
+            if sandbox_repository_git \
+                -c "safe.directory=$REPOSITORY_CLONE_SOURCE" \
+                -c "safe.directory=$REPOSITORY_CLONE_SOURCE/.git" \
+                fetch --prune origin
+            then
+                :
+            else
+                if sandbox_repository_git remote get-url origin &>/dev/null; then
+                    sandbox_repository_git remote set-url origin "$REPOSITORY_SOURCE_URL"
+                else
+                    sandbox_repository_git remote add origin "$REPOSITORY_SOURCE_URL"
+                fi
+                [[ -n "$HOST_SOURCE_DIR" ]] && rm -rf "$HOST_SOURCE_DIR"
+                false
+            fi
         fi
     )
+    if [[ -n "$HOST_SOURCE_DIR" ]]; then
+        rm -rf "$HOST_SOURCE_DIR"
+        HOST_SOURCE_DIR=""
+    fi
+    if [[ "$HOST_SOURCE_EXIT_TRAP_SET" == "true" ]]; then
+        if [[ -n "$HOST_SOURCE_EXIT_TRAP" ]]; then
+            eval "$HOST_SOURCE_EXIT_TRAP"
+        else
+            trap - EXIT
+        fi
+    fi
 
-    if "${SANDBOX_RUN[@]}" git -C "$INITIAL_DIR" remote get-url origin &>/dev/null; then
+    if sandbox_repository_git remote get-url origin &>/dev/null; then
         sandbox_repository_git remote set-url origin "$REPOSITORY_SOURCE_URL"
     else
         sandbox_repository_git remote add origin "$REPOSITORY_SOURCE_URL"
     fi
 
     if [[ -n "${LOCAL_REPOSITORY:-}" ]]; then
-        if git -C "$LOCAL_REPOSITORY" remote get-url sandvault &>/dev/null; then
+        if local_repository_git remote get-url sandvault &>/dev/null; then
             local_repository_git remote set-url sandvault "$INITIAL_DIR"
         else
             local_repository_git remote add sandvault "$INITIAL_DIR"
