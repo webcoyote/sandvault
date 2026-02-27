@@ -1038,7 +1038,9 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
         "${SANDBOX_RUN[@]}" mkdir -p "$(dirname "$INITIAL_DIR")"
         "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR"
         "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR/.git"
-        git clone --mirror "$REPOSITORY_CLONE_SOURCE" "$HOST_SOURCE_DIR"
+
+        # Clone the repo in a way that sandvault-user has access to all files (--no-hardlinks)
+        git clone --mirror --no-hardlinks "$REPOSITORY_CLONE_SOURCE" "$HOST_SOURCE_DIR"
         chmod -R a+rX "$HOST_SOURCE_DIR"
         if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
             "${SANDBOX_RUN[@]}" git clone "$HOST_SOURCE_DIR" "$INITIAL_DIR"
