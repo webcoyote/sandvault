@@ -554,16 +554,6 @@ run_tests() {
         local status
 
         set +e
-        output=$(sv_cmd s --clone . -- pwd 2>&1)
-        status=$?
-        set -e
-
-        if [[ "$status" -eq 0 || "$output" != *"--clone path must include a directory name"* ]]; then
-            fail "shell --clone . is rejected" "non-zero exit and path-with-directory-name message" "$status | $output"
-            return
-        fi
-
-        set +e
         output=$(sv_cmd s --clone / -- pwd 2>&1)
         status=$?
         set -e

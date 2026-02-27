@@ -991,7 +991,7 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
         abort "Cannot use [PATH] and --clone together; choose one"
     fi
     case "$(basename "${CLONE_REPOSITORY%/}")" in
-        ""|/|.|..)
+        ""|/)
             abort "--clone path must include a directory name"
             ;;
     esac
