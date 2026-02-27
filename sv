@@ -130,7 +130,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.1.22"
+readonly VERSION="1.1.23"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
