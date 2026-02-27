@@ -219,6 +219,13 @@ run_tests() {
         done
     }
 
+    wait_for_all_running_tests() {
+        local pid
+        for pid in "${TEST_PIDS[@]-}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+    }
+
     queue_test() {
         wait_for_slot
         ((TESTS_RUN++)) || true
@@ -233,10 +240,8 @@ run_tests() {
     }
 
     collect_results() {
-        local pid
-        for pid in "${TEST_PIDS[@]-}"; do
-            wait "$pid" 2>/dev/null || true
-        done
+        wait_for_all_running_tests
+
         local i id status name expected got
         for i in $(seq 1 "$TESTS_RUN"); do
             id=$(printf "%04d" "$i")
@@ -408,6 +413,159 @@ run_tests() {
         fi
     }
     queue_test test_readable_dir_used
+
+    # Test cloning local repository into sandvault home and wiring remotes.
+    test_repository_clone_local() {
+        local src_repository
+        local clone_name
+        local clone_path
+        local output
+        local status
+        local host_origin
+        local remote_output
+        local expected_upstream
+
+        src_repository="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null || true)"
+        if [[ -z "$src_repository" || ! -d "$src_repository/.git" ]]; then
+            fail "--clone clones local repository into sandvault home" "current repository available" "$src_repository"
+            return
+        fi
+
+        clone_name="$(basename "$src_repository")"
+        clone_path="$SANDVAULT_HOME/repositories/$clone_name"
+        expected_upstream="$(git -C "$src_repository" remote get-url origin 2>/dev/null || true)"
+        if [[ -z "$expected_upstream" ]]; then
+            fail "--clone clones local repository into sandvault home" "source repository has origin remote" "$src_repository"
+            return
+        fi
+
+        set +e
+        output=$(sv_cmd s --clone "$src_repository" -- pwd 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            fail "--clone clones local repository into sandvault home" "exit 0" "$status | $output"
+            return
+        fi
+
+        if [[ "$output" != *"$clone_path"* ]]; then
+            fail "--clone clones local repository into sandvault home" "$clone_path" "$output"
+            return
+        fi
+
+        host_origin="$(git -C "$src_repository" remote get-url origin 2>/dev/null)"
+        if [[ "$host_origin" != "$expected_upstream" ]]; then
+            fail "local repository keeps origin at upstream" "$expected_upstream" "$host_origin"
+            return
+        fi
+
+        remote_output="$(git -C "$src_repository" remote get-url sandvault 2>/dev/null)"
+        if [[ "$remote_output" != "$clone_path" ]]; then
+            fail "local repository gets sandvault remote" "$clone_path" "$remote_output"
+            return
+        fi
+
+        set +e
+        remote_output=$(sv_cmd s -- git -C "$clone_path" remote get-url origin 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 || "$remote_output" != *"$expected_upstream"* ]]; then
+            fail "sandvault clone origin points to upstream" "$expected_upstream" "$status | $remote_output"
+            return
+        fi
+
+        set +e
+        remote_output=$(sv_cmd s -- git -C "$clone_path" remote get-url host-local 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -eq 0 ]]; then
+            fail "sandvault clone should not have host-local remote" "non-zero exit" "$status | $remote_output"
+            return
+        fi
+
+        set +e
+        remote_output=$(sv_cmd s -- git -C "$clone_path" remote get-url host-upstream 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -eq 0 ]]; then
+            fail "sandvault clone should not have host-upstream remote" "non-zero exit" "$status | $remote_output"
+            return
+        fi
+
+        pass "--clone clones local repository into sandvault home"
+
+        sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
+    }
+
+    # Test cloning HTTPS repository into sandvault home.
+    test_repository_clone_https() {
+        local clone_path
+        local output
+        local status
+        local remote_output
+        local https_repository
+
+        https_repository="https://github.com/webcoyote/sandvault.git"
+        clone_path="$SANDVAULT_HOME/repositories/sandvault"
+
+        # Start clean to avoid stale clone state influencing assertions.
+        sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
+
+        set +e
+        output=$(sv_cmd s --clone "$https_repository" -- pwd 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            fail "--clone clones HTTPS repository into sandvault home" "exit 0" "$status | $output"
+            return
+        fi
+
+        if [[ "$output" != *"$clone_path"* ]]; then
+            fail "--clone clones HTTPS repository into sandvault home" "$clone_path" "$output"
+            return
+        fi
+
+        set +e
+        remote_output=$(sv_cmd s -- git -C "$clone_path" remote get-url origin 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 || "$remote_output" != *"$https_repository"* ]]; then
+            fail "sandvault HTTPS clone origin points to remote URL" "$https_repository" "$status | $remote_output"
+            return
+        fi
+
+        pass "--clone clones HTTPS repository into sandvault home"
+        sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
+    }
+
+    # Repository clone tests are intentionally skipped in SSH mode.
+    if [[ "$mode_label" == *" --ssh" ]]; then
+        :
+    else
+        queue_test test_repository_clone_local
+        # Clone tests share the same destination repo name (`sandvault`) and race if parallelized.
+        wait_for_all_running_tests
+        queue_test test_repository_clone_https
+    fi
+
+    # Test invalid --clone paths are rejected and require a path with a directory name.
+    test_repository_clone_reject_invalid_paths() {
+        local output
+        local status
+
+        set +e
+        output=$(sv_cmd s --clone / -- pwd 2>&1)
+        status=$?
+        set -e
+
+        if [[ "$status" -eq 0 || "$output" != *"--clone path must include a directory name"* ]]; then
+            fail "shell --clone / is rejected" "non-zero exit and path-with-directory-name message" "$status | $output"
+            return
+        fi
+
+        pass "invalid --clone paths are rejected"
+    }
+    queue_test test_repository_clone_reject_invalid_paths
 
     ###############################################################################
     # Shell Args Tests

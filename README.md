@@ -116,6 +116,23 @@ The default mode for sandvault runs commands as a limited user (basically `sudo 
   sv gemini -- --continue
 
 
+# Clone local/remote Git repository into /Users/sandvault-$USER/repositories/<git-repository> and open there
+# Usage:
+#   sv <agent|shell> --clone URL_OR_LOCAL_PATH [-- AGENT_OR_SHELL_ARGS]
+# Examples:
+  sv codex --clone https://github.com/webcoyote/sandvault.git
+  sv codex -c ~/src/my-app
+  sv shell --clone https://github.com/webcoyote/sandvault.git
+  sv shell -c ../my-app
+
+Use a full or relative path with a directory name for local clones.
+
+For local Git repositories, sandvault also wires remotes:
+
+- Your local Git repository gets/updates remote `sandvault` -> `/Users/sandvault-$USER/repositories/<git-repository>`
+- This lets you run `git fetch sandvault` from the original local Git repository to pull commits made in the sandvault Git repository.
+
+
 # Send input via stdin
 # Usage:
 #   <producer> | sv shell [PATH] [-- SHELL_COMMAND]
