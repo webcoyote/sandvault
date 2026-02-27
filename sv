@@ -14,7 +14,6 @@ WORKSPACE="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
 readonly WORKSPACE
 
 
-
 ###############################################################################
 # Functions
 ###############################################################################
@@ -572,12 +571,12 @@ case "${1:-}" in
         ;;
 esac
 readonly COMMAND
+readonly CLONE_REPOSITORY
 
 # Resolve symlinks to get the real path
 if [[ -n "$INITIAL_DIR" ]]; then
     INITIAL_DIR="$(cd "$INITIAL_DIR" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
 fi
-readonly CLONE_REPOSITORY
 
 
 ###############################################################################
@@ -994,6 +993,9 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
         ""|/)
             abort "--clone path must include a directory name"
             ;;
+        *)
+            :
+            ;;
     esac
 
     init_sandbox_run_for_repository
@@ -1020,51 +1022,39 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
     fi
 
     INITIAL_DIR="/Users/$SANDVAULT_USER/repositories/$REPOSITORY_NAME"
-    "${SANDBOX_RUN[@]}" mkdir -p "$(dirname "$INITIAL_DIR")"
 
-    HOST_SOURCE_DIR="$(mktemp -d "/tmp/sv-source.XXXXXX")"
-    if git clone --mirror "$REPOSITORY_CLONE_SOURCE" "$HOST_SOURCE_DIR"; then
-        :
-    else
-        rm -rf "$HOST_SOURCE_DIR"
-        false
-    fi
-    chmod -R a+rX "$HOST_SOURCE_DIR"
-
-    if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
-        if "${SANDBOX_RUN[@]}" git \
-            -c "safe.directory=$HOST_SOURCE_DIR" \
-            -c "safe.directory=$HOST_SOURCE_DIR/.git" \
-            clone "$HOST_SOURCE_DIR" "$INITIAL_DIR"
-        then
-            :
-        else
+    # Clone into a directory writable by user and readable by sandvault-user
+    (
+        # Use directory that both $USER and sandvault-$USER find valid
+        cd "$SHARED_WORKSPACE"
+        mkdir -p "$SHARED_WORKSPACE/tmp"
+        HOST_SOURCE_DIR="$(mktemp -d "$SHARED_WORKSPACE/tmp/sv-source.XXXXXX")"
+        trap '
+            cd "$SHARED_WORKSPACE"
+            "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR" || true
+            "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR/.git" || true
             rm -rf "$HOST_SOURCE_DIR"
-            false
-        fi
-    else
-        if "${SANDBOX_RUN[@]}" git \
-            -C "$INITIAL_DIR" \
-            -c "safe.directory=$HOST_SOURCE_DIR" \
-            -c "safe.directory=$HOST_SOURCE_DIR/.git" \
-            fetch "$HOST_SOURCE_DIR"
-        then
-            :
+        ' EXIT
+        "${SANDBOX_RUN[@]}" mkdir -p "$(dirname "$INITIAL_DIR")"
+        "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR"
+        "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR/.git"
+        git clone --mirror "$REPOSITORY_CLONE_SOURCE" "$HOST_SOURCE_DIR"
+        chmod -R a+rX "$HOST_SOURCE_DIR"
+        if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
+            "${SANDBOX_RUN[@]}" git clone "$HOST_SOURCE_DIR" "$INITIAL_DIR"
         else
-            rm -rf "$HOST_SOURCE_DIR"
-            false
+            "${SANDBOX_RUN[@]}" git -C "$INITIAL_DIR" fetch "$HOST_SOURCE_DIR"
         fi
-    fi
-    rm -rf "$HOST_SOURCE_DIR"
+    )
 
-    if sandbox_repository_git remote get-url origin &>/dev/null; then
+    if "${SANDBOX_RUN[@]}" git -C "$INITIAL_DIR" remote get-url origin &>/dev/null; then
         sandbox_repository_git remote set-url origin "$REPOSITORY_SOURCE_URL"
     else
         sandbox_repository_git remote add origin "$REPOSITORY_SOURCE_URL"
     fi
 
     if [[ -n "${LOCAL_REPOSITORY:-}" ]]; then
-        if local_repository_git remote get-url sandvault &>/dev/null; then
+        if git -C "$LOCAL_REPOSITORY" remote get-url sandvault &>/dev/null; then
             local_repository_git remote set-url sandvault "$INITIAL_DIR"
         else
             local_repository_git remote add sandvault "$INITIAL_DIR"
