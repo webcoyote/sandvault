@@ -130,7 +130,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.1.23"
+readonly VERSION="1.1.24"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -703,8 +703,28 @@ if [[ "$REBUILD" == "true" ]]; then
     #sudo dscl . -create "/Users/$SANDVAULT_USER" IsHidden 0
     #sudo dscl . -passwd "/Users/$SANDVAULT_USER" "sandvault"
 
-    # Remove sandvault user from "staff" group so it doesn't have access to most files
+    # Remove sandvault user from "staff" group so it doesn't have access to most files.
+    # On macOS this may require removing both username and GeneratedUID group entries.
+    trace "Removing $SANDVAULT_USER from staff group..."
+    SANDVAULT_GENERATED_UID="$(
+        dscl . -read "/Users/$SANDVAULT_USER" \
+	    GeneratedUID 2>/dev/null \
+	    | awk '/^GeneratedUID: +/ {print $2;}' \
+	    || true)"
     sudo dseditgroup -o edit -d "$SANDVAULT_USER" -t user staff 2>/dev/null || true
+    if [[ -n "$SANDVAULT_GENERATED_UID" ]]; then
+        sudo dscl . -delete "/Groups/staff" GroupMembers "$SANDVAULT_GENERATED_UID" 2>/dev/null || true
+    fi
+
+    sudo dscl . -delete "/Groups/staff" GroupMembership "$SANDVAULT_USER" 2>/dev/null || true
+    if sudo dscl . -read "/Groups/staff" GroupMembership 2>/dev/null | grep -Eq "(^|[[:space:]])$SANDVAULT_USER($|[[:space:]])"; then
+        abort "Failed to remove $SANDVAULT_USER user entry from staff group"
+    fi
+    if [[ -n "$SANDVAULT_GENERATED_UID" ]] && \
+       sudo dscl . -read "/Groups/staff" GroupMembers 2>/dev/null | grep -Eq "(^|[[:space:]])$SANDVAULT_GENERATED_UID($|[[:space:]])"
+    then
+        abort "Failed to remove $SANDVAULT_USER GeneratedUID entry from staff group"
+    fi
 
     # Add host user to the sandvault group
     trace "Adding $HOST_USER to $SANDVAULT_GROUP group..."
