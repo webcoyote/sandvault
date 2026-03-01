@@ -1043,29 +1043,57 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
 
     INITIAL_DIR="/Users/$SANDVAULT_USER/repositories/$REPOSITORY_NAME"
 
+    USE_DIRECT_LOCAL_CLONE=false
+    LOCAL_GIT_SAFE_DIRECTORY_ARGS=()
+    if [[ -n "${LOCAL_REPOSITORY:-}" ]]; then
+        LOCAL_GIT_SAFE_DIRECTORY_ARGS=(
+            -c "safe.directory=$LOCAL_REPOSITORY"
+            -c "safe.directory=$LOCAL_REPOSITORY/.git"
+        )
+        # Ensure sandvault user can read repository metadata before direct clone/fetch
+        if "${SANDBOX_RUN[@]}" test -r "$LOCAL_REPOSITORY" \
+            && "${SANDBOX_RUN[@]}" git \
+                "${LOCAL_GIT_SAFE_DIRECTORY_ARGS[@]}" \
+                -C "$LOCAL_REPOSITORY" rev-parse --git-dir &>/dev/null; then
+            USE_DIRECT_LOCAL_CLONE=true
+        fi
+    fi
     # Clone into a directory writable by user and readable by sandvault-user
     (
         # Use directory that both $USER and sandvault-$USER find valid
         cd "$SHARED_WORKSPACE"
-        mkdir -p "$SHARED_WORKSPACE/tmp"
-        HOST_SOURCE_DIR="$(mktemp -d "$SHARED_WORKSPACE/tmp/sv-source.XXXXXX")"
-        trap '
-            cd "$SHARED_WORKSPACE"
-            "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR" || true
-            "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR/.git" || true
-            rm -rf "$HOST_SOURCE_DIR"
-        ' EXIT
         "${SANDBOX_RUN[@]}" mkdir -p "$(dirname "$INITIAL_DIR")"
-        "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR"
-        "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR/.git"
 
-        # Clone the repo in a way that sandvault-user has access to all files (--no-hardlinks)
-        git clone --mirror --no-hardlinks "$REPOSITORY_CLONE_SOURCE" "$HOST_SOURCE_DIR"
-        chmod -R a+rX "$HOST_SOURCE_DIR"
-        if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
-            "${SANDBOX_RUN[@]}" git clone "$HOST_SOURCE_DIR" "$INITIAL_DIR"
+        if [[ "$USE_DIRECT_LOCAL_CLONE" == "true" ]]; then
+            if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
+                "${SANDBOX_RUN[@]}" git \
+                    "${LOCAL_GIT_SAFE_DIRECTORY_ARGS[@]}" \
+                    clone --no-hardlinks "$LOCAL_REPOSITORY" "$INITIAL_DIR"
+            else
+                "${SANDBOX_RUN[@]}" git \
+                    "${LOCAL_GIT_SAFE_DIRECTORY_ARGS[@]}" \
+                    -C "$INITIAL_DIR" fetch "$LOCAL_REPOSITORY"
+            fi
         else
-            "${SANDBOX_RUN[@]}" git -C "$INITIAL_DIR" fetch "$HOST_SOURCE_DIR"
+            mkdir -p "$SHARED_WORKSPACE/tmp"
+            HOST_SOURCE_DIR="$(mktemp -d "$SHARED_WORKSPACE/tmp/sv-clone-$REPOSITORY_NAME.XXXXXX")"
+            trap '
+                cd "$SHARED_WORKSPACE"
+                "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR" || true
+                "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR/.git" || true
+                rm -rf "$HOST_SOURCE_DIR"
+            ' EXIT
+            "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR"
+            "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR/.git"
+
+            # Clone the repo in a way that sandvault-user has access to all files (--no-hardlinks)
+            git clone --mirror --no-hardlinks "$REPOSITORY_CLONE_SOURCE" "$HOST_SOURCE_DIR"
+            chmod -R a+rX "$HOST_SOURCE_DIR"
+            if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
+                "${SANDBOX_RUN[@]}" git clone "$HOST_SOURCE_DIR" "$INITIAL_DIR"
+            else
+                "${SANDBOX_RUN[@]}" git -C "$INITIAL_DIR" fetch "$HOST_SOURCE_DIR"
+            fi
         fi
     )
 
@@ -1150,11 +1178,11 @@ if [[ "$MODE" == "ssh" ]]; then
     if [[ ! -t 0 || "$SHELL_COMMAND_MODE" == "true" ]]; then
         SSH_TTY_OPT="-T"
     fi
-    
+
     # Escape single quotes for a remote shell context.
     ZSH_COMMAND_SSH=$(printf '%s' "$ZSH_COMMAND" | sed "s/'/'\"'\"'/g")
     ZSH_COMMAND_SSH="'$ZSH_COMMAND_SSH'"
-    
+
     trace "Checking SSH connectivity"
     if ! ssh_check_output=$(ssh \
         -o BatchMode=yes \
@@ -1182,7 +1210,7 @@ if [[ "$MODE" == "ssh" ]]; then
     fi
 
     debug "SSH $SANDVAULT_USER@$HOSTNAME"
-    
+
     # SSH requires TWO layers of shell parsing: local shell → SSH → remote shell → /bin/zsh
     # The extra single quotes protect the command through SSH's remote shell parsing.
     # Without them, the remote shell would word-split the command, causing incorrect execution.
@@ -1237,7 +1265,7 @@ else
     # Use env to ensure the environment is cleared, otherwise PATH carries over
     # Use sandbox-exec to restrict access to external drives
     debug "Shell $SANDVAULT_USER@$HOSTNAME"
-    
+
     # sudo requires only ONE layer of shell parsing: local shell → /bin/zsh
     # Simple double quotes "$ZSH_COMMAND" are sufficient because sudo passes arguments
     # directly to the command without an intermediate shell parsing layer.
