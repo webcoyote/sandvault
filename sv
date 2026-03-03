@@ -823,6 +823,7 @@ cd "/Users/$SANDVAULT_USER/"
     --itemize-changes \
     --out-format="%n" \
     --links \
+    --copy-unsafe-links \
     --checksum \
     --recursive \
     --perms \
