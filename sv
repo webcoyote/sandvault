@@ -573,9 +573,13 @@ esac
 readonly COMMAND
 readonly CLONE_REPOSITORY
 
-# Resolve symlinks to get the real path
-if [[ -n "$INITIAL_DIR" ]]; then
-    INITIAL_DIR="$(cd "$INITIAL_DIR" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
+if [[ -z "$CLONE_REPOSITORY" ]]; then
+    # Resolve symlinks to get the real path
+    INITIAL_DIR="$(cd "${INITIAL_DIR:-"${PWD}"}" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
+    readonly INITIAL_DIR
+elif [[ -n "$INITIAL_DIR" ]]; then
+    # --clone wants to set INITIAL_DIRECTORY
+    abort "Cannot use [PATH] and --clone together; choose one"
 fi
 
 
@@ -1007,9 +1011,6 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
         abort "--clone is only supported with: ${CLONE_SUPPORTED_COMMANDS[*]}"
     fi
 
-    if [[ -n "$INITIAL_DIR" ]]; then
-        abort "Cannot use [PATH] and --clone together; choose one"
-    fi
     case "$(basename "${CLONE_REPOSITORY%/}")" in
         ""|/)
             abort "--clone path must include a directory name"
