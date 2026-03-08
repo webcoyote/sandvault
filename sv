@@ -227,7 +227,8 @@ ensure_brew_tool() {
     local cli_name="${2:-$tool}"
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in || condition
     brew_shellenv || true
-    if command -v "$cli_name" &>/dev/null; then
+
+    if [[ -x "$(brew --prefix)/bin/$cli_name" ]]; then
         return 0
     fi
     if [[ "$NESTED" == "true" ]]; then
