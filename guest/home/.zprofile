@@ -7,27 +7,27 @@ elif [[ ! -r "$PWD" ]]; then
     cd "$HOME"
 fi
 
-# Setup Homebrew PATH
-case "$(uname -m)" in
-    arm64)
-        if [[ -x /opt/homebrew/bin/brew ]]; then
-            eval "$(/opt/homebrew/bin/brew shellenv)"
-        fi
-        ;;
-    x86_64)
-        if [[ -x /usr/local/bin/brew ]]; then
-            eval "$(/usr/local/bin/brew shellenv)"
-        fi
-        ;;
-    *)
-        echo >&2 "sv: error: unsupported architecture: $(uname -m)"
-        exit 1
-        ;;
-esac
-
-# Add sandvault and user bin directories; user directories take priority
-path=("$HOME/user/bin" "$HOME/user/.local/bin" "$HOME/bin" "$HOME/.local/bin" $path)
-export PATH
-
 # Load user configuration
 [[ -f "$HOME/user/.zprofile" ]] && source "$HOME/user/.zprofile"
+
+# Setup Homebrew PATH when user configuration has not already done so
+if [[ -z "${HOMEBREW_PREFIX:-}" || "${PATH%%:"${HOMEBREW_PREFIX}"/sbin*}" != "${HOMEBREW_PREFIX}/bin" ]]; then
+    case "$(uname -m)" in
+        arm64)
+            [[ -x /opt/homebrew/bin/brew ]] && eval "$(/opt/homebrew/bin/brew shellenv)"
+            ;;
+        x86_64)
+            [[ -x /usr/local/bin/brew ]] && eval "$(/usr/local/bin/brew shellenv)"
+            ;;
+        *)
+            echo >&2 "sv: error: unsupported architecture: $(uname -m)"
+            exit 1
+            ;;
+    esac
+fi
+
+# Add sandvault and user bin directories; user directories take priority
+for dir in "$HOME/.local/bin" "$HOME/bin" "$HOME/user/.local/bin" "$HOME/user/bin"; do
+    [[ -d "$dir" ]] && path=("$dir" ${path:#$dir})
+done
+export PATH
