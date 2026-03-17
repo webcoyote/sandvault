@@ -130,7 +130,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.1.25"
+readonly VERSION="1.1.27"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -227,7 +227,8 @@ ensure_brew_tool() {
     local cli_name="${2:-$tool}"
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in || condition
     brew_shellenv || true
-    if command -v "$cli_name" &>/dev/null; then
+
+    if [[ -x "$(brew --prefix)/bin/$cli_name" ]]; then
         return 0
     fi
     if [[ "$NESTED" == "true" ]]; then
@@ -573,9 +574,13 @@ esac
 readonly COMMAND
 readonly CLONE_REPOSITORY
 
-# Resolve symlinks to get the real path
-if [[ -n "$INITIAL_DIR" ]]; then
-    INITIAL_DIR="$(cd "$INITIAL_DIR" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
+if [[ -z "$CLONE_REPOSITORY" ]]; then
+    # Resolve symlinks to get the real path
+    INITIAL_DIR="$(cd "${INITIAL_DIR:-"${PWD}"}" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
+    readonly INITIAL_DIR
+elif [[ -n "$INITIAL_DIR" ]]; then
+    # --clone wants to set INITIAL_DIRECTORY
+    abort "Cannot use [PATH] and --clone together; choose one"
 fi
 
 
@@ -823,6 +828,7 @@ cd "/Users/$SANDVAULT_USER/"
     --itemize-changes \
     --out-format="%n" \
     --links \
+    --copy-unsafe-links \
     --checksum \
     --recursive \
     --perms \
@@ -1006,9 +1012,6 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
         abort "--clone is only supported with: ${CLONE_SUPPORTED_COMMANDS[*]}"
     fi
 
-    if [[ -n "$INITIAL_DIR" ]]; then
-        abort "Cannot use [PATH] and --clone together; choose one"
-    fi
     case "$(basename "${CLONE_REPOSITORY%/}")" in
         ""|/)
             abort "--clone path must include a directory name"

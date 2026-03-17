@@ -1,15 +1,10 @@
-# SandVault
+# SandVault - Run Claude Code, OpenAI Codex, Google Gemini and shell commands safely in a sandboxed macOS user account
 
-**Run Claude Code, OpenAI Codex, Google Gemini and shell commands safely in a sandboxed macOS user account**
+![sandvault logo](https://webcoyote.github.io/images/shared/sandvault/sandvault-logo.jpg)
 
-SandVault (sv) manages a limited user account to sandbox shell commands and AI agents, providing a lightweight alternative to application isolation using virtual machines.
+---
 
-TL;DR:
-
-1. To run `xcodebuild` or `swift` see [Sandboxing xcodebuild and swift](#Sandboxing-xcodebuild-and-swift) for details.
-2. To run other sandboxed applications inside sandvault, use the `-x` option. See [Sandboxing other apps](#Sandboxing-other-apps) for details.
-3. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
-
+SandVault (`sv`) manages a limited user account to sandbox shell commands and AI agents, providing a lightweight alternative to application isolation using virtual machines.
 
 ## Features
 
@@ -18,6 +13,13 @@ TL;DR:
 - **Passwordless** - switch accounts without a prompt (after setup)
 - **Shared workspace** - joint access to `/Users/Shared/sv-$USER`
 - **Clean uninstall** - Complete removal with `sv uninstall`
+
+
+## Quick Links
+
+1. To run `xcodebuild` or `swift` see [Sandboxing xcodebuild and swift](#Sandboxing-xcodebuild-and-swift) for details.
+2. To run other sandboxed applications inside sandvault, use the `-x` option. See [Sandboxing other apps](#Sandboxing-other-apps) for details.
+3. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
 
 
 ## Security Model
