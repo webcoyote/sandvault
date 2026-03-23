@@ -1024,24 +1024,8 @@ fi
 
 
 ###############################################################################
-# Configure git
+# Configure git (handled after credential/config copy below)
 ###############################################################################
-if [[ "$NESTED" == "true" ]]; then
-    : # Git already configured
-else
-    trace "Configuring git..."
-    GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
-    GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
-    if [[ "$NO_BUILD" == "true" ]]; then
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
-    else
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
-    fi
-fi
 
 
 ###############################################################################
@@ -1052,6 +1036,116 @@ if [[ "$NESTED" == "true" ]]; then
 elif [[ "$NO_BUILD" == "false" ]]; then
     debug "Configure $SANDVAULT_USER home directory..."
     host_cmd sudo "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+fi
+
+
+###############################################################################
+# Copy host credentials, configs, and shell init scripts to sandbox
+###############################################################################
+if [[ "$NESTED" == "true" ]]; then
+    : # Already configured
+elif [[ "$REBUILD" == "true" ]]; then
+    _SV_STAGING="$SHARED_WORKSPACE/.sv-staging"
+
+    # Run a command as the sandbox user from a safe working directory
+    _sandbox_sh() {
+        (cd / && sudo -H --non-interactive --user="$SANDVAULT_USER" "$HOST_SHELL" -c "$@")
+    }
+
+    # Copy a single file from host to sandbox home via staging
+    _copy_to_sandbox() {
+        local src="$1" dst="$2" mode="${3:-600}"
+        [[ -f "$src" ]] || return 0
+        mkdir -p "$_SV_STAGING"
+        cp "$src" "$_SV_STAGING/.tmp"
+        chmod 644 "$_SV_STAGING/.tmp"
+        _sandbox_sh "mkdir -p \"\$(dirname ~/'$dst')\" && cp '$_SV_STAGING/.tmp' ~/'$dst' && chmod $mode ~/'$dst'"
+        rm -f "$_SV_STAGING/.tmp"
+    }
+
+    # Copy a directory from host to sandbox home via staging
+    _copy_dir_to_sandbox() {
+        local src="$1" dst="$2"
+        [[ -d "$src" ]] || return 0
+        mkdir -p "$_SV_STAGING/dir"
+        /usr/bin/rsync --quiet --archive "$src/" "$_SV_STAGING/dir/"
+        chmod -R a+rX "$_SV_STAGING/dir"
+        _sandbox_sh "mkdir -p ~/'$dst' && /usr/bin/rsync --quiet --archive '$_SV_STAGING/dir/' ~/'$dst/'"
+        rm -rf "$_SV_STAGING/dir"
+    }
+
+    # Merge oauthAccount from host .claude.json into sandbox .claude.json
+    _merge_claude_oauth() {
+        [[ -f "$HOME/.claude.json" ]] || return 0
+        mkdir -p "$_SV_STAGING"
+        # Read sandbox's .claude.json via sudo
+        _sandbox_sh "cat ~/.claude.json 2>/dev/null" > "$_SV_STAGING/.tmp-guest" || return 0
+        # Merge oauthAccount on host side
+        /usr/bin/python3 -c "
+import json, sys
+host = json.load(open(sys.argv[1]))
+guest = json.load(open(sys.argv[2]))
+if 'oauthAccount' in host:
+    guest['oauthAccount'] = host['oauthAccount']
+    json.dump(guest, open(sys.argv[2], 'w'), indent=2)
+" "$HOME/.claude.json" "$_SV_STAGING/.tmp-guest" 2>/dev/null || return 0
+        # Copy merged file back
+        chmod 644 "$_SV_STAGING/.tmp-guest"
+        _sandbox_sh "cp '$_SV_STAGING/.tmp-guest' ~/.claude.json && chmod 600 ~/.claude.json"
+        rm -f "$_SV_STAGING/.tmp-guest"
+    }
+
+    debug "Copying host credentials and configs to sandbox..."
+
+    # Agent credentials
+    host_cmd --msg "Copy ~/.claude/.credentials.json to sandbox" \
+        _copy_to_sandbox "$HOME/.claude/.credentials.json" ".claude/.credentials.json"
+    host_cmd --msg "Merge oauthAccount from ~/.claude.json into sandbox" \
+        _merge_claude_oauth
+    host_cmd --msg "Copy ~/.config/gh/hosts.yml to sandbox" \
+        _copy_to_sandbox "$HOME/.config/gh/hosts.yml" ".config/gh/hosts.yml"
+    host_cmd --msg "Copy ~/.config/gemini/ to sandbox" \
+        _copy_dir_to_sandbox "$HOME/.config/gemini" ".config/gemini"
+
+    # Host configs
+    for f in .gitconfig .tmux.conf .vimrc .wgetrc .curlrc .inputrc; do
+        host_cmd --msg "Copy ~/$f to sandbox" \
+            _copy_to_sandbox "$HOME/$f" "$f" 644
+    done
+
+    # Patch .gitconfig: ensure safe.directory is set
+    _patch_sandbox_gitconfig() {
+        _sandbox_sh "git config --global safe.directory '$SHARED_WORKSPACE/*'"
+    }
+    host_cmd --msg "Set safe.directory=$SHARED_WORKSPACE/* in sandbox .gitconfig" \
+        _patch_sandbox_gitconfig
+
+    # Shell init scripts
+    for f in .bashrc .bash_profile .bash_login .bash_logout .profile \
+             .zshrc .zshenv .zprofile .zlogin .zlogout; do
+        host_cmd --msg "Copy ~/$f to sandbox" \
+            _copy_to_sandbox "$HOME/$f" "$f" 644
+    done
+
+    rm -rf "$_SV_STAGING"
+fi
+
+
+###############################################################################
+# Write API keys to sandbox home (sourced by configure script)
+# Done here (not in buildhome script) so keys are always current
+###############################################################################
+if [[ "$NESTED" == "false" && "$DRYRUN" != "true" ]]; then
+    _write_env_key() {
+        local file="$SHARED_WORKSPACE/.sv-env/$1"
+        mkdir -p "$SHARED_WORKSPACE/.sv-env"
+        printf 'export %s=%q\n' "$1" "$2" > "$file"
+        chmod 600 "$file"
+    }
+    [[ -n "${OPENAI_API_KEY:-}" ]]    && _write_env_key OPENAI_API_KEY "$OPENAI_API_KEY"
+    [[ -n "${ANTHROPIC_API_KEY:-}" ]] && _write_env_key ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
+    [[ -n "${GOOGLE_API_KEY:-}" ]]    && _write_env_key GOOGLE_API_KEY "$GOOGLE_API_KEY"
+    [[ -n "${GEMINI_API_KEY:-}" ]]    && _write_env_key GEMINI_API_KEY "$GEMINI_API_KEY"
 fi
 
 
