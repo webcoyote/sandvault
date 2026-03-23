@@ -225,6 +225,13 @@ ensure_brew() {
 ensure_brew_tool() {
     local tool="$1"
     local cli_name="${2:-$tool}"
+
+    # check if CLI already available in PATH
+    if which "$cli_name" &>/dev/null; then
+        debug "$tool CLI '$cli_name' already available in PATH; skipping Homebrew installation"
+        return 0
+    fi
+
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in || condition
     brew_shellenv || true
 
