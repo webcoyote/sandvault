@@ -152,6 +152,7 @@ fi
 readonly HOST_USER
 readonly SANDVAULT_USER="sandvault-$HOST_USER"
 readonly SANDVAULT_GROUP="sandvault-$HOST_USER"
+readonly HOST_SHELL="${SHELL:-/bin/zsh}"
 readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
 readonly SANDVAULT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
 
@@ -285,7 +286,7 @@ init_sandbox_run_for_repository() {
         "/usr/bin/env" "-i"
         "HOME=/Users/$SANDVAULT_USER"
         "USER=$SANDVAULT_USER"
-        "SHELL=/bin/zsh"
+        "SHELL=$HOST_SHELL"
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
     )
 }
@@ -703,7 +704,7 @@ if [[ "$REBUILD" == "true" ]]; then
     sudo dscl . -create "/Users/$SANDVAULT_USER" PrimaryGroupID "$GROUP_ID"
     sudo dscl . -create "/Users/$SANDVAULT_USER" RealName "$SANDVAULT_USER User"
     sudo dscl . -create "/Users/$SANDVAULT_USER" NFSHomeDirectory "/Users/$SANDVAULT_USER"
-    sudo dscl . -create "/Users/$SANDVAULT_USER" UserShell "/bin/zsh"
+    sudo dscl . -create "/Users/$SANDVAULT_USER" UserShell "$HOST_SHELL"
 
     # Set a random password for the user (password required for SSH on macOS)
     # We'll use key-based auth so the password won't actually be used.
@@ -855,7 +856,7 @@ EOF
 
 heredoc SUDOERS_CONTENT << EOF
 # Allow $HOST_USER to run these commands as $SANDVAULT_USER without password
-$HOST_USER ALL=($SANDVAULT_USER) NOPASSWD: /bin/zsh
+$HOST_USER ALL=($SANDVAULT_USER) NOPASSWD: $HOST_SHELL
 $HOST_USER ALL=($SANDVAULT_USER) NOPASSWD: /usr/bin/env
 $HOST_USER ALL=($SANDVAULT_USER) NOPASSWD: /usr/bin/true
 
@@ -1155,7 +1156,7 @@ fi
 # that are shared, e.g. /tmp/claude and /private/tmp/claude, which doesn't work when there
 # are multiple users running the agent on the same computer.
 # Fix: set TMPDIR after the shell has started running.
-ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; exec /bin/zsh --login"
+SHELL_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; exec $HOST_SHELL --login"
 
 # Prepare command args as a single string
 COMMAND_ARGS_STR=""
@@ -1167,9 +1168,9 @@ if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
     # COMMAND_ARGS to a command that will be run by the shell.
     #
     # Example: sv shell -- echo foo
-    # Runs:    exec /bin/zsh --login -c 'echo foo'
+    # Runs:    exec $HOST_SHELL --login -c 'echo foo'
     if [[ "$COMMAND" == "" ]]; then
-        ZSH_COMMAND="$ZSH_COMMAND -c '${COMMAND_ARGS_STR}'"
+        SHELL_COMMAND="$SHELL_COMMAND -c '${COMMAND_ARGS_STR}'"
         COMMAND_ARGS_STR=""
         SHELL_COMMAND_MODE=true
     fi
@@ -1190,8 +1191,8 @@ if [[ "$MODE" == "ssh" ]]; then
     fi
 
     # Escape single quotes for a remote shell context.
-    ZSH_COMMAND_SSH=$(printf '%s' "$ZSH_COMMAND" | sed "s/'/'\"'\"'/g")
-    ZSH_COMMAND_SSH="'$ZSH_COMMAND_SSH'"
+    SHELL_COMMAND_SSH=$(printf '%s' "$SHELL_COMMAND" | sed "s/'/'\"'\"'/g")
+    SHELL_COMMAND_SSH="'$SHELL_COMMAND_SSH'"
 
     trace "Checking SSH connectivity"
     if ! ssh_check_output=$(ssh \
@@ -1221,11 +1222,11 @@ if [[ "$MODE" == "ssh" ]]; then
 
     debug "SSH $SANDVAULT_USER@$HOSTNAME"
 
-    # SSH requires TWO layers of shell parsing: local shell → SSH → remote shell → /bin/zsh
+    # SSH requires TWO layers of shell parsing: local shell → SSH → remote shell → $HOST_SHELL
     # The extra single quotes protect the command through SSH's remote shell parsing.
     # Without them, the remote shell would word-split the command, causing incorrect execution.
     # Example: "'export TMPDIR=...'" becomes a single arg after local expansion, then the remote
-    # shell strips the outer quotes, passing 'export TMPDIR=...' correctly to /bin/zsh -c
+    # shell strips the outer quotes, passing 'export TMPDIR=...' correctly to $HOST_SHELL -c
     if ssh \
         -q \
         "$SSH_TTY_OPT" \
@@ -1236,7 +1237,7 @@ if [[ "$MODE" == "ssh" ]]; then
         /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
-            "SHELL=/bin/zsh" \
+            "SHELL=$HOST_SHELL" \
             "TERM=${TERM:-}" \
             "COMMAND=$COMMAND" \
             "COMMAND_ARGS=$COMMAND_ARGS_STR" \
@@ -1246,7 +1247,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
-            /bin/zsh -c "$ZSH_COMMAND_SSH"
+            $HOST_SHELL -c "$SHELL_COMMAND_SSH"
     then
         :
     else
@@ -1276,15 +1277,15 @@ else
     # Use sandbox-exec to restrict access to external drives
     debug "Shell $SANDVAULT_USER@$HOSTNAME"
 
-    # sudo requires only ONE layer of shell parsing: local shell → /bin/zsh
-    # Simple double quotes "$ZSH_COMMAND" are sufficient because sudo passes arguments
+    # sudo requires only ONE layer of shell parsing: local shell → $HOST_SHELL
+    # Simple double quotes "$SHELL_COMMAND" are sufficient because sudo passes arguments
     # directly to the command without an intermediate shell parsing layer.
     # This is different from SSH (see above) which requires extra quoting.
     if "${LAUNCHER[@]+"${LAUNCHER[@]}"}" \
         /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
-            "SHELL=/bin/zsh" \
+            "SHELL=$HOST_SHELL" \
             "TERM=${TERM:-}" \
             "COMMAND=$COMMAND" \
             "COMMAND_ARGS=$COMMAND_ARGS_STR" \
@@ -1294,7 +1295,7 @@ else
             "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
-            /bin/zsh -c "$ZSH_COMMAND"
+            $HOST_SHELL -c "$SHELL_COMMAND"
     then
         :
     else
