@@ -13,20 +13,20 @@ cd "$SCRIPT_DIR"
 # may not have access to $SCRIPT_DIR, so we may need to copy to a
 # temporary location that is accessible to sandvault-$USER
 if [[ -z "${SV_SESSION_ID:-}" && -z "${SV_TESTS_REEXEC:-}" ]]; then
-    # Hard-code sandvault shared directory location :(
-    readonly SHARED_WORKSPACE="/Users/Shared/sv-$USER"
+    # Hard-code sandvault home directory location :(
+    readonly SANDVAULT_HOME="/Users/sandvault-$USER"
     case "$SCRIPT_DIR/" in
-        "$SHARED_WORKSPACE"/*) ;;
+        "$SANDVAULT_HOME"/*) ;;
         *)
             # Do not recurse
             export SV_TESTS_REEXEC=1
 
             if [[ "$VERBOSE" -ne 0 ]]; then
-                echo "Cloning files to temporary folder in shared workspace"
+                echo "Cloning files to temporary folder in sandbox home"
             fi
             SRC_DIR="$(git rev-parse --show-toplevel)"
             readonly SRC_DIR
-            DST_DIR="$(mktemp -d -p "$SHARED_WORKSPACE")"
+            DST_DIR="$(mktemp -d -p "$SANDVAULT_HOME")"
             readonly DST_DIR
             trap 'rm -rf "$DST_DIR"' EXIT
             # git clone --depth 1 --no-local "$SRC_DIR" "$DST_DIR" &>/dev/null
