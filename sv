@@ -855,7 +855,8 @@ sudo chown "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER"
 sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 
 # Copy files to home directory (--copy-unsafe-links resolves symlinks pointing outside source)
-/usr/bin/rsync -a --copy-unsafe-links "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/."
+# Exclude .claude.json — it's managed by the credential merge step separately
+/usr/bin/rsync -a --copy-unsafe-links --exclude='.claude.json' "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/."
 sudo /usr/sbin/chown -R "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER"
 EOF
     host_cmd sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
@@ -1033,8 +1034,8 @@ elif [[ "$REBUILD" == "true" ]]; then
     _merge_claude_oauth() {
         [[ -f "$HOME/.claude.json" ]] || return 0
         mkdir -p "$_SV_STAGING"
-        # Read sandbox's .claude.json via sudo
-        _sandbox_sh "cat ~/.claude.json 2>/dev/null" > "$_SV_STAGING/.tmp-guest" || return 0
+        # Read sandbox's .claude.json via sudo (default to empty object if absent)
+        _sandbox_sh "cat ~/.claude.json 2>/dev/null || echo '{}'" > "$_SV_STAGING/.tmp-guest" || return 0
         # Merge oauthAccount on host side
         /usr/bin/python3 -c "
 import json, sys
@@ -1050,6 +1051,23 @@ if 'oauthAccount' in host:
         rm -f "$_SV_STAGING/.tmp-guest"
     }
 
+    # # Copy Claude OAuth tokens from host keychain to sandbox keychain
+    # _copy_claude_keychain_credentials() {
+    #     local creds
+    #     creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null) || return 0
+    #     [[ -n "$creds" ]] || return 0
+    #     local sandbox_keychain="/Users/$SANDVAULT_USER/Library/Keychains/login.keychain-db"
+    #     # Create and unlock the login keychain if it doesn't exist (empty password, same as configure)
+    #     if [[ ! -f "$sandbox_keychain" ]]; then
+    #         _sandbox_sh "security create-keychain -p '' '$sandbox_keychain'"
+    #     fi
+    #     _sandbox_sh "security unlock-keychain -p '' '$sandbox_keychain'"
+    #     _sandbox_sh "security list-keychains -s '$sandbox_keychain'"
+    #     # Replace existing entry
+    #     _sandbox_sh "security delete-generic-password -s 'Claude Code-credentials' '$sandbox_keychain' 2>/dev/null || true"
+    #     _sandbox_sh "security add-generic-password -s 'Claude Code-credentials' -a '$SANDVAULT_USER' -w '$(printf '%s' "$creds" | sed "s/'/'\\\\''/g")' '$sandbox_keychain'"
+    # }
+
     debug "Copying host credentials and configs to sandbox..."
 
     # Agent credentials
@@ -1057,6 +1075,8 @@ if 'oauthAccount' in host:
         _copy_to_sandbox "$HOME/.claude/.credentials.json" ".claude/.credentials.json"
     host_cmd --msg "Merge oauthAccount from ~/.claude.json into sandbox" \
         _merge_claude_oauth
+    # host_cmd --msg "Copy Claude OAuth keychain credentials to sandbox" \
+    #     _copy_claude_keychain_credentials
     host_cmd --msg "Copy ~/.config/gh/hosts.yml to sandbox" \
         _copy_to_sandbox "$HOME/.config/gh/hosts.yml" ".config/gh/hosts.yml"
     host_cmd --msg "Copy ~/.config/gemini/ to sandbox" \
