@@ -90,6 +90,17 @@ defaults write com.apple.dt.Xcode IDECustomDerivedDataLocation ".DerivedData"
 
 
 ###############################################################################
+# Source API key env files (written by sv to home directory)
+###############################################################################
+if [[ -d "$HOME/.sv-env" ]]; then
+    for env_file in "$HOME"/.sv-env/*; do
+        # shellcheck disable=SC1090
+        [[ -f "$env_file" ]] && source "$env_file"
+    done
+fi
+
+
+###############################################################################
 # Copy user directory contents to $HOME
 ###############################################################################
 # Copy contents of guest/home/user to $HOME

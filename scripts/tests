@@ -389,13 +389,8 @@ run_tests() {
     # Sandbox Allowed Access Tests
     ###############################################################################
 
-    # Should be able to access shared workspace
-    SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
-    queue_test assert_sandbox_pipe_contains "can access shared workspace" "ls $SHARED_WORKSPACE" "SANDVAULT-README"
-    queue_test assert_sandbox_exit_code "sv s -- touch SANDVAULT-README.md" 0 touch -c "$SHARED_WORKSPACE/SANDVAULT-README.md"
-
     # Should be able to access home directory
-    queue_test assert_sandbox_exit_code "sv s -- touch $SANDVAULT_HOME/README.md" 0 touch -c "$SANDVAULT_HOME/README.md"
+    queue_test assert_sandbox_exit_code "can write to home" 0 touch -c "$SANDVAULT_HOME/README.md"
 
     # Should be able to run basic commands
     queue_test assert_sandbox_pipe_contains "can run echo" "echo hello" "hello"
@@ -411,15 +406,15 @@ run_tests() {
     # Initial Directory Tests
     ###############################################################################
 
-    # Test that unreadable directory falls back to SHARED_WORKSPACE
+    # Test that unreadable directory falls back to $HOME
     # Host user's home directory should not be readable by sandvault user
     test_unreadable_dir_fallback() {
         local output
         output=$(cd "$HOST_HOME" && echo "pwd ; exit" | sv_cmd s 2>&1)
-        if [[ "$output" == *"$SHARED_WORKSPACE"* ]]; then
-            pass "unreadable directory falls back to SHARED_WORKSPACE"
+        if [[ "$output" == *"$SANDVAULT_HOME"* ]]; then
+            pass "unreadable directory falls back to \$HOME"
         else
-            fail "unreadable directory falls back to SHARED_WORKSPACE" "$SHARED_WORKSPACE" "$output"
+            fail "unreadable directory falls back to \$HOME" "$SANDVAULT_HOME" "$output"
         fi
     }
 

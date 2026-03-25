@@ -42,6 +42,51 @@ abort () {
 # EOF
 heredoc(){ IFS=$'\n' read -r -d '' "${1}" || true; }
 
+host_cmd() {
+    local display="" use_eval=false
+    while true; do
+        case "${1:-}" in
+            --eval) use_eval=true; shift ;;
+            --msg)  display="$2"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+    if [[ -z "$display" ]]; then
+        display="$*"
+    fi
+    if [[ "${QUIET:-false}" != "true" ]]; then
+        echo >&2 "  ▸ $display"
+    fi
+    if [[ "${DRYRUN:-false}" == "true" ]]; then
+        return 0
+    fi
+    if [[ "${AUTO_YES:-false}" != "true" && "${QUIET:-false}" != "true" ]]; then
+        local choice
+        read -rn1 -p "    (y)es / (a)ll / (s)kip / (q)uit [y]: " choice </dev/tty
+        echo >&2
+        case "${choice:-y}" in
+            y|Y) ;;
+            a|A) AUTO_YES=true ;;
+            s|S) return 0 ;;
+            q|Q) exit 1 ;;
+            *) return 0 ;;
+        esac
+    fi
+    if [[ "$use_eval" == "true" ]]; then
+        if [[ "${QUIET:-false}" == "true" ]]; then
+            eval "$@" >/dev/null 2>&1
+        else
+            eval "$@"
+        fi
+    else
+        if [[ "${QUIET:-false}" == "true" ]]; then
+            "$@" >/dev/null 2>&1
+        else
+            "$@"
+        fi
+    fi
+}
+
 git_config_set_if_changed() {
     local file="$1"
     local key="$2"
@@ -85,9 +130,9 @@ configure_ssh_access() {
             abort "$SANDVAULT_USER SSH keypair is missing but --no-build flag set"
         fi
         trace "Creating SSH key files..."
-        mkdir -p "$SSH_DIR"
-        /bin/chmod 0700 "$SSH_DIR"
-        ssh-keygen -t ed25519 \
+        host_cmd mkdir -p "$SSH_DIR"
+        host_cmd /bin/chmod 0700 "$SSH_DIR"
+        host_cmd ssh-keygen -t ed25519 \
             -f "$SSH_KEYFILE_PRIV" \
             -N "" \
             -q \
@@ -152,7 +197,8 @@ fi
 readonly HOST_USER
 readonly SANDVAULT_USER="sandvault-$HOST_USER"
 readonly SANDVAULT_GROUP="sandvault-$HOST_USER"
-readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
+readonly HOST_SHELL="${SHELL:-/bin/zsh}"
+
 readonly SANDVAULT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
 
 # Create sudoers.d file for passwordless sudo to sandvault user
@@ -217,7 +263,7 @@ ensure_brew() {
         abort "Missing Homebrew; refusing to install because --no-build flag set"
     fi
     debug "Installing Homebrew..."
-    env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    host_cmd --eval 'env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in || condition
     brew_shellenv || abort "Homebrew install failed."
 }
@@ -225,6 +271,13 @@ ensure_brew() {
 ensure_brew_tool() {
     local tool="$1"
     local cli_name="${2:-$tool}"
+
+    # check if CLI already available in PATH
+    if which "$cli_name" &>/dev/null; then
+        debug "$tool CLI '$cli_name' already available in PATH; skipping Homebrew installation"
+        return 0
+    fi
+
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in || condition
     brew_shellenv || true
 
@@ -240,9 +293,9 @@ ensure_brew_tool() {
     ensure_brew
     debug "Installing $tool with Homebrew..."
     if [[ "$SV_VERBOSE" -lt 3 ]]; then
-        brew install --quiet "$tool"
+        host_cmd brew install --quiet "$tool"
     else
-        brew install "$tool"
+        host_cmd brew install "$tool"
     fi
     if command -v "$cli_name" &>/dev/null; then
         return 0
@@ -278,7 +331,7 @@ init_sandbox_run_for_repository() {
         "/usr/bin/env" "-i"
         "HOME=/Users/$SANDVAULT_USER"
         "USER=$SANDVAULT_USER"
-        "SHELL=/bin/zsh"
+        "SHELL=$HOST_SHELL"
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
     )
 }
@@ -362,68 +415,56 @@ configure_shared_folder_permssions() {
     # causes: "chmod: the -R and -h options may not be specified together"
     if [[ "$enable" == "true" ]]; then
         # Make workspace accessible to $HOST_USER and $SANDVAULT_GROUP only
-        trace "Configuring $SHARED_WORKSPACE: set owner to $HOST_USER:$SANDVAULT_GROUP"
-        sudo /usr/sbin/chown -f -R "$HOST_USER:$SANDVAULT_GROUP" "$SHARED_WORKSPACE"
-        trace "Configuring $SHARED_WORKSPACE permissions..."
-        sudo /bin/chmod 0770 "$SHARED_WORKSPACE"
-        trace "Configuring $SHARED_WORKSPACE: add $SANDVAULT_RIGHTS (recursively)"
-        sudo find "$SHARED_WORKSPACE" -print0 | xargs -0 sudo /bin/chmod -h +a "$SANDVAULT_RIGHTS"
+        host_cmd sudo /usr/sbin/chown -f -R "$HOST_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER"
+        host_cmd sudo /bin/chmod 0770 "/Users/$SANDVAULT_USER"
+        host_cmd --eval "sudo find '/Users/$SANDVAULT_USER' -print0 | xargs -0 sudo /bin/chmod -h +a '$SANDVAULT_RIGHTS'"
     else
         # Make workspace accessible to $HOST_USER only
-        trace "Configuring $SHARED_WORKSPACE: restoring owner to $HOST_USER:$(id -gn)"
-        sudo /usr/sbin/chown -f -R "$HOST_USER:$(id -gn)" "$SHARED_WORKSPACE"
-        trace "Configuring $SHARED_WORKSPACE permissions..."
-        sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
-        trace "Configuring $SHARED_WORKSPACE: remove $SANDVAULT_RIGHTS (recursively)"
-        sudo find "$SHARED_WORKSPACE" -print0 2>/dev/null | xargs -0 sudo /bin/chmod -h -a "$SANDVAULT_RIGHTS" 2>/dev/null || true
+        host_cmd sudo /usr/sbin/chown -f -R "$HOST_USER:$(id -gn)" "/Users/$SANDVAULT_USER"
+        host_cmd sudo /bin/chmod 0700 "/Users/$SANDVAULT_USER"
+        host_cmd --eval "sudo find '/Users/$SANDVAULT_USER' -print0 2>/dev/null | xargs -0 sudo /bin/chmod -h -a '$SANDVAULT_RIGHTS' 2>/dev/null || true"
     fi
 }
 
 uninstall() {
     debug "Uninstalling..."
-    force_cleanup_sandvault_processes
+    host_cmd --msg "Terminate $SANDVAULT_USER processes (launchctl bootout + pkill)" \
+        force_cleanup_sandvault_processes
 
     # Remove the install marker file first; it's a sentinel for "everything is complete".
     # By removing it first we force a rebuild if the user wants to run this again.
-    rm -rf "$INSTALL_MARKER"
-    rmdir "$INSTALL_PRODUCT" &>/dev/null || true
-    rmdir "$INSTALL_ORG" &>/dev/null || true
+    host_cmd rm -rf "$INSTALL_MARKER"
+    host_cmd rmdir "$INSTALL_PRODUCT" || true
+    host_cmd rmdir "$INSTALL_ORG" || true
 
     # Remove the sudoers file
-    sudo rm -rf "$SUDOERS_FILE"
+    host_cmd sudo rm -rf "$SUDOERS_FILE"
 
     # Remove build home script and sandbox profile
-    sudo rm -rf "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
-    sudo rm -rf "$SANDBOX_PROFILE"
-    sudo rmdir "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")" 2>/dev/null || true
+    host_cmd sudo rm -rf "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+    host_cmd sudo rm -rf "$SANDBOX_PROFILE"
+    host_cmd sudo rmdir "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")" || true
 
-    # Remove shared folder ACLS
-    debug "Configuring shared workspace permissions..."
+    # Remove shared folder ACLs from sandbox home
+    debug "Removing shared workspace permissions..."
     configure_shared_folder_permssions false
 
     # Remove host user from sandvault group
     debug "Removing user and group..."
-    sudo dseditgroup -o edit -d "$HOST_USER" -t user "$SANDVAULT_GROUP" 2>/dev/null || true
+    host_cmd sudo dseditgroup -o edit -d "$HOST_USER" -t user "$SANDVAULT_GROUP" || true
 
     # Remove sandvault user from SSH group BEFORE deleting the user
-    sudo dseditgroup -o edit -d "$SANDVAULT_USER" -t user com.apple.access_ssh 2>/dev/null || true
+    host_cmd sudo dseditgroup -o edit -d "$SANDVAULT_USER" -t user com.apple.access_ssh || true
 
     # Now delete the user and group
-    sudo dscl . -delete "/Users/$SANDVAULT_USER" &>/dev/null || true
-    sudo dscl . -delete "/Groups/$SANDVAULT_GROUP" &>/dev/null || true
-    sudo rm -rf "/Users/$SANDVAULT_USER"
+    host_cmd sudo dscl . -delete "/Users/$SANDVAULT_USER" || true
+    host_cmd sudo dscl . -delete "/Groups/$SANDVAULT_GROUP" || true
+    host_cmd sudo rm -rf "/Users/$SANDVAULT_USER"
 
     # Cleanup SSH
-    rm -rf "$SSH_KEYFILE_PRIV" "$SSH_KEYFILE_PUB"
+    host_cmd rm -rf "$SSH_KEYFILE_PRIV" "$SSH_KEYFILE_PUB"
 
-    # Remove shared workspace
-    rm -f "$SHARED_WORKSPACE/SANDVAULT-README.md"
-    rmdir "$SHARED_WORKSPACE" 2>/dev/null || true
-    if [[ -d "$SHARED_WORKSPACE" ]]; then
-        info "Keeping $SHARED_WORKSPACE directory (it is not empty)"
-    else
-        debug "Removed $SHARED_WORKSPACE (it was empty)"
-    fi
+    # Sandbox home is already removed above (sudo rm -rf /Users/$SANDVAULT_USER)
 }
 
 
@@ -433,6 +474,9 @@ uninstall() {
 REBUILD=false
 NO_BUILD=false
 USE_SANDBOX=true
+AUTO_YES=false
+QUIET=false
+DRYRUN=false
 MODE=shell
 COMMAND_ARGS=()
 INITIAL_DIR=""
@@ -455,6 +499,9 @@ show_help() {
     echo "  -h, --help           Show this help message"
     echo "  -n, --no-build       Refuse to make any sandbox changes; error if changes are needed"
     echo "  -x, --no-sandbox     Disable sandbox-exec restrictions"
+    echo "  -y, --yes            Auto-confirm all host commands (still echoed)"
+    echo "  -q, --quiet          Suppress all host command output (implies -y)"
+    echo "  --dryrun             Show what would be done without executing anything"
     echo "  -c, --clone URL|PATH Clone Git repository into sandvault home and open there"
     echo "  --version            Show version information"
     echo ""
@@ -509,6 +556,20 @@ while [[ $# -gt 0 ]]; do
             ;;
         -x|--no-sandbox)
             USE_SANDBOX=false
+            shift
+            ;;
+        -y|--yes)
+            AUTO_YES=true
+            shift
+            ;;
+        -q|--quiet)
+            QUIET=true
+            AUTO_YES=true
+            shift
+            ;;
+        --dryrun)
+            DRYRUN=true
+            REBUILD=true
             shift
             ;;
         -c|--clone)
@@ -624,6 +685,8 @@ fi
 readonly NO_BUILD
 readonly REBUILD
 readonly USE_SANDBOX
+readonly QUIET
+readonly DRYRUN
 
 
 ###############################################################################
@@ -652,7 +715,7 @@ if [[ "$REBUILD" == "true" ]]; then
         NEXT_UID=$((NEXT_UID + 1))
 
         # Create group
-        sudo dscl . -create "/Groups/$SANDVAULT_GROUP"
+        host_cmd sudo dscl . -create "/Groups/$SANDVAULT_GROUP"
         GROUP_ID=$NEXT_UID
     else
         trace "Group $SANDVAULT_GROUP already exists"
@@ -666,8 +729,8 @@ if [[ "$REBUILD" == "true" ]]; then
         GROUP_ID=$((NEXT_UID + 1))
     fi
     trace "Configuring $SANDVAULT_GROUP group properties..."
-    sudo dscl . -create "/Groups/$SANDVAULT_GROUP" PrimaryGroupID "$GROUP_ID"
-    sudo dscl . -create "/Groups/$SANDVAULT_GROUP" RealName "$SANDVAULT_GROUP Group"
+    host_cmd sudo dscl . -create "/Groups/$SANDVAULT_GROUP" PrimaryGroupID "$GROUP_ID"
+    host_cmd sudo dscl . -create "/Groups/$SANDVAULT_GROUP" RealName "$SANDVAULT_GROUP Group"
 
     # Check if user exists, create if needed
     if ! dscl . -read "/Users/$SANDVAULT_USER" &>/dev/null 2>&1; then
@@ -678,7 +741,7 @@ if [[ "$REBUILD" == "true" ]]; then
         NEXT_UID=$((NEXT_UID + 1))
 
         # Create user
-        sudo dscl . -create "/Users/$SANDVAULT_USER"
+        host_cmd sudo dscl . -create "/Users/$SANDVAULT_USER"
         USER_ID=$NEXT_UID
     else
         trace "User $SANDVAULT_USER already exists"
@@ -692,17 +755,18 @@ if [[ "$REBUILD" == "true" ]]; then
         NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
         USER_ID=$((NEXT_UID + 1))
     fi
-    sudo dscl . -create "/Users/$SANDVAULT_USER" UniqueID "$USER_ID"
-    sudo dscl . -create "/Users/$SANDVAULT_USER" PrimaryGroupID "$GROUP_ID"
-    sudo dscl . -create "/Users/$SANDVAULT_USER" RealName "$SANDVAULT_USER User"
-    sudo dscl . -create "/Users/$SANDVAULT_USER" NFSHomeDirectory "/Users/$SANDVAULT_USER"
-    sudo dscl . -create "/Users/$SANDVAULT_USER" UserShell "/bin/zsh"
+    host_cmd sudo dscl . -create "/Users/$SANDVAULT_USER" UniqueID "$USER_ID"
+    host_cmd sudo dscl . -create "/Users/$SANDVAULT_USER" PrimaryGroupID "$GROUP_ID"
+    host_cmd sudo dscl . -create "/Users/$SANDVAULT_USER" RealName "$SANDVAULT_USER User"
+    host_cmd sudo dscl . -create "/Users/$SANDVAULT_USER" NFSHomeDirectory "/Users/$SANDVAULT_USER"
+    host_cmd sudo dscl . -create "/Users/$SANDVAULT_USER" UserShell "$HOST_SHELL"
 
     # Set a random password for the user (password required for SSH on macOS)
     # We'll use key-based auth so the password won't actually be used.
     RANDOM_PASS=$(openssl rand -base64 32)
-    sudo dscl . -passwd "/Users/$SANDVAULT_USER" "$RANDOM_PASS"
-    sudo dscl . -create "/Users/$SANDVAULT_USER" IsHidden 1  # Hide from login window
+    host_cmd --msg "sudo dscl . -passwd /Users/$SANDVAULT_USER <random>" \
+        sudo dscl . -passwd "/Users/$SANDVAULT_USER" "$RANDOM_PASS"
+    host_cmd sudo dscl . -create "/Users/$SANDVAULT_USER" IsHidden 1
 
     # DANGEROUS: allow login as sandvault user
     #sudo dscl . -create "/Users/$SANDVAULT_USER" IsHidden 0
@@ -716,12 +780,12 @@ if [[ "$REBUILD" == "true" ]]; then
 	    GeneratedUID 2>/dev/null \
 	    | awk '/^GeneratedUID: +/ {print $2;}' \
 	    || true)"
-    sudo dseditgroup -o edit -d "$SANDVAULT_USER" -t user staff 2>/dev/null || true
+    host_cmd --eval "sudo dseditgroup -o edit -d '$SANDVAULT_USER' -t user staff 2>/dev/null || true"
     if [[ -n "$SANDVAULT_GENERATED_UID" ]]; then
-        sudo dscl . -delete "/Groups/staff" GroupMembers "$SANDVAULT_GENERATED_UID" 2>/dev/null || true
+        host_cmd --eval "sudo dscl . -delete /Groups/staff GroupMembers '$SANDVAULT_GENERATED_UID' 2>/dev/null || true"
     fi
 
-    sudo dscl . -delete "/Groups/staff" GroupMembership "$SANDVAULT_USER" 2>/dev/null || true
+    host_cmd --eval "sudo dscl . -delete /Groups/staff GroupMembership '$SANDVAULT_USER' 2>/dev/null || true"
     if sudo dscl . -read "/Groups/staff" GroupMembership 2>/dev/null | grep -Eq "(^|[[:space:]])$SANDVAULT_USER($|[[:space:]])"; then
         abort "Failed to remove $SANDVAULT_USER user entry from staff group"
     fi
@@ -733,7 +797,7 @@ if [[ "$REBUILD" == "true" ]]; then
 
     # Add host user to the sandvault group
     trace "Adding $HOST_USER to $SANDVAULT_GROUP group..."
-    sudo dseditgroup -o edit -a "$HOST_USER" -t user "$SANDVAULT_GROUP"
+    host_cmd sudo dseditgroup -o edit -a "$HOST_USER" -t user "$SANDVAULT_GROUP"
 fi
 
 
@@ -755,36 +819,13 @@ if [[ "$REBUILD" == "true" || "$MODE" == "ssh" ]]; then
                 abort "cannot add $SANDVAULT_USER to remote access because --no-build flag set"
             fi
             # do not use sudo dscl; it creates duplicate entries
-            sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
+            host_cmd sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
         fi
     elif [[ "$MODE" == "ssh" ]]; then
         # Remote Login is disabled and SSH mode requested
         abort "Remote Login via SSH is not enabled. Enable it in System Settings → General → Sharing → Remote Login"
     fi
     # else: Remote Login disabled but not using SSH mode; skip silently
-fi
-
-
-###############################################################################
-# Create shared workspace directory
-###############################################################################
-if [[ "$REBUILD" == "true" ]]; then
-    debug "Creating shared workspace at $SHARED_WORKSPACE..."
-    mkdir -p "$SHARED_WORKSPACE"
-    configure_shared_folder_permssions true
-
-    # Create a README in the shared workspace
-    cat > "$SHARED_WORKSPACE/SANDVAULT-README.md" << EOF
-    # sandvault workspace for '$HOST_USER'
-    # (autogenerated file; do not edit)
-
-    This directory is shared with '$SANDVAULT_USER' user.
-    The sandvault user has full read/write access here.
-
-    ## To switch to sandvault:
-
-        sv shell
-EOF
 fi
 
 
@@ -813,42 +854,22 @@ sudo mkdir -p "/Users/$SANDVAULT_USER"
 sudo chown "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER"
 sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 
-# Copy files preserving permissions for contents only
-# Use the system rsync to avoid Homebrew dependencies.
-# Perform rsync from within the destination directory so that the paths
-# passed through xargs to chown are correct.
-#
-# Use tr to convert newlines to null terminators to pass to xargs -0
-#
-# In the event that no files need to be synchronized, send ":" to xargs to avoid error
-#
-# Use OSX chown, not GNU chown, because I've tested that it works
-cd "/Users/$SANDVAULT_USER/"
-/usr/bin/rsync \
-    --itemize-changes \
-    --out-format="%n" \
-    --links \
-    --copy-unsafe-links \
-    --checksum \
-    --recursive \
-    --perms \
-    --times \
-    "$WORKSPACE/guest/home/." \
-    "." \
-    | (tr '\n' '\0' || echo :) \
-    | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
+# Copy files to home directory (--copy-unsafe-links resolves symlinks pointing outside source)
+# Exclude .claude.json — it's managed by the credential merge step separately
+/usr/bin/rsync -a --copy-unsafe-links --exclude='.claude.json' "$WORKSPACE/guest/home/." "/Users/$SANDVAULT_USER/."
+sudo /usr/sbin/chown -R "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER"
 EOF
-    sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
+    host_cmd sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     # shellcheck disable=SC2154 # SUDOERS_BUILD_HOME_SCRIPT_CONTENTS is referenced but not assigned (yes it is)
-    echo "$SUDOERS_BUILD_HOME_SCRIPT_CONTENTS" | sudo tee "$SUDOERS_BUILD_HOME_SCRIPT_NAME" > /dev/null
-    sudo /bin/chmod 0554 "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+    host_cmd --eval "echo \"\$SUDOERS_BUILD_HOME_SCRIPT_CONTENTS\" | sudo tee '$SUDOERS_BUILD_HOME_SCRIPT_NAME' > /dev/null"
+    host_cmd sudo /bin/chmod 0554 "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
 
     # Get the sandvault user's UID
     SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
 
 heredoc SUDOERS_CONTENT << EOF
 # Allow $HOST_USER to run these commands as $SANDVAULT_USER without password
-$HOST_USER ALL=($SANDVAULT_USER) NOPASSWD: /bin/zsh
+$HOST_USER ALL=($SANDVAULT_USER) NOPASSWD: $HOST_SHELL
 $HOST_USER ALL=($SANDVAULT_USER) NOPASSWD: /usr/bin/env
 $HOST_USER ALL=($SANDVAULT_USER) NOPASSWD: /usr/bin/true
 
@@ -863,14 +884,15 @@ EOF
     # Write to a root-owned temp file, validate, then atomically move into place.
     SUDOERS_TMP="$(sudo /usr/bin/mktemp "$(dirname "$SUDOERS_FILE")/.sudoers.XXXXXXXX")"
     # shellcheck disable=SC2154 # SUDOERS_CONTENT is referenced but not assigned (yes it is)
-    echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_TMP" > /dev/null
-    sudo /bin/chmod 0444 "$SUDOERS_TMP"
+    host_cmd --msg "Write sudoers content to $SUDOERS_TMP" \
+        --eval "echo \"\$SUDOERS_CONTENT\" | sudo tee '$SUDOERS_TMP' > /dev/null"
+    host_cmd sudo /bin/chmod 0444 "$SUDOERS_TMP"
 
     if sudo visudo -c -f "$SUDOERS_TMP" &>/dev/null; then
-        sudo /bin/mv -f "$SUDOERS_TMP" "$SUDOERS_FILE"
+        host_cmd sudo /bin/mv -f "$SUDOERS_TMP" "$SUDOERS_FILE"
     else
         error "Failed to create valid sudoers file"
-        sudo rm -f "$SUDOERS_TMP"
+        host_cmd sudo rm -f "$SUDOERS_TMP"
         abort "Sudoers configuration failed"
     fi
 fi
@@ -910,10 +932,9 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
 (allow file-read*
     (subpath "/Volumes/Macintosh HD"))
 
-;; Allow writes to sandvault home, shared workspace, temporary directories.
+;; Allow writes to sandvault home, temporary directories.
 ;; Allow writes to devices, which are protected by unix permissions
 (allow file-write*
-    (subpath "$SHARED_WORKSPACE")
     (subpath "/Users/$SANDVAULT_USER")
     (subpath "/tmp")
     (subpath "/private/tmp")
@@ -934,8 +955,9 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
     (with no-sandbox))
 EOF
         # shellcheck disable=SC2154
-        echo "$SANDBOX_PROFILE_CONTENT" | sudo tee "$SANDBOX_PROFILE" > /dev/null
-        sudo /bin/chmod 0444 "$SANDBOX_PROFILE"
+        host_cmd --msg "Write sandbox profile to $SANDBOX_PROFILE" \
+            --eval "echo \"\$SANDBOX_PROFILE_CONTENT\" | sudo tee '$SANDBOX_PROFILE' > /dev/null"
+        host_cmd sudo /bin/chmod 0444 "$SANDBOX_PROFILE"
     fi
 fi
 
@@ -951,24 +973,8 @@ fi
 
 
 ###############################################################################
-# Configure git
+# Configure git (handled after credential/config copy below)
 ###############################################################################
-if [[ "$NESTED" == "true" ]]; then
-    : # Git already configured
-else
-    trace "Configuring git..."
-    GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
-    GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
-    if [[ "$NO_BUILD" == "true" ]]; then
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
-    else
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
-    fi
-fi
 
 
 ###############################################################################
@@ -978,7 +984,143 @@ if [[ "$NESTED" == "true" ]]; then
     : # Home already configured
 elif [[ "$NO_BUILD" == "false" ]]; then
     debug "Configure $SANDVAULT_USER home directory..."
-    sudo "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+    host_cmd sudo "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+fi
+
+###############################################################################
+# Configure permissions on sandbox home
+###############################################################################
+if [[ "$REBUILD" == "true" ]]; then
+    configure_shared_folder_permssions true
+fi
+
+
+###############################################################################
+# Copy host credentials, configs, and shell init scripts to sandbox
+###############################################################################
+if [[ "$NESTED" == "true" ]]; then
+    : # Already configured
+elif [[ "$REBUILD" == "true" ]]; then
+    _SV_STAGING="/Users/$SANDVAULT_USER/.sv-staging"
+
+    # Run a command as the sandbox user from a safe working directory
+    _sandbox_sh() {
+        (cd / && sudo -H --non-interactive --user="$SANDVAULT_USER" "$HOST_SHELL" -c "$@")
+    }
+
+    # Copy a single file from host to sandbox home via staging
+    _copy_to_sandbox() {
+        local src="$1" dst="$2" mode="${3:-600}"
+        [[ -f "$src" ]] || return 0
+        mkdir -p "$_SV_STAGING"
+        cp "$src" "$_SV_STAGING/.tmp"
+        chmod 644 "$_SV_STAGING/.tmp"
+        _sandbox_sh "mkdir -p \"\$(dirname ~/'$dst')\" && cp '$_SV_STAGING/.tmp' ~/'$dst' && chmod $mode ~/'$dst'"
+        rm -f "$_SV_STAGING/.tmp"
+    }
+
+    # Copy a directory from host to sandbox home via staging
+    _copy_dir_to_sandbox() {
+        local src="$1" dst="$2"
+        [[ -d "$src" ]] || return 0
+        mkdir -p "$_SV_STAGING/dir"
+        /usr/bin/rsync --quiet --archive "$src/" "$_SV_STAGING/dir/"
+        chmod -R a+rX "$_SV_STAGING/dir"
+        _sandbox_sh "mkdir -p ~/'$dst' && /usr/bin/rsync --quiet --archive '$_SV_STAGING/dir/' ~/'$dst/'"
+        rm -rf "$_SV_STAGING/dir"
+    }
+
+    # Merge oauthAccount from host .claude.json into sandbox .claude.json
+    _merge_claude_oauth() {
+        [[ -f "$HOME/.claude.json" ]] || return 0
+        mkdir -p "$_SV_STAGING"
+        # Read sandbox's .claude.json via sudo (default to empty object if absent)
+        _sandbox_sh "cat ~/.claude.json 2>/dev/null || echo '{}'" > "$_SV_STAGING/.tmp-guest" || return 0
+        # Merge oauthAccount on host side
+        /usr/bin/python3 -c "
+import json, sys
+host = json.load(open(sys.argv[1]))
+guest = json.load(open(sys.argv[2]))
+if 'oauthAccount' in host:
+    guest['oauthAccount'] = host['oauthAccount']
+    json.dump(guest, open(sys.argv[2], 'w'), indent=2)
+" "$HOME/.claude.json" "$_SV_STAGING/.tmp-guest" 2>/dev/null || return 0
+        # Copy merged file back
+        chmod 644 "$_SV_STAGING/.tmp-guest"
+        _sandbox_sh "cp '$_SV_STAGING/.tmp-guest' ~/.claude.json && chmod 600 ~/.claude.json"
+        rm -f "$_SV_STAGING/.tmp-guest"
+    }
+
+    # # Copy Claude OAuth tokens from host keychain to sandbox keychain
+    # _copy_claude_keychain_credentials() {
+    #     local creds
+    #     creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null) || return 0
+    #     [[ -n "$creds" ]] || return 0
+    #     local sandbox_keychain="/Users/$SANDVAULT_USER/Library/Keychains/login.keychain-db"
+    #     # Create and unlock the login keychain if it doesn't exist (empty password, same as configure)
+    #     if [[ ! -f "$sandbox_keychain" ]]; then
+    #         _sandbox_sh "security create-keychain -p '' '$sandbox_keychain'"
+    #     fi
+    #     _sandbox_sh "security unlock-keychain -p '' '$sandbox_keychain'"
+    #     _sandbox_sh "security list-keychains -s '$sandbox_keychain'"
+    #     # Replace existing entry
+    #     _sandbox_sh "security delete-generic-password -s 'Claude Code-credentials' '$sandbox_keychain' 2>/dev/null || true"
+    #     _sandbox_sh "security add-generic-password -s 'Claude Code-credentials' -a '$SANDVAULT_USER' -w '$(printf '%s' "$creds" | sed "s/'/'\\\\''/g")' '$sandbox_keychain'"
+    # }
+
+    debug "Copying host credentials and configs to sandbox..."
+
+    # Agent credentials
+    host_cmd --msg "Copy ~/.claude/.credentials.json to sandbox" \
+        _copy_to_sandbox "$HOME/.claude/.credentials.json" ".claude/.credentials.json"
+    host_cmd --msg "Merge oauthAccount from ~/.claude.json into sandbox" \
+        _merge_claude_oauth
+    # host_cmd --msg "Copy Claude OAuth keychain credentials to sandbox" \
+    #     _copy_claude_keychain_credentials
+    host_cmd --msg "Copy ~/.config/gh/hosts.yml to sandbox" \
+        _copy_to_sandbox "$HOME/.config/gh/hosts.yml" ".config/gh/hosts.yml"
+    host_cmd --msg "Copy ~/.config/gemini/ to sandbox" \
+        _copy_dir_to_sandbox "$HOME/.config/gemini" ".config/gemini"
+
+    # Host configs
+    for f in .gitconfig .tmux.conf .vimrc .wgetrc .curlrc .inputrc; do
+        host_cmd --msg "Copy ~/$f to sandbox" \
+            _copy_to_sandbox "$HOME/$f" "$f" 644
+    done
+
+    # Patch .gitconfig: ensure safe.directory is set
+    _patch_sandbox_gitconfig() {
+        _sandbox_sh "git config --global safe.directory '/Users/$SANDVAULT_USER/*'"
+    }
+    host_cmd --msg "Set safe.directory=/Users/$SANDVAULT_USER/* in sandbox .gitconfig" \
+        _patch_sandbox_gitconfig
+
+    # Shell init scripts
+    for f in .bashrc .bash_profile .bash_login .bash_logout .profile \
+             .zshrc .zshenv .zprofile .zlogin .zlogout; do
+        host_cmd --msg "Copy ~/$f to sandbox" \
+            _copy_to_sandbox "$HOME/$f" "$f" 644
+    done
+
+    rm -rf "$_SV_STAGING"
+fi
+
+
+###############################################################################
+# Write API keys to sandbox home (sourced by configure script)
+# Done here (not in buildhome script) so keys are always current
+###############################################################################
+if [[ "$NESTED" == "false" && "$DRYRUN" != "true" ]]; then
+    _write_env_key() {
+        local file="/Users/$SANDVAULT_USER/.sv-env/$1"
+        mkdir -p "/Users/$SANDVAULT_USER/.sv-env"
+        printf 'export %s=%q\n' "$1" "$2" > "$file"
+        chmod 600 "$file"
+    }
+    [[ -n "${OPENAI_API_KEY:-}" ]]    && _write_env_key OPENAI_API_KEY "$OPENAI_API_KEY"
+    [[ -n "${ANTHROPIC_API_KEY:-}" ]] && _write_env_key ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
+    [[ -n "${GOOGLE_API_KEY:-}" ]]    && _write_env_key GOOGLE_API_KEY "$GOOGLE_API_KEY"
+    [[ -n "${GEMINI_API_KEY:-}" ]]    && _write_env_key GEMINI_API_KEY "$GEMINI_API_KEY"
 fi
 
 
@@ -993,8 +1135,8 @@ elif [[ "$NO_BUILD" == "true" ]]; then
     fi
 else
     debug "Creating installation marker..."
-    mkdir -p "$(dirname "$INSTALL_MARKER")"
-    date > "$INSTALL_MARKER"
+    host_cmd mkdir -p "$(dirname "$INSTALL_MARKER")"
+    host_cmd --msg "date > $INSTALL_MARKER" bash -c "date > '$INSTALL_MARKER'"
 fi
 
 
@@ -1064,7 +1206,7 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
     # Clone into a directory writable by user and readable by sandvault-user
     (
         # Use directory that both $USER and sandvault-$USER find valid
-        cd "$SHARED_WORKSPACE"
+        cd "/Users/$SANDVAULT_USER"
         "${SANDBOX_RUN[@]}" mkdir -p "$(dirname "$INITIAL_DIR")"
 
         if [[ "$USE_DIRECT_LOCAL_CLONE" == "true" ]]; then
@@ -1078,10 +1220,10 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
                     -C "$INITIAL_DIR" fetch "$LOCAL_REPOSITORY"
             fi
         else
-            mkdir -p "$SHARED_WORKSPACE/tmp"
-            HOST_SOURCE_DIR="$(mktemp -d "$SHARED_WORKSPACE/tmp/sv-clone-$REPOSITORY_NAME.XXXXXX")"
+            mkdir -p "/Users/$SANDVAULT_USER/tmp"
+            HOST_SOURCE_DIR="$(mktemp -d "/Users/$SANDVAULT_USER/tmp/sv-clone-$REPOSITORY_NAME.XXXXXX")"
             trap '
-                cd "$SHARED_WORKSPACE"
+                cd "/Users/$SANDVAULT_USER"
                 "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR" || true
                 "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR/.git" || true
                 rm -rf "$HOST_SOURCE_DIR"
@@ -1148,7 +1290,7 @@ fi
 # that are shared, e.g. /tmp/claude and /private/tmp/claude, which doesn't work when there
 # are multiple users running the agent on the same computer.
 # Fix: set TMPDIR after the shell has started running.
-ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; exec /bin/zsh --login"
+SHELL_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; exec $HOST_SHELL --login"
 
 # Prepare command args as a single string
 COMMAND_ARGS_STR=""
@@ -1160,9 +1302,9 @@ if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
     # COMMAND_ARGS to a command that will be run by the shell.
     #
     # Example: sv shell -- echo foo
-    # Runs:    exec /bin/zsh --login -c 'echo foo'
+    # Runs:    exec $HOST_SHELL --login -c 'echo foo'
     if [[ "$COMMAND" == "" ]]; then
-        ZSH_COMMAND="$ZSH_COMMAND -c '${COMMAND_ARGS_STR}'"
+        SHELL_COMMAND="$SHELL_COMMAND -c '${COMMAND_ARGS_STR}'"
         COMMAND_ARGS_STR=""
         SHELL_COMMAND_MODE=true
     fi
@@ -1183,8 +1325,8 @@ if [[ "$MODE" == "ssh" ]]; then
     fi
 
     # Escape single quotes for a remote shell context.
-    ZSH_COMMAND_SSH=$(printf '%s' "$ZSH_COMMAND" | sed "s/'/'\"'\"'/g")
-    ZSH_COMMAND_SSH="'$ZSH_COMMAND_SSH'"
+    SHELL_COMMAND_SSH=$(printf '%s' "$SHELL_COMMAND" | sed "s/'/'\"'\"'/g")
+    SHELL_COMMAND_SSH="'$SHELL_COMMAND_SSH'"
 
     trace "Checking SSH connectivity"
     if ! ssh_check_output=$(ssh \
@@ -1214,11 +1356,11 @@ if [[ "$MODE" == "ssh" ]]; then
 
     debug "SSH $SANDVAULT_USER@$HOSTNAME"
 
-    # SSH requires TWO layers of shell parsing: local shell → SSH → remote shell → /bin/zsh
+    # SSH requires TWO layers of shell parsing: local shell → SSH → remote shell → $HOST_SHELL
     # The extra single quotes protect the command through SSH's remote shell parsing.
     # Without them, the remote shell would word-split the command, causing incorrect execution.
     # Example: "'export TMPDIR=...'" becomes a single arg after local expansion, then the remote
-    # shell strips the outer quotes, passing 'export TMPDIR=...' correctly to /bin/zsh -c
+    # shell strips the outer quotes, passing 'export TMPDIR=...' correctly to $HOST_SHELL -c
     if ssh \
         -q \
         "$SSH_TTY_OPT" \
@@ -1229,17 +1371,16 @@ if [[ "$MODE" == "ssh" ]]; then
         /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
-            "SHELL=/bin/zsh" \
+            "SHELL=$HOST_SHELL" \
             "TERM=${TERM:-}" \
             "COMMAND=$COMMAND" \
             "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
-            "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
-            /bin/zsh -c "$ZSH_COMMAND_SSH"
+            $HOST_SHELL -c "$SHELL_COMMAND_SSH"
     then
         :
     else
@@ -1269,25 +1410,24 @@ else
     # Use sandbox-exec to restrict access to external drives
     debug "Shell $SANDVAULT_USER@$HOSTNAME"
 
-    # sudo requires only ONE layer of shell parsing: local shell → /bin/zsh
-    # Simple double quotes "$ZSH_COMMAND" are sufficient because sudo passes arguments
+    # sudo requires only ONE layer of shell parsing: local shell → $HOST_SHELL
+    # Simple double quotes "$SHELL_COMMAND" are sufficient because sudo passes arguments
     # directly to the command without an intermediate shell parsing layer.
     # This is different from SSH (see above) which requires extra quoting.
     if "${LAUNCHER[@]+"${LAUNCHER[@]}"}" \
         /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
-            "SHELL=/bin/zsh" \
+            "SHELL=$HOST_SHELL" \
             "TERM=${TERM:-}" \
             "COMMAND=$COMMAND" \
             "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
-            "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
-            /bin/zsh -c "$ZSH_COMMAND"
+            $HOST_SHELL -c "$SHELL_COMMAND"
     then
         :
     else
