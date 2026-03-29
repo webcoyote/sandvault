@@ -8,7 +8,9 @@ elif [[ ! -r "$PWD" ]]; then
 fi
 
 # Load user configuration
-[[ -f "$HOME/user/.zprofile" ]] && source "$HOME/user/.zprofile"
+if [[ -n "${SHARED_WORKSPACE:-}" && -f "$SHARED_WORKSPACE/user/.zprofile" ]]; then
+    source "$SHARED_WORKSPACE/user/.zprofile"
+fi
 
 # Setup Homebrew PATH when user configuration has not already done so
 if [[ -z "${HOMEBREW_PREFIX:-}" || "${PATH%%:"${HOMEBREW_PREFIX}"/sbin*}" != "${HOMEBREW_PREFIX}/bin" ]]; then
@@ -27,7 +29,7 @@ if [[ -z "${HOMEBREW_PREFIX:-}" || "${PATH%%:"${HOMEBREW_PREFIX}"/sbin*}" != "${
 fi
 
 # Add sandvault and user bin directories; user directories take priority
-for dir in "$HOME/.local/bin" "$HOME/bin" "$HOME/user/.local/bin" "$HOME/user/bin"; do
+for dir in "$HOME/.local/bin" "$HOME/bin" "$SHARED_WORKSPACE/user/.local/bin" "$SHARED_WORKSPACE/user/bin"; do
     [[ -d "$dir" ]] && path=("$dir" ${path:#$dir})
 done
 export PATH

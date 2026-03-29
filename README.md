@@ -265,9 +265,18 @@ sv build
 If you see a security popup above, it may be because files in the shared sandvault directory don't have the correct ACLs, which occurs when another user's files are copied into the sandvault shared directory (`/Users/Shared/sv-$USER`). This can be corrected by running the rebuild command `sv --rebuild build`, or adding the rebuild flag to any command, e.g. `sv -r shell`. This only needs to be done once.
 
 
-## Custom Configuration
+## Custom Shell Configuration
 
-SandVault supports custom configuration; see [`./guest/home/README.md`](./guest/home/README.md).
+If you're using `sandvault`, you're probably the type of person who also sets custom shell configuration files, and you'd be disappointed if you had to use default zsh while running `sv shell`. Here's how to configure your custom configuration for sandvault:
+
+1. Ensure sandvault has been installed by running a command like `sandvault build`, `sandvault shell`, `sandvault claude`, etc.
+2. Copy your desired configuration files (e.g. `.zshrc`, `.zprofile`, etc.) to `/Users/Shared/sv-${USER}/user/`.
+
+Next time you run sandvault, your files will be copied to the sandvault user home directory, and your zsh configuration files will be sourced:
+
+    .zshenv → .zprofile → .zshrc → .zlogin → .zlogout
+
+> **Note:** Earlier versions of sandvault supported configuration files in `guest/home/user/`, which didn't work for Homebrew installations. Consequently, this is no longer supported, and you'll get an error message asking you to move `guest/home/user` to `/Users/Shared/sv-${USER}/user/`.
 
 
 ## Running GUI Applications
