@@ -1,2 +1,4 @@
 # Load user configuration
-[[ -f "$HOME/user/.zlogout" ]] && source "$HOME/user/.zlogout"
+if [[ -n "${SHARED_WORKSPACE:-}" && -f "$SHARED_WORKSPACE/user/.zlogout" ]]; then
+    source "$SHARED_WORKSPACE/user/.zlogout"
+fi

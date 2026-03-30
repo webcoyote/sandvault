@@ -1,2 +1,4 @@
 # Load user configuration
-[[ -f "$HOME/user/.zlogin" ]] && source "$HOME/user/.zlogin"
+if [[ -n "${SHARED_WORKSPACE:-}" && -f "$SHARED_WORKSPACE/user/.zlogin" ]]; then
+    source "$SHARED_WORKSPACE/user/.zlogin"
+fi

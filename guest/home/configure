@@ -92,24 +92,22 @@ defaults write com.apple.dt.Xcode IDECustomDerivedDataLocation ".DerivedData"
 ###############################################################################
 # Copy user directory contents to $HOME
 ###############################################################################
-# Copy contents of guest/home/user to $HOME
-USER_DIR="$SCRIPT_DIR/user"
-if [[ -d "$USER_DIR" ]]; then
-    debug "Copying user directory contents to $HOME"
-    # Use the system rsync to avoid Homebrew dependencies.
-    # - Homebrew's rsync has different options
+# Use system rsync to avoid Homebrew dependencie; Homebrew rsync has different options
+if [[ -n "${SHARED_WORKSPACE:-}" ]]; then
+    debug "Copying $SHARED_WORKSPACE/user contents to $HOME"
+    mkdir -p "$SHARED_WORKSPACE/user"
     /usr/bin/rsync \
         --quiet \
         --archive \
+        --copy-links \
         --exclude='.git' \
         --exclude='.gitattributes' \
         --exclude='.gitignore' \
-        --exclude='README.md' \
         --exclude='configure' \
         --exclude='.zshenv' \
         --exclude='.zprofile' \
         --exclude='.zshrc' \
         --exclude='.zlogin' \
         --exclude='.zlogout' \
-        "$USER_DIR/" "$HOME/" 2>/dev/null
+        "$SHARED_WORKSPACE/user/" "$HOME/"
 fi

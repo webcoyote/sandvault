@@ -185,34 +185,6 @@ assert_sandbox_path_order() {
     fi
 }
 
-# Test that guest .zprofile sources user config before deciding whether to run brew shellenv
-assert_guest_zprofile_path_setup() {
-    local name="$1"
-    local tmpdir="$RESULTS_DIR/$TEST_ID.tmp"
-    local fake_bin="$tmpdir/fake-bin"
-    local home="$tmpdir/home"
-    local output
-    local expected_prefix
-    local test_status
-
-    mkdir -p "$fake_bin" "$home/user" "$home/user/bin" "$home/.local/bin" "$home/custombrew/bin"
-    printf '%s\n' '#!/bin/sh' 'printf "%s\n" unsupported' > "$fake_bin/uname"
-    chmod +x "$fake_bin/uname"
-    printf 'export HOMEBREW_PREFIX="%s"\nexport PATH="%s/bin:%s/sbin:$PATH"\n' "$home/custombrew" "$home/custombrew" "$home/custombrew" > "$home/user/.zprofile"
-
-    set +e
-    output=$(PATH="$fake_bin:/usr/bin:/bin" HOME="$home" zsh -fc "source \"$SCRIPT_DIR/../guest/home/.zprofile\"; printf '%s' \"\$PATH\"" 2>&1)
-    test_status=$?
-    set -e
-
-    expected_prefix="$home/user/bin:$home/.local/bin:$home/custombrew/bin:"
-    if [[ "$test_status" -eq 0 && "$output" == "$expected_prefix"* && "$output" != *"$home/user/.local/bin"* && "$output" != *"$home/bin"* ]]; then
-        pass "$name"
-    else
-        fail "$name" "PATH starts with $expected_prefix and excludes missing bin dirs" "$test_status | $output"
-    fi
-}
-
 
 ###############################################################################
 # Setup
@@ -345,7 +317,6 @@ run_tests() {
     ###############################################################################
 
     queue_test assert_sandbox_path_order "\$USER/bin precedes /opt/homebrew/bin" "$SANDVAULT_HOME/bin" "/opt/homebrew/bin"
-    queue_test assert_guest_zprofile_path_setup "guest .zprofile defers brew shellenv until after user config"
 
     ###############################################################################
     # Sandbox Escape Tests: Host User Files

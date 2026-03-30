@@ -130,7 +130,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.1.28"
+readonly VERSION="1.1.29"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -417,6 +417,7 @@ uninstall() {
     rm -rf "$SSH_KEYFILE_PRIV" "$SSH_KEYFILE_PUB"
 
     # Remove shared workspace
+    # Do not remove $SHARED_WORKSPACE/user
     rm -f "$SHARED_WORKSPACE/SANDVAULT-README.md"
     rmdir "$SHARED_WORKSPACE" 2>/dev/null || true
     if [[ -d "$SHARED_WORKSPACE" ]]; then
@@ -995,6 +996,16 @@ else
     debug "Creating installation marker..."
     mkdir -p "$(dirname "$INSTALL_MARKER")"
     date > "$INSTALL_MARKER"
+fi
+
+
+###############################################################################
+# Locate user configuration directory for configure script
+###############################################################################
+# Place custom configuration files in $SHARED_WORKSPACE/user/ — this directory
+# is accessible to both $HOST_USER and $SANDVAULT_USER.
+if [[ -d "$WORKSPACE/guest/home/user" ]]; then
+    abort "Storing user configuration in 'guest/home/user/' is no longer supported. Move it to the shared workspace instead:\n\n  /usr/bin/rsync --archive --remove-source-files '$WORKSPACE/guest/home/user/' '$SHARED_WORKSPACE/user/' && rmdir '$WORKSPACE/guest/home/user'"
 fi
 
 

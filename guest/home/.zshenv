@@ -12,4 +12,6 @@ fi
 
 
 # Load user configuration
-[[ -f "$HOME/user/.zshenv" ]] && source "$HOME/user/.zshenv"
+if [[ -n "${SHARED_WORKSPACE:-}" && -f "$SHARED_WORKSPACE/user/.zshenv" ]]; then
+    source "$SHARED_WORKSPACE/user/.zshenv"
+fi
