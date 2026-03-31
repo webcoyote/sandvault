@@ -357,7 +357,7 @@ run_tests() {
             fail "/var/sandvault is world-traversable" "directory exists" "not found"
             return
         fi
-        perms=$(stat -f "%Lp" /var/sandvault)
+        perms=$(/usr/bin/stat -f "%Lp" /var/sandvault)
         if [[ "$perms" == "755" ]]; then
             pass "/var/sandvault is world-traversable"
         else
@@ -379,7 +379,7 @@ run_tests() {
         for link in claude codex gemini; do
             if [[ -L "$brew_prefix/bin/$link" ]]; then
                 local link_perms
-                link_perms=$(stat -f "%Lp" "$brew_prefix/bin/$link")
+                link_perms=$(/usr/bin/stat -f "%Lp" "$brew_prefix/bin/$link")
                 if [[ "$((8#$link_perms & 8#0005))" -eq 0 ]]; then
                     fail "brew symlinks accessible" "$link: o+rx" "$link: $link_perms"
                     failed=true

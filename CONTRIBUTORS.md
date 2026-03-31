@@ -8,3 +8,4 @@ Thanks to the following users for improving SandVault:
 - KingMob
 - redLocomotive
 - jdaln
+- jesserobbins
