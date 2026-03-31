@@ -261,7 +261,7 @@ ensure_brew_tool() {
     brew_bin_dir="$(brew --prefix)/bin"
     if [[ -d "$brew_bin_dir" ]]; then
         local dir_perms
-        dir_perms=$(stat -f "%Lp" "$brew_bin_dir")
+        dir_perms=$(/usr/bin/stat -f "%Lp" "$brew_bin_dir")
         if [[ "$((8#$dir_perms & 8#0005))" -eq 0 ]]; then
             warn "Homebrew bin directory ($brew_bin_dir) has restrictive permissions ($dir_perms). Run: sudo chmod -R o+rX $(brew --prefix)"
         fi
@@ -1193,7 +1193,7 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
     # /var/sandvault/ must be world-traversable for sandvault user to read sandbox profile
     SV_DIR="$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     if [[ -d "$SV_DIR" ]]; then
-        sv_dir_perms=$(stat -f "%Lp" "$SV_DIR")
+        sv_dir_perms=$(/usr/bin/stat -f "%Lp" "$SV_DIR")
         if [[ "$sv_dir_perms" != "755" ]]; then
             debug "Fixing $SV_DIR permissions: $sv_dir_perms -> 0755"
             sudo /bin/chmod 0755 "$SV_DIR"
@@ -1208,7 +1208,7 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
         for tool_cli in claude codex gemini; do
             brew_link="$(brew --prefix)/bin/$tool_cli"
             if [[ -L "$brew_link" ]]; then
-                link_perms=$(stat -f "%Lp" "$brew_link")
+                link_perms=$(/usr/bin/stat -f "%Lp" "$brew_link")
                 if [[ "$((8#$link_perms & 8#0005))" -eq 0 ]]; then
                     debug "Fixing symlink permissions: $brew_link ($link_perms -> 0755)"
                     /bin/chmod -h 0755 "$brew_link"
@@ -1221,7 +1221,7 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
         # Check homebrew bin directory
         brew_bin_dir="$(brew --prefix)/bin"
         if [[ -d "$brew_bin_dir" ]]; then
-            dir_perms=$(stat -f "%Lp" "$brew_bin_dir")
+            dir_perms=$(/usr/bin/stat -f "%Lp" "$brew_bin_dir")
             if [[ "$((8#$dir_perms & 8#0005))" -eq 0 ]]; then
                 warn "Homebrew bin directory ($brew_bin_dir) has restrictive permissions ($dir_perms). Run: sudo chmod -R o+rX $(brew --prefix)"
             else
@@ -1243,7 +1243,7 @@ fi
 ###############################################################################
 SV_DIR="$(dirname "$SANDBOX_PROFILE")"
 if [[ -d "$SV_DIR" ]]; then
-    sv_dir_perms=$(stat -f "%Lp" "$SV_DIR")
+    sv_dir_perms=$(/usr/bin/stat -f "%Lp" "$SV_DIR")
     if [[ "$((8#$sv_dir_perms & 8#0005))" -eq 0 ]]; then
         warn "$SV_DIR has restrictive permissions ($sv_dir_perms). Run: sv --fix-permissions"
     fi
