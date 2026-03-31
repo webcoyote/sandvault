@@ -130,7 +130,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.1.30"
+readonly VERSION="1.1.31"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -807,19 +807,37 @@ fi
 # SSH mode: check configuration available
 if [[ "$REBUILD" == "true" || "$MODE" == "ssh" ]]; then
     if dscl . -read /Groups/com.apple.access_ssh &>/dev/null; then
-        # Remote Login is enabled; ensure sandvault user can SSH
+        # Remote Login is enabled with specific users/groups; ensure sandvault user can SSH
         if ! dseditgroup -o checkmember -m "$SANDVAULT_USER" com.apple.access_ssh &>/dev/null; then
             if [[ "$NO_BUILD" == "true" ]]; then
                 abort "cannot add $SANDVAULT_USER to remote access because --no-build flag set"
             fi
+            trace "Adding $SANDVAULT_USER to com.apple.access_ssh group"
             # do not use sudo dscl; it creates duplicate entries
             sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
+        else
+            trace "SSH access: $SANDVAULT_USER is already in com.apple.access_ssh group"
         fi
+    elif pgrep -x sshd &>/dev/null; then
+        # Remote Login is enabled for "All users" — sshd is running but
+        # com.apple.access_ssh group does not exist. No group membership
+        # needed since all users are already allowed.
+        trace "SSH access: Remote Login enabled for all users (no group membership needed)"
     elif [[ "$MODE" == "ssh" ]]; then
         # Remote Login is disabled and SSH mode requested
         abort "Remote Login via SSH is not enabled. Enable it in System Settings → General → Sharing → Remote Login"
+    else
+        trace "SSH access: Remote Login is not enabled (skipping, not in SSH mode)"
     fi
-    # else: Remote Login disabled but not using SSH mode; skip silently
+
+    # Quick SSH smoke test if we have keys and SSH mode is requested
+    if [[ "$MODE" == "ssh" && -f "$SSH_KEYFILE_PRIV" ]]; then
+        if ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEYFILE_PRIV" "$SANDVAULT_USER@$HOSTNAME" true 2>/dev/null; then
+            trace "SSH smoke test: $SANDVAULT_USER@$HOSTNAME connected successfully"
+        else
+            warn "SSH smoke test failed: $SANDVAULT_USER@$HOSTNAME could not connect. SSH mode may not work."
+        fi
+    fi
 fi
 
 
