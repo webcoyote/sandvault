@@ -818,10 +818,42 @@ if [[ "$REBUILD" == "true" || "$MODE" == "ssh" ]]; then
         else
             trace "SSH access: $SANDVAULT_USER is already in com.apple.access_ssh group"
         fi
-    elif pgrep -x sshd &>/dev/null; then
-        # Remote Login is enabled for "All users" — sshd is running but
-        # com.apple.access_ssh group does not exist. No group membership
-        # needed since all users are already allowed.
+    elif launchctl list com.openssh.sshd &>/dev/null; then
+        # Remote Login is enabled for "All users".
+        #
+        # How macOS represents SSH access mode in Directory Services:
+        #
+        #   Specific users/groups mode:
+        #     macOS creates the com.apple.access_ssh group and populates it
+        #     with the explicitly allowed accounts. The dscl branch above
+        #     handles this case.
+        #
+        #   All users mode:
+        #     macOS removes com.apple.access_ssh entirely. There is no group
+        #     to check or modify — every local account is implicitly allowed.
+        #     This is the case we are handling here.
+        #
+        #   SSH disabled:
+        #     com.apple.access_ssh is also absent, which is why we cannot
+        #     rely on the group's absence alone to conclude "all users".
+        #
+        # Why launchctl instead of pgrep:
+        #
+        #   pgrep -x sshd checks whether an sshd process is running. This is
+        #   fragile because sshd could be running for reasons unrelated to
+        #   macOS Remote Login (e.g. a Homebrew-installed OpenSSH, or a
+        #   manually launched sshd). That would cause us to incorrectly skip
+        #   group-membership checks even when Remote Login is actually off.
+        #
+        #   launchctl list com.openssh.sshd queries launchd's service registry
+        #   for the specific job name that macOS uses when it enables Remote
+        #   Login. If that job is registered, macOS itself turned on SSH — it
+        #   is not possible for a third-party process to register under that
+        #   name. This makes it a reliable, authoritative signal for "Remote
+        #   Login is on", regardless of whether an sshd process happens to be
+        #   running at this exact moment.
+        #
+        # No group membership action needed: all users are already allowed.
         trace "SSH access: Remote Login enabled for all users (no group membership needed)"
     elif [[ "$MODE" == "ssh" ]]; then
         # Remote Login is disabled and SSH mode requested
