@@ -228,22 +228,45 @@ ensure_brew_tool() {
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in || condition
     brew_shellenv || true
 
-    if [[ -x "$(brew --prefix)/bin/$cli_name" ]]; then
-        return 0
+    local brew_bin
+    brew_bin="$(brew --prefix)/bin/$cli_name"
+
+    if [[ ! -x "$brew_bin" ]]; then
+        if [[ "$NESTED" == "true" ]]; then
+            abort "sandvault user cannot install $tool; run as $HOST_USER instead"
+        fi
+        if [[ "$NO_BUILD" == "true" ]]; then
+            abort "Missing $cli_name; refusing to install because --no-build flag set"
+        fi
+        ensure_brew
+        debug "Installing $tool with Homebrew..."
+        if [[ "$SV_VERBOSE" -lt 3 ]]; then
+            brew install --quiet "$tool"
+        else
+            brew install "$tool"
+        fi
     fi
-    if [[ "$NESTED" == "true" ]]; then
-        abort "sandvault user cannot install $tool; run as $HOST_USER instead"
+
+    # Fix homebrew symlink permissions only when explicitly requested.
+    # sv doesn't own these symlinks (homebrew creates them), so only
+    # modify them with --fix-permissions.
+    if [[ "$FIX_PERMISSIONS" == "true" && -L "$brew_bin" ]]; then
+        debug "Fixing symlink permissions: $brew_bin"
+        /bin/chmod -h 0755 "$brew_bin"
     fi
-    if [[ "$NO_BUILD" == "true" ]]; then
-        abort "Missing $cli_name; refusing to install because --no-build flag set"
+
+    # Warn if the homebrew bin directory itself has restrictive permissions,
+    # which can happen when homebrew was installed/used under a restrictive umask.
+    local brew_bin_dir
+    brew_bin_dir="$(brew --prefix)/bin"
+    if [[ -d "$brew_bin_dir" ]]; then
+        local dir_perms
+        dir_perms=$(stat -f "%Lp" "$brew_bin_dir")
+        if [[ "$((8#$dir_perms & 8#0005))" -eq 0 ]]; then
+            warn "Homebrew bin directory ($brew_bin_dir) has restrictive permissions ($dir_perms). Run: sudo chmod -R o+rX $(brew --prefix)"
+        fi
     fi
-    ensure_brew
-    debug "Installing $tool with Homebrew..."
-    if [[ "$SV_VERBOSE" -lt 3 ]]; then
-        brew install --quiet "$tool"
-    else
-        brew install "$tool"
-    fi
+
     if command -v "$cli_name" &>/dev/null; then
         return 0
     fi
@@ -434,6 +457,7 @@ uninstall() {
 REBUILD=false
 NO_BUILD=false
 USE_SANDBOX=true
+FIX_PERMISSIONS=false
 MODE=shell
 COMMAND_ARGS=()
 INITIAL_DIR=""
@@ -456,6 +480,7 @@ show_help() {
     echo "  -h, --help           Show this help message"
     echo "  -n, --no-build       Refuse to make any sandbox changes; error if changes are needed"
     echo "  -x, --no-sandbox     Disable sandbox-exec restrictions"
+    echo "  --fix-permissions    Override restrictive umask and fix file permissions [standalone or with build]"
     echo "  -c, --clone URL|PATH Clone Git repository into sandvault home and open there"
     echo "  --version            Show version information"
     echo ""
@@ -510,6 +535,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -x|--no-sandbox)
             USE_SANDBOX=false
+            shift
+            ;;
+        --fix-permissions)
+            FIX_PERMISSIONS=true
             shift
             ;;
         -c|--clone)
@@ -569,11 +598,20 @@ case "${1:-}" in
         exit 0
         ;;
     *)
-        show_help
+        if [[ "$FIX_PERMISSIONS" == "true" ]]; then
+            # --fix-permissions can run standalone (implies build)
+            COMMAND=build
+        else
+            show_help
+        fi
         ;;
 esac
 readonly COMMAND
 readonly CLONE_REPOSITORY
+
+if [[ "$FIX_PERMISSIONS" == "true" && "$COMMAND" != "build" ]]; then
+    abort "--fix-permissions can only be used standalone or with build"
+fi
 
 if [[ -z "$CLONE_REPOSITORY" ]]; then
     # Resolve symlinks to get the real path
@@ -602,7 +640,7 @@ if [[ "$NESTED" == "false" ]]; then
 fi
 
 if [[ "$NO_BUILD" == "true" ]]; then
-    if [[ "$COMMAND" == "build" ]]; then
+    if [[ "$COMMAND" == "build" && "$FIX_PERMISSIONS" != "true" ]]; then
         abort "refusing sandvault build command with --no-build flag"
     fi
     if [[ "$REBUILD" == "true" ]]; then
@@ -625,6 +663,25 @@ fi
 readonly NO_BUILD
 readonly REBUILD
 readonly USE_SANDBOX
+readonly FIX_PERMISSIONS
+
+###############################################################################
+# Umask check
+###############################################################################
+# A restrictive umask (e.g. 077) causes permission failures: /var/sandvault/
+# becomes inaccessible to the sandvault user, homebrew symlinks get owner-only
+# permissions, etc. Detect and warn; override only with --fix-permissions.
+ORIGINAL_UMASK="$(umask)"
+if [[ "$((8#$ORIGINAL_UMASK & 8#0044))" -ne 0 ]]; then
+    if [[ "$FIX_PERMISSIONS" == "true" ]]; then
+        info "Umask is $ORIGINAL_UMASK (restrictive); overriding to 022 for this session"
+        umask 022
+    else
+        warn "Host umask is $ORIGINAL_UMASK (expected 022 or less restrictive). Permission errors may occur. Re-run with --fix-permissions to correct."
+    fi
+elif [[ "$FIX_PERMISSIONS" == "true" ]]; then
+    debug "Umask is $ORIGINAL_UMASK (ok, no override needed)"
+fi
 
 
 ###############################################################################
@@ -840,6 +897,8 @@ cd "/Users/$SANDVAULT_USER/"
     | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
+    trace "Setting $(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME") to 0755 (world-traversable)"
+    sudo /bin/chmod 0755 "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     # shellcheck disable=SC2154 # SUDOERS_BUILD_HOME_SCRIPT_CONTENTS is referenced but not assigned (yes it is)
     echo "$SUDOERS_BUILD_HOME_SCRIPT_CONTENTS" | sudo tee "$SUDOERS_BUILD_HOME_SCRIPT_NAME" > /dev/null
     sudo /bin/chmod 0554 "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
@@ -1102,7 +1161,7 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
 
             # Clone the repo in a way that sandvault-user has access to all files (--no-hardlinks)
             git clone --mirror --no-hardlinks "$REPOSITORY_CLONE_SOURCE" "$HOST_SOURCE_DIR"
-            chmod -R a+rX "$HOST_SOURCE_DIR"
+            chmod -R a+rX "$HOST_SOURCE_DIR" 2>/dev/null || warn "Could not set permissions on cloned repository ($HOST_SOURCE_DIR). The sandvault user may not be able to read it."
             if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
                 "${SANDBOX_RUN[@]}" git clone "$HOST_SOURCE_DIR" "$INITIAL_DIR"
             else
@@ -1127,9 +1186,72 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
 fi
 readonly INITIAL_DIR
 
+###############################################################################
+# Fix permissions (runs with --fix-permissions regardless of --rebuild)
+###############################################################################
+if [[ "$FIX_PERMISSIONS" == "true" ]]; then
+    # /var/sandvault/ must be world-traversable for sandvault user to read sandbox profile
+    SV_DIR="$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
+    if [[ -d "$SV_DIR" ]]; then
+        sv_dir_perms=$(stat -f "%Lp" "$SV_DIR")
+        if [[ "$sv_dir_perms" != "755" ]]; then
+            debug "Fixing $SV_DIR permissions: $sv_dir_perms -> 0755"
+            sudo /bin/chmod 0755 "$SV_DIR"
+        else
+            debug "$SV_DIR permissions ok (0755)"
+        fi
+    fi
+
+    # Fix homebrew symlinks for any installed tools
+    # shellcheck disable=SC2310 # brew_shellenv intentionally used in condition
+    if brew_shellenv 2>/dev/null; then
+        for tool_cli in claude codex gemini; do
+            brew_link="$(brew --prefix)/bin/$tool_cli"
+            if [[ -L "$brew_link" ]]; then
+                link_perms=$(stat -f "%Lp" "$brew_link")
+                if [[ "$((8#$link_perms & 8#0005))" -eq 0 ]]; then
+                    debug "Fixing symlink permissions: $brew_link ($link_perms -> 0755)"
+                    /bin/chmod -h 0755 "$brew_link"
+                else
+                    debug "Symlink permissions ok: $brew_link ($link_perms)"
+                fi
+            fi
+        done
+
+        # Check homebrew bin directory
+        brew_bin_dir="$(brew --prefix)/bin"
+        if [[ -d "$brew_bin_dir" ]]; then
+            dir_perms=$(stat -f "%Lp" "$brew_bin_dir")
+            if [[ "$((8#$dir_perms & 8#0005))" -eq 0 ]]; then
+                warn "Homebrew bin directory ($brew_bin_dir) has restrictive permissions ($dir_perms). Run: sudo chmod -R o+rX $(brew --prefix)"
+            else
+                debug "Homebrew bin directory permissions ok ($dir_perms)"
+            fi
+        fi
+    fi
+
+    debug "Permissions check complete"
+fi
+
 if [[ "$COMMAND" == "build" ]]; then
     exit 0
 fi
+
+
+###############################################################################
+# Verify permissions before running
+###############################################################################
+SV_DIR="$(dirname "$SANDBOX_PROFILE")"
+if [[ -d "$SV_DIR" ]]; then
+    sv_dir_perms=$(stat -f "%Lp" "$SV_DIR")
+    if [[ "$((8#$sv_dir_perms & 8#0005))" -eq 0 ]]; then
+        warn "$SV_DIR has restrictive permissions ($sv_dir_perms). Run: sv --fix-permissions"
+    fi
+fi
+if [[ -f "$SANDBOX_PROFILE" && ! -r "$SANDBOX_PROFILE" ]]; then
+    warn "Cannot read sandbox profile ($SANDBOX_PROFILE). Run: sv --fix-permissions"
+fi
+
 
 # kitty doesn't set this properly :(
 TERM_PROGRAM="${TERM_PROGRAM:-e.g. ghostty, kitty, iTerm, WezTerm}"
