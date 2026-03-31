@@ -159,6 +159,10 @@ For local Git repositories, sandvault also wires remotes:
   sv build --rebuild
   sv b -r
 
+# Fix permissions when using a restrictive umask (e.g. 077)
+  sv --fix-permissions
+  sv --fix-permissions build
+
 # Uninstall sandvault (does not delete files in the shared volume)
   sv uninstall
 
@@ -263,6 +267,29 @@ sv build
 ![macOS security keychain login dialog](https://webcoyote.github.io/images/shared/sandvault/security-keychain.jpg)
 
 If you see a security popup above, it may be because files in the shared sandvault directory don't have the correct ACLs, which occurs when another user's files are copied into the sandvault shared directory (`/Users/Shared/sv-$USER`). This can be corrected by running the rebuild command `sv --rebuild build`, or adding the rebuild flag to any command, e.g. `sv -r shell`. This only needs to be done once.
+
+
+### Fix permission errors from restrictive umask
+
+If you see "Permission denied" errors when running `sv`, your shell may have a restrictive `umask` (e.g., `077` instead of the default `022`). Check with:
+
+```bash
+umask
+```
+
+SandVault detects this and warns you. To fix it for the current session, add `--fix-permissions`:
+
+```bash
+# Fix permissions (standalone or with build)
+sv --fix-permissions
+sv --fix-permissions build
+```
+
+If you previously installed Homebrew under a restrictive umask, you may also need to fix its directory permissions:
+
+```bash
+sudo chmod -R o+rX /opt/homebrew
+```
 
 
 ## Custom Shell Configuration

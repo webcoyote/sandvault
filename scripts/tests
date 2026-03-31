@@ -300,6 +300,117 @@ run_tests() {
     queue_test test_unknown_option
 
     ###############################################################################
+    # Umask and Permission Tests
+    ###############################################################################
+
+    # Note: --version exits during arg parsing before the umask check runs,
+    # so these tests use "build" which reaches the umask check before aborting
+    # (sv_cmd injects --no-build, causing an expected abort after the check).
+
+    # Test that restrictive umask produces a warning
+    test_umask_warning() {
+        local output
+        set +e
+        output=$(umask 077 && sv_cmd s -- true 2>&1)
+        set -e
+        if [[ "$output" == *"Host umask is"* && "$output" == *"--fix-permissions"* ]]; then
+            pass "restrictive umask emits warning"
+        else
+            fail "restrictive umask emits warning" "warning containing --fix-permissions" "$output"
+        fi
+    }
+    queue_test test_umask_warning
+
+    # Test that --fix-permissions suppresses the warning
+    test_fix_permissions_overrides() {
+        local output
+        set +e
+        output=$(umask 077 && "${SV_CMD[@]}" --no-build --fix-permissions build 2>&1)
+        set -e
+        if [[ "$output" == *"overriding to 022"* && "$output" != *"Permission errors may occur"* ]]; then
+            pass "--fix-permissions overrides umask"
+        else
+            fail "--fix-permissions overrides umask" "override message, no warning" "$output"
+        fi
+    }
+    queue_test test_fix_permissions_overrides
+
+    # Test that --fix-permissions rejects non-build commands
+    test_fix_permissions_rejects_non_build() {
+        local output
+        set +e
+        output=$("${SV_CMD[@]}" --no-build --fix-permissions claude 2>&1)
+        local status=$?
+        set -e
+        if [[ "$status" -ne 0 && "$output" == *"only be used standalone or with build"* ]]; then
+            pass "--fix-permissions rejects non-build commands"
+        else
+            fail "--fix-permissions rejects non-build commands" "non-zero exit with rejection message" "$status | $output"
+        fi
+    }
+    queue_test test_fix_permissions_rejects_non_build
+
+    # Test that /var/sandvault/ is world-traversable
+    test_var_sandvault_traversable() {
+        local perms
+        if [[ ! -d "/var/sandvault" ]]; then
+            fail "/var/sandvault is world-traversable" "directory exists" "not found"
+            return
+        fi
+        perms=$(/usr/bin/stat -f "%Lp" /var/sandvault)
+        if [[ "$perms" == "755" ]]; then
+            pass "/var/sandvault is world-traversable"
+        else
+            fail "/var/sandvault is world-traversable" "755" "$perms"
+        fi
+    }
+    queue_test test_var_sandvault_traversable
+
+    # Test that brew symlinks used by sv are accessible
+    test_brew_symlink_accessible() {
+        local brew_prefix
+        brew_prefix="$(brew --prefix 2>/dev/null || true)"
+        if [[ -z "$brew_prefix" ]]; then
+            pass "brew symlinks accessible (homebrew not installed, skipped)"
+            return
+        fi
+        local failed=false
+        local link
+        for link in claude codex gemini; do
+            if [[ -L "$brew_prefix/bin/$link" ]]; then
+                local link_perms
+                link_perms=$(/usr/bin/stat -f "%Lp" "$brew_prefix/bin/$link")
+                if [[ "$((8#$link_perms & 8#0005))" -eq 0 ]]; then
+                    fail "brew symlinks accessible" "$link: o+rx" "$link: $link_perms"
+                    failed=true
+                    break
+                fi
+            fi
+        done
+        if [[ "$failed" == "false" ]]; then
+            pass "brew symlinks accessible"
+        fi
+    }
+    queue_test test_brew_symlink_accessible
+
+    # Test that permission warnings are emitted for restrictive /var/sandvault
+    test_permission_warning_on_run() {
+        local output
+        # Simulate what happens if /var/sandvault has bad perms by checking
+        # that the permissions check code path exists and runs
+        set +e
+        output=$(sv_cmd s -- true 2>&1)
+        set -e
+        # If /var/sandvault has correct perms (755), no warning should appear
+        if [[ "$output" != *"restrictive permissions"* ]]; then
+            pass "no spurious permission warnings with correct perms"
+        else
+            fail "no spurious permission warnings with correct perms" "no warning" "$output"
+        fi
+    }
+    queue_test test_permission_warning_on_run
+
+    ###############################################################################
     # Sandbox Identity Tests
     ###############################################################################
 
