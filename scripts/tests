@@ -637,7 +637,10 @@ run_tests() {
         fi
 
         set +e
-        remote_output=$(sv_cmd s -- git -C "$clone_path" remote get-url origin 2>&1)
+        # Use "git config remote.origin.url" instead of
+        # "git remote get-url" to avoid issues with
+        # git url remapping with insteadOf override.
+        remote_output=$(sv_cmd s -- git -C "$clone_path" config remote.origin.url 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 || "$remote_output" != *"$https_repository"* ]]; then
