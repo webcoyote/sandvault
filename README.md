@@ -1,19 +1,22 @@
-# SandVault - Run Claude Code, OpenAI Codex, Google Gemini and shell commands safely in a sandboxed macOS user account
+# SandVault - Run AI agents and shell commands in a sandboxed macOS user account
 
-![sandvault logo](https://webcoyote.github.io/images/shared/sandvault/sandvault-logo.jpg)
-
----
-
+<img src="https://www.codeofhonor.com/images/projects/sandvault.webp" align="left" width="200px"/>
 SandVault (`sv`) manages a limited user account to sandbox shell commands and AI agents, providing a lightweight alternative to application isolation using virtual machines.
 
-## Features
+</br>
+</br>
 
 - **AI ready** - Includes Claude Code, OpenAI Codex, Google Gemini
 - **Fast context switching** - No VM overhead; instant user switching
 - **Passwordless** - switch accounts without a prompt (after setup)
 - **Shared workspace** - joint access to `/Users/Shared/sv-$USER`
+- **Defense in depth** - limited user account + `sandbox-exec`
 - **Clean uninstall** - Complete removal with `sv uninstall`
 
+</br>
+</br>
+
+---
 
 ## Quick Links
 
