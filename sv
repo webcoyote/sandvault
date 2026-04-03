@@ -255,7 +255,7 @@ ensure_brew_tool() {
 
     if [[ "$NESTED" == "false" && -x "$brew_bin" ]] \
         && /usr/bin/xattr -p com.apple.quarantine "$brew_bin" &>/dev/null; then
-        info "Warming up $cli_name outside sandvault..."
+        debug "Warming up $cli_name outside sandvault..."
         if ! "$brew_bin" --help &>/dev/null; then
             abort "$cli_name is quarantined and failed to warm up. Run '$brew_bin --help' once as $HOST_USER and try again."
         fi
