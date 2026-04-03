@@ -835,14 +835,14 @@ if [[ "$REBUILD" == "true" || "$MODE" == "ssh" ]]; then
     else
         trace "SSH access: Remote Login is not enabled (skipping, not in SSH mode)"
     fi
+fi
 
-    # Quick SSH smoke test if we have keys and SSH mode is requested
-    if [[ "$MODE" == "ssh" && -f "$SSH_KEYFILE_PRIV" ]]; then
-        if ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEYFILE_PRIV" "$SANDVAULT_USER@$HOSTNAME" true 2>/dev/null; then
-            trace "SSH smoke test: $SANDVAULT_USER@$HOSTNAME connected successfully"
-        else
-            warn "SSH smoke test failed: $SANDVAULT_USER@$HOSTNAME could not connect. SSH mode may not work."
-        fi
+# SSH smoke test
+if [[ "$COMMAND" == "build" || "$REBUILD" == "true" ]]; then
+    if ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEYFILE_PRIV" "$SANDVAULT_USER@$HOSTNAME" true 2>/dev/null; then
+        trace "SSH smoke test: $SANDVAULT_USER@$HOSTNAME connected successfully"
+    else
+        warn "SSH smoke test failed: $SANDVAULT_USER@$HOSTNAME could not connect. SSH mode may not work."
     fi
 fi
 
