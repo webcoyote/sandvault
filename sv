@@ -321,7 +321,13 @@ local_repository_git() {
 }
 
 force_cleanup_sandvault_processes() {
+    local cleanup_mode="${1:-session-exit}"
     if [[ "$NESTED" == "true" ]]; then
+        return 0
+    fi
+
+    if [[ "$cleanup_mode" != "force-all" ]]; then
+        trace "Skipping user-wide cleanup on ordinary session exit"
         return 0
     fi
 
@@ -375,7 +381,7 @@ unregister_session() {
     ' bash "$SESSION_FILE")
     trace "Session unregistered (count: $new_count)"
     if [[ "$prev_count" -le 1 ]]; then
-        trace "Last session exited; cleaning up sandvault processes"
+        trace "Last session exited; skipping user-wide sandvault cleanup"
         force_cleanup_sandvault_processes
     else
         trace "Other sessions still active; skipping cleanup"
@@ -410,7 +416,7 @@ configure_shared_folder_permssions() {
 
 uninstall() {
     debug "Uninstalling..."
-    force_cleanup_sandvault_processes
+    force_cleanup_sandvault_processes force-all
 
     # Remove the install marker file first; it's a sentinel for "everything is complete".
     # By removing it first we force a rebuild if the user wants to run this again.
