@@ -253,6 +253,14 @@ ensure_brew_tool() {
         fi
     fi
 
+    if [[ "$NESTED" == "false" && -x "$brew_bin" ]] \
+        && /usr/bin/xattr -p com.apple.quarantine "$brew_bin" &>/dev/null; then
+        debug "Warming up $cli_name outside sandvault..."
+        if ! "$brew_bin" --help &>/dev/null; then
+            abort "$cli_name is quarantined and failed to warm up. Run '$brew_bin --help' once as $HOST_USER and try again."
+        fi
+    fi
+
     # Fix homebrew symlink permissions only when explicitly requested.
     # sv doesn't own these symlinks (homebrew creates them), so only
     # modify them with --fix-permissions.
