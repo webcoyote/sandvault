@@ -7,7 +7,6 @@ Prepare a new release for sandvault. This command updates the changelog, bumps t
 1. **Determine the new version number**
    - Use `.github/scripts/bump-version minor` to bump the minor version unless the user specifies otherwise (e.g., 0.12.0 → 0.13.0)
    - Get the current version by running `./sv --version`
-   - Add the updated `sv` file to the commit
 
 2. **Create a release branch**
    - Create branch: `git checkout -b release/vX.Y.Z`
@@ -36,13 +35,14 @@ Prepare a new release for sandvault. This command updates the changelog, bumps t
    - If there are no user-facing changes, ask the user if they still want to release
 
 5. **Commit and push the release branch**
-   - Stage: `CHANGELOG.md`
+   - Stage: `sv`, `CHANGELOG.md`
    - Commit message: `Bump version to X.Y.Z`
    - Push: `git push -u origin release/vX.Y.Z`
 
 7. **Create a pull request**
    - Create PR: `gh pr create --title "Release vX.Y.Z" --body "...changelog summary..."`
    - Include the changelog entries in the PR body
+   - Auto-merge the PR: `gh pr merge --auto --merge`
 
 ## Changelog Guidelines
 

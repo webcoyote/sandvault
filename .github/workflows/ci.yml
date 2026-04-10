@@ -30,7 +30,6 @@ jobs:
 
   tag-version:
     name: Tag Version
-    needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -43,4 +42,6 @@ jobs:
           fetch-tags: true
 
       - name: Tag version if updated
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: .github/scripts/tag-version
