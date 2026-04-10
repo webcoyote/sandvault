@@ -2,9 +2,15 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
-## [1.2.0] - 2026-04-10
+## [1.2.1] - 2026-04-10
 
-_No user-facing changes. Internal CI improvements._
+### Fixed
+
+- Fix version number not being updated in `sv` binary during 1.2.0 release ([#94](https://github.com/webcoyote/sandvault/pull/94))
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
 
 ## [1.1.34] - 2026-04-09
 
