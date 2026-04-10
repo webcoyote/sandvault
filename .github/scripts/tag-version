@@ -9,28 +9,13 @@ trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-# --- Guard: only run on the default branch ---
-DEFAULT_BRANCH="$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
-DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
-if [[ -z "$DEFAULT_BRANCH" ]]; then
-  # In GitHub Actions, origin/HEAD is often not set; use the API instead
-  DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || true)"
-fi
-if [[ -z "$DEFAULT_BRANCH" ]]; then
-  echo >&2 "Error: Unable to determine default branch."
-  exit 1
-fi
-
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-if [[ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]]; then
-  echo "Not on default branch ($DEFAULT_BRANCH), skipping. Current: $CURRENT_BRANCH"
-  exit 0
-fi
+# Note: branch guard is handled by the CI workflow (github.ref == 'refs/heads/main').
+# Do not duplicate it here — detached-HEAD checkouts in CI break git-based detection.
 
 # --- Read current version ---
 CURRENT_VERSION=$(awk -F'"' '/^readonly VERSION="[0-9.]*"/ {print $2; exit}' ./sv)
 if [[ -z "$CURRENT_VERSION" ]]; then
-  echo >&2 "Error: Could not parse version from ./sv --version"
+  echo >&2 "Error: Could not parse version"
   exit 1
 fi
 
@@ -44,5 +29,7 @@ fi
 
 # --- Create and push the tag on HEAD (the merge commit) ---
 echo "Tagging $TAG_NAME on $(git rev-parse --short HEAD)"
+git config user.name  "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git tag -a "$TAG_NAME" -m "Version $CURRENT_VERSION"
 git push origin "$TAG_NAME"
