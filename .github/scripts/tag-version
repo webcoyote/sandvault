@@ -11,9 +11,12 @@ cd "$REPO_ROOT"
 
 # --- Guard: only run on the default branch ---
 DEFAULT_BRANCH="$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
-if [[ -n "$DEFAULT_BRANCH" ]]; then
-  DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
-else
+DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
+if [[ -z "$DEFAULT_BRANCH" ]]; then
+  # In GitHub Actions, origin/HEAD is often not set; use the API instead
+  DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || true)"
+fi
+if [[ -z "$DEFAULT_BRANCH" ]]; then
   echo >&2 "Error: Unable to determine default branch."
   exit 1
 fi
