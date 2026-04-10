@@ -40,8 +40,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          token: ${{ secrets.HOMEBREW_GITHUB_API_TOKEN }}
 
       - name: Tag version if updated
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: .github/scripts/tag-version
