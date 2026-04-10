@@ -1,0 +1,16 @@
+name: Homebrew
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  bump-formula:
+    name: Bump Homebrew Formula
+    runs-on: ubuntu-latest
+    steps:
+      - uses: mislav/bump-homebrew-formula-action@v3
+        with:
+          formula-name: sandvault
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_GITHUB_API_TOKEN }}
