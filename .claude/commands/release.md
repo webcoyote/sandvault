@@ -7,6 +7,7 @@ Prepare a new release for sandvault. This command updates the changelog, bumps t
 1. **Determine the new version number**
    - Use `.github/scripts/bump-version minor` to bump the minor version unless the user specifies otherwise (e.g., 0.12.0 → 0.13.0)
    - Get the current version by running `./sv --version`
+   - Add the updated `sv` file to the commit
 
 2. **Create a release branch**
    - Create branch: `git checkout -b release/vX.Y.Z`
