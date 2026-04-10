@@ -2,6 +2,14 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.2.2] - 2026-04-10
+
+_No user-facing changes. This release includes internal CI and release tooling improvements._
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.2.1] - 2026-04-10
 
 ### Fixed
