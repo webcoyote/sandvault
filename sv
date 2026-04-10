@@ -136,7 +136,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.1.33"
+readonly VERSION="1.1.34"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -174,6 +174,12 @@ readonly INSTALL_MARKER="$INSTALL_PRODUCT/install"
 readonly SESSION_DIR="$HOME/.local/state/sandvault"
 readonly SESSION_FILE="$SESSION_DIR/sandvault.count"
 
+# Chrome browser state (per-instance using session ID)
+readonly CHROME_LOG_FILE="$SESSION_DIR/chrome-$SV_SESSION_ID.log"
+readonly CHROME_DATA_DIR="$SESSION_DIR/chrome-data-$SV_SESSION_ID"
+CHROME_PID=""
+CHROME_PORT=""
+
 readonly SSH_DIR="$HOME/.ssh"
 readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
 readonly SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
@@ -188,6 +194,23 @@ readonly SANDBOX_PROFILE="/var/sandvault/sandbox-$SANDVAULT_USER.sb"
 ###############################################################################
 show_version() {
     echo "$(basename "${BASH_SOURCE[0]}") version $VERSION"
+    exit 0
+}
+
+show_endpoint() {
+    if [[ -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
+        echo >&2 "No browser available. Start sandvault with --browser flag:"
+        echo >&2 "  sv --browser shell"
+        exit 1
+    fi
+
+    if ! /usr/bin/curl -sf "$SV_BROWSER_ENDPOINT/json/version" > /dev/null 2>&1; then
+        echo >&2 "Browser endpoint $SV_BROWSER_ENDPOINT is not responding."
+        echo >&2 "Chrome may have crashed. Exit and restart with: sv --browser <command>"
+        exit 1
+    fi
+
+    echo "$SV_BROWSER_ENDPOINT"
     exit 0
 }
 
@@ -339,6 +362,9 @@ force_cleanup_sandvault_processes() {
         return 0
     fi
 
+    # Stop host-side Chrome if running
+    stop_chrome
+
     # Try to bootout the user session (this terminates all processes)
     trace "Terminating $SANDVAULT_USER user session..."
     local sandvault_uid
@@ -357,6 +383,88 @@ force_cleanup_sandvault_processes() {
     if pgrep -u "$SANDVAULT_USER" >/dev/null 2>&1; then
         warn "Some $SANDVAULT_USER processes may still be running (likely system daemons)"
     fi
+}
+
+kill_chrome_pid() {
+    local pid="$1"
+    if kill -0 "$pid" 2>/dev/null; then
+        debug "Stopping Chrome (PID $pid)..."
+        kill "$pid" 2>/dev/null || true
+        local i
+        for (( i=0; i<20; i++ )); do
+            kill -0 "$pid" 2>/dev/null || return 0
+            sleep 0.1
+        done
+        trace "Force-killing Chrome (PID $pid)..."
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+}
+
+stop_chrome() {
+    if [[ -n "$CHROME_PID" ]]; then
+        kill_chrome_pid "$CHROME_PID"
+        CHROME_PID=""
+    fi
+    rm -f "$CHROME_LOG_FILE"
+    rm -rf "$CHROME_DATA_DIR"
+}
+
+start_chrome() {
+    mkdir -p "$SESSION_DIR"
+
+    # Locate Chrome binary
+    local chrome_bin=""
+    if [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+        chrome_bin="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    elif [[ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]]; then
+        chrome_bin="/Applications/Chromium.app/Contents/MacOS/Chromium"
+    else
+        abort "Chrome or Chromium not found. Install Google Chrome to use --browser."
+    fi
+
+    mkdir -p "$CHROME_DATA_DIR"
+    rm -f "$CHROME_LOG_FILE"
+    rm -f "$CHROME_DATA_DIR/SingletonLock" "$CHROME_DATA_DIR/SingletonCookie" "$CHROME_DATA_DIR/SingletonSocket"
+
+    # Launch Chrome headless with dynamic port allocation
+    debug "Starting headless Chrome..."
+    "$chrome_bin" \
+        --headless \
+        --no-sandbox \
+        --disable-gpu \
+        --remote-debugging-port=0 \
+        --remote-debugging-address=127.0.0.1 \
+        --user-data-dir="$CHROME_DATA_DIR" \
+        --no-first-run \
+        --no-default-browser-check \
+        --disable-extensions \
+        --disable-background-networking \
+        > "$CHROME_LOG_FILE" 2>&1 &
+    CHROME_PID=$!
+
+    # Wait for Chrome to report its debugging port (up to 5 seconds)
+    local port=""
+    local i
+    for (( i=0; i<50; i++ )); do
+        if ! kill -0 "$CHROME_PID" 2>/dev/null; then
+            CHROME_PID=""
+            abort "Chrome exited unexpectedly. Check $CHROME_LOG_FILE for details."
+        fi
+        port=$(sed -n 's|.*DevTools listening on ws://127\.0\.0\.1:\([0-9]*\)/.*|\1|p' "$CHROME_LOG_FILE" 2>/dev/null | head -1)
+        if [[ -n "$port" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    if [[ -z "$port" ]]; then
+        kill_chrome_pid "$CHROME_PID"
+        CHROME_PID=""
+        abort "Chrome did not report a debugging port within 5 seconds. Check $CHROME_LOG_FILE."
+    fi
+
+    CHROME_PORT="$port"
+    debug "Chrome started (PID $CHROME_PID, port $CHROME_PORT)"
 }
 
 register_session() {
@@ -425,6 +533,7 @@ configure_shared_folder_permssions() {
 uninstall() {
     debug "Uninstalling..."
     force_cleanup_sandvault_processes force-all
+    rm -rf "$SESSION_DIR"/chrome-data-* "$SESSION_DIR"/chrome-*.log
 
     # Remove the install marker file first; it's a sentinel for "everything is complete".
     # By removing it first we force a rebuild if the user wants to run this again.
@@ -477,6 +586,7 @@ uninstall() {
 REBUILD=false
 NO_BUILD=false
 USE_SANDBOX=true
+USE_BROWSER=false
 FIX_PERMISSIONS=false
 MODE=shell
 COMMAND_ARGS=()
@@ -500,8 +610,10 @@ show_help() {
     echo "  -h, --help           Show this help message"
     echo "  -n, --no-build       Refuse to make any sandbox changes; error if changes are needed"
     echo "  -x, --no-sandbox     Disable sandbox-exec restrictions"
-    echo "  --fix-permissions    Override restrictive umask and fix file permissions [standalone or with build]"
+    echo "  -b, --browser        Launch headless Chrome and pass endpoint into sandbox"
+    echo "  -e, --endpoint       Show Chrome endpoint URL (requires --browser session)"
     echo "  -c, --clone URL|PATH Clone Git repository into sandvault home and open there"
+    echo "  --fix-permissions    Fix umask and file permissions [standalone or with build]"
     echo "  --version            Show version information"
     echo ""
     echo "Commands:"
@@ -557,6 +669,10 @@ while [[ $# -gt 0 ]]; do
             USE_SANDBOX=false
             shift
             ;;
+        -b|--browser)
+            USE_BROWSER=true
+            shift
+            ;;
         --fix-permissions)
             FIX_PERMISSIONS=true
             shift
@@ -570,6 +686,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         -h|--help)
             show_help
+            ;;
+        -e|--endpoint)
+            show_endpoint
             ;;
         --version)
             show_version
@@ -914,13 +1033,12 @@ sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 # Perform rsync from within the destination directory so that the paths
 # passed through xargs to chown are correct.
 #
-# Use tr to convert newlines to null terminators to pass to xargs -0
-#
-# In the event that no files need to be synchronized, send ":" to xargs to avoid error
+# Collect changed files first, then chown only if rsync reported changes.
+# macOS xargs lacks --no-run-if-empty so we guard against empty input.
 #
 # Use OSX chown, not GNU chown, because I've tested that it works
 cd "/Users/$SANDVAULT_USER/"
-/usr/bin/rsync \
+_changed=\$(/usr/bin/rsync \
     --itemize-changes \
     --out-format="%n" \
     --links \
@@ -930,9 +1048,11 @@ cd "/Users/$SANDVAULT_USER/"
     --perms \
     --times \
     "$WORKSPACE/guest/home/." \
-    "." \
-    | (tr '\n' '\0' || echo :) \
-    | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
+    ".")
+if [[ -n "\$_changed" ]]; then
+    echo "\$_changed" | tr '\n' '\0' \
+        | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
+fi
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     trace "Setting $(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME") to 0755 (world-traversable)"
@@ -1312,7 +1432,16 @@ EOF
 if [[ "$NESTED" == "false" ]]; then
     sv_exit_code=0
     register_session
-    trap 'sv_exit_code=$?; set +e; unregister_session; exit $sv_exit_code' EXIT
+    if [[ "$USE_BROWSER" == "true" ]]; then
+        start_chrome
+    fi
+    trap 'sv_exit_code=$?; set +e; [[ "$USE_BROWSER" == "true" ]] && stop_chrome; unregister_session; exit $sv_exit_code' EXIT
+elif [[ "$USE_BROWSER" == "true" ]]; then
+    # Nested session with --browser: Chrome cannot be launched inside the
+    # sandbox, so the parent session must already have started it.
+    if [[ -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
+        abort "--browser requires Chrome, but the parent sandvault session was not started with --browser"
+    fi
 fi
 
 # TMPDIR: claude (and perhaps other AI agents) creates temporary directories in locations
@@ -1344,6 +1473,18 @@ if [[ "$USE_SANDBOX" == "true" ]]; then
     SANDBOX_EXEC=(/usr/bin/sandbox-exec -f "$SANDBOX_PROFILE")
 else
     debug "Sandbox disabled: running without sandbox-exec restrictions"
+fi
+
+# Extra environment variables (e.g. browser CDP endpoint)
+EXTRA_ENV=()
+if [[ "$USE_BROWSER" == "true" ]]; then
+    if [[ -n "${SV_BROWSER_ENDPOINT:-}" ]]; then
+        EXTRA_ENV+=("SV_BROWSER_ENDPOINT=$SV_BROWSER_ENDPOINT")
+    elif [[ -n "$CHROME_PORT" ]]; then
+        EXTRA_ENV+=("SV_BROWSER_ENDPOINT=http://127.0.0.1:$CHROME_PORT")
+    else
+        abort "Chrome port not available. Chrome may have failed to start."
+    fi
 fi
 
 if [[ "$MODE" == "ssh" ]]; then
@@ -1409,6 +1550,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
             /bin/zsh -c "$ZSH_COMMAND_SSH"
     then
@@ -1457,6 +1599,7 @@ else
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
             /bin/zsh -c "$ZSH_COMMAND"
     then
