@@ -27,3 +27,20 @@ jobs:
           XCODE_DESTINATION: platform=macOS,arch=arm64
           VERBOSE: 1
         run: ./tests/tests
+
+  tag-version:
+    name: Tag Version
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Tag version if updated
+        run: .github/scripts/tag-version

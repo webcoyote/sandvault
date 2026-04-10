@@ -1,0 +1,45 @@
+#!/bin/bash
+# Tag the current version if it hasn't been tagged yet.
+# Called by CI after a successful build on the default branch.
+# Exits 0 (no-op) if the tag already exists — this is the normal case
+# when a push doesn't change the version.
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# --- Guard: only run on the default branch ---
+DEFAULT_BRANCH="$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+if [[ -n "$DEFAULT_BRANCH" ]]; then
+  DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
+else
+  echo >&2 "Error: Unable to determine default branch."
+  exit 1
+fi
+
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]]; then
+  echo "Not on default branch ($DEFAULT_BRANCH), skipping. Current: $CURRENT_BRANCH"
+  exit 0
+fi
+
+# --- Read current version ---
+CURRENT_VERSION=$(./sv --version | awk '{print $NF}')
+if [[ -z "$CURRENT_VERSION" ]]; then
+  echo >&2 "Error: Could not parse version from ./sv --version"
+  exit 1
+fi
+
+TAG_NAME="v$CURRENT_VERSION"
+
+# --- No-op if already tagged ---
+if git rev-parse -q --verify "refs/tags/$TAG_NAME" >/dev/null 2>&1; then
+  echo "Tag $TAG_NAME already exists — nothing to do."
+  exit 0
+fi
+
+# --- Create and push the tag on HEAD (the merge commit) ---
+echo "Tagging $TAG_NAME on $(git rev-parse --short HEAD)"
+git tag -a "$TAG_NAME" -m "Version $CURRENT_VERSION"
+git push origin "$TAG_NAME"
