@@ -28,7 +28,7 @@ if [[ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]]; then
 fi
 
 # --- Read current version ---
-CURRENT_VERSION=$(./sv --version | awk '{print $NF}')
+CURRENT_VERSION=$(awk -F'"' '/^readonly VERSION="[0-9.]*"/ {print $2; exit}' ./sv)
 if [[ -z "$CURRENT_VERSION" ]]; then
   echo >&2 "Error: Could not parse version from ./sv --version"
   exit 1
