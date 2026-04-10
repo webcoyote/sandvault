@@ -20,6 +20,7 @@ SandVault (`sv`) manages a limited user account to sandbox shell commands and AI
 
 ## Quick Links
 
+0. Run [Browser Automation](#Browser-Automation) from within the sandbox that can be used for testing web interactions.
 1. To run `xcodebuild` or `swift` see [Sandboxing xcodebuild and swift](#Sandboxing-xcodebuild-and-swift) for details.
 2. To run other sandboxed applications inside sandvault, use the `-x` option. See [Sandboxing other apps](#Sandboxing-other-apps) for details.
 3. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
@@ -307,6 +308,47 @@ Next time you run sandvault, your files will be copied to the sandvault user hom
     .zshenv → .zprofile → .zshrc → .zlogin → .zlogout
 
 > **Note:** Earlier versions of sandvault supported configuration files in `guest/home/user/`, which didn't work for Homebrew installations. Consequently, this is no longer supported, and you'll get an error message asking you to move `guest/home/user` to `/Users/Shared/sv-${USER}/user/`.
+
+
+## Browser Automation
+
+SandVault supports headless Chrome for browser automation from within the sandbox. Chrome runs on the host side and the sandbox connects to it via the Chrome DevTools Protocol (CDP) over localhost.
+
+### Usage
+
+```bash
+# Launch with browser support
+sv --browser claude
+sv --browser shell
+```
+
+Inside the sandbox, the `SV_BROWSER_ENDPOINT` environment variable contains the CDP endpoint URL (e.g. `http://127.0.0.1:52858`).
+
+```javascript
+// Playwright
+const browser = await chromium.connectOverCDP(process.env.SV_BROWSER_ENDPOINT);
+
+// Puppeteer
+const browser = await puppeteer.connect({ browserURL: process.env.SV_BROWSER_ENDPOINT });
+```
+
+From the host, you can query the endpoint URL:
+```bash
+# Prints the CDP endpoint URL (or errors if browser is unavailable)
+sv --endpoint
+```
+
+See also `./tests/browser/*.js` for examples of using Playwright and Puppeteer.
+
+### How it works
+
+- Chrome is launched headless on the host side with a dynamic port (`--remote-debugging-port=0`), and sandvault connections via `localhost`
+- Chrome stays running across sandbox sessions and is stopped when the last `--browser` session exits
+- Chrome uses an isolated user data directory, separate from your personal Chrome profile
+
+### Requirements
+
+Google Chrome or Chromium must be installed in `/Applications/`.
 
 
 ## Running GUI Applications

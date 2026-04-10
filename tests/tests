@@ -107,7 +107,7 @@ queue_suite() {
     (
         set +e
         # Run the tests in a sandbox
-        "../sv" shell -- "$tests" > "$RESULTS_DIR/$id.output" 2>&1
+        "../sv" --browser --no-build shell -- "$tests" > "$RESULTS_DIR/$id.output" 2>&1
         status=$?
         printf '%s' "$status" > "$RESULTS_DIR/$id.status"
     ) &
@@ -156,6 +156,10 @@ collect_results() {
         fi
     done
 }
+
+###############################################################################
+# Run tests
+###############################################################################
 
 shopt -s nullglob
 for dir in *; do
