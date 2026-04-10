@@ -2,6 +2,10 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.2.0] - 2026-04-10
+
+_No user-facing changes. Internal CI improvements._
+
 ## [1.1.34] - 2026-04-09
 
 ### Added
