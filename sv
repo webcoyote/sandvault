@@ -914,13 +914,12 @@ sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 # Perform rsync from within the destination directory so that the paths
 # passed through xargs to chown are correct.
 #
-# Use tr to convert newlines to null terminators to pass to xargs -0
-#
-# In the event that no files need to be synchronized, send ":" to xargs to avoid error
+# Collect changed files first, then chown only if rsync reported changes.
+# macOS xargs lacks --no-run-if-empty so we guard against empty input.
 #
 # Use OSX chown, not GNU chown, because I've tested that it works
 cd "/Users/$SANDVAULT_USER/"
-/usr/bin/rsync \
+_changed=\$(/usr/bin/rsync \
     --itemize-changes \
     --out-format="%n" \
     --links \
@@ -930,9 +929,11 @@ cd "/Users/$SANDVAULT_USER/"
     --perms \
     --times \
     "$WORKSPACE/guest/home/." \
-    "." \
-    | (tr '\n' '\0' || echo :) \
-    | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
+    ".")
+if [[ -n "\$_changed" ]]; then
+    echo "\$_changed" | tr '\n' '\0' \
+        | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
+fi
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     trace "Setting $(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME") to 0755 (world-traversable)"
