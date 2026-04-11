@@ -151,6 +151,59 @@ For local Git repositories, sandvault also wires remotes:
 ```
 
 
+## Native Install
+
+By default, SandVault installs AI tools via Homebrew on the host side. With `--native-install` (`-N`), tools are instead installed inside the sandbox using their own installers:
+
+- **Claude Code** — installed via `curl -fsSL https://claude.ai/install.sh | bash`
+- **Codex** — installed via `npm install -g @openai/codex`
+- **Gemini** — installed via `npm install -g @google/gemini-cli`
+
+Tools are installed on first run and reused on subsequent runs.
+
+```bash
+# Install and run Claude Code natively
+sv --native-install claude
+sv -N claude
+
+# Works with all AI agents
+sv -N codex
+sv -N gemini
+```
+
+To make native install the default, set `SANDVAULT_ARGS`:
+
+```bash
+# Add to your shell profile (~/.zshrc, ~/.bashrc, etc.)
+export SANDVAULT_ARGS="--native-install"
+
+# Now 'sv claude' uses native install automatically
+sv claude
+```
+
+
+## Environment Variables
+
+Set `SANDVAULT_ARGS` to supply default arguments that are prepended to the command line:
+
+```bash
+# Add to your shell profile (~/.zshrc, ~/.bashrc, etc.)
+export SANDVAULT_ARGS="--verbose --ssh --browser"
+
+# Now these are equivalent:
+sv claude
+sv --verbose --ssh --browser claude
+```
+
+Shell quoting is supported, so arguments with spaces work:
+
+```bash
+export SANDVAULT_ARGS='--clone "my project"'
+```
+
+Explicit command-line arguments are appended after `SANDVAULT_ARGS`, so they are processed afterwards.
+
+
 ## Maintenance Commands
 
 ```bash

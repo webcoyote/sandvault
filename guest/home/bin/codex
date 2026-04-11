@@ -2,15 +2,26 @@
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
-HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
-if [[ -x "$HOMEBREW_PREFIX/bin/codex" ]]; then
-    codex="$HOMEBREW_PREFIX/bin/codex"
-elif [[ -x "$HOME/node_modules/bin/codex" ]]; then
-    codex="$HOME/node_modules/bin/codex"
-else
-    echo >&2 "codex is not installed. Run: \`sv codex\` to install it."
+unset CODEX
+if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
+    NPM_BIN="$(npm prefix -g)/bin"
+    if [[ ! -x "$NPM_BIN/codex" ]]; then
+        echo >&2 "Installing Codex natively with npm..."
+        npm install -g @openai/codex
+    fi
+    CODEX="$NPM_BIN/codex"
+elif command -v brew &>/dev/null ; then
+    HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
+    if [[ -x "$HOMEBREW_PREFIX/bin/codex" ]]; then
+        # Homebrew install
+        CODEX="$HOMEBREW_PREFIX/bin/codex"
+    fi
+fi
+
+if [[ -z "${CODEX:-}" || ! -x "$CODEX" ]]; then
+    echo >&2 "ERROR: codex is not installed"
     exit 1
 fi
 
 echo "$USER: running codex --dangerously-bypass-approvals-and-sandbox"
-exec "$codex" --dangerously-bypass-approvals-and-sandbox "$@"
+exec "$CODEX" --dangerously-bypass-approvals-and-sandbox "$@"
