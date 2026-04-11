@@ -2,15 +2,26 @@
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
-HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
-if [[ -x "$HOMEBREW_PREFIX/bin/gemini" ]]; then
-    gemini="$HOMEBREW_PREFIX/bin/gemini"
-elif [[ -x "$HOME/node_modules/bin/gemini" ]]; then
-    gemini="$HOME/node_modules/bin/gemini"
-else
-    echo >&2 "gemini is not installed. Run: \`sv gemini\` to install it."
+unset GEMINI
+if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
+    NPM_BIN="$(npm prefix -g)/bin"
+    if [[ ! -x "$NPM_BIN/gemini" ]]; then
+        echo >&2 "Installing Gemini CLI natively with npm..."
+        npm install -g @google/gemini-cli
+    fi
+    GEMINI="$NPM_BIN/gemini"
+elif command -v brew &>/dev/null ; then
+    HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
+    if [[ -x "$HOMEBREW_PREFIX/bin/gemini" ]]; then
+        # Homebrew install
+        GEMINI="$HOMEBREW_PREFIX/bin/gemini"
+    fi
+fi
+
+if [[ -z "${GEMINI:-}" || ! -x "$GEMINI" ]]; then
+    echo >&2 "ERROR: gemini is not installed"
     exit 1
 fi
 
 echo "$USER: running gemini --yolo"
-exec "$gemini" --yolo "$@"
+exec "$GEMINI" --yolo "$@"

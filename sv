@@ -312,6 +312,20 @@ ensure_brew_tool() {
 }
 
 install_tools () {
+    if [[ "$NATIVE_INSTALL" == "true" ]]; then
+        # Native install is handled inside the sandbox by guest/home/bin/* scripts;
+        # ensure node is available for npm-based tools (codex, gemini).
+        case "${COMMAND:-}" in
+            codex|gemini)
+                ensure_brew_tool "node" "node"
+                ;;
+            *)
+                # node installation not required
+                ;;
+        esac
+        return 0
+    fi
+
     # Install homebrew tools only when the user invokes them.
     case "${COMMAND:-}" in
         claude)
@@ -588,6 +602,7 @@ NO_BUILD=false
 USE_SANDBOX=true
 USE_BROWSER=false
 FIX_PERMISSIONS=false
+NATIVE_INSTALL=false
 MODE=shell
 COMMAND_ARGS=()
 INITIAL_DIR=""
@@ -613,6 +628,7 @@ show_help() {
     echo "  -b, --browser        Launch headless Chrome and pass endpoint into sandbox"
     echo "  -e, --endpoint       Show Chrome endpoint URL (requires --browser session)"
     echo "  -c, --clone URL|PATH Clone Git repository into sandvault home and open there"
+    echo "  -N, --native-install Use native installers instead of Homebrew for AI tools"
     echo "  --fix-permissions    Fix umask and file permissions [standalone or with build]"
     echo "  --version            Show version information"
     echo ""
@@ -689,6 +705,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --fix-permissions)
             FIX_PERMISSIONS=true
+            shift
+            ;;
+        -N|--native-install)
+            NATIVE_INSTALL=true
             shift
             ;;
         -c|--clone)
@@ -1489,8 +1509,11 @@ else
     debug "Sandbox disabled: running without sandbox-exec restrictions"
 fi
 
-# Extra environment variables (e.g. browser CDP endpoint)
+# Extra environment variables (e.g. browser CDP endpoint, native install flag)
 EXTRA_ENV=()
+if [[ "$NATIVE_INSTALL" == "true" ]]; then
+    EXTRA_ENV+=("SV_NATIVE_INSTALL=true")
+fi
 if [[ "$USE_BROWSER" == "true" ]]; then
     if [[ -n "${SV_BROWSER_ENDPOINT:-}" ]]; then
         EXTRA_ENV+=("SV_BROWSER_ENDPOINT=$SV_BROWSER_ENDPOINT")
