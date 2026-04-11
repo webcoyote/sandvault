@@ -2,6 +2,16 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.3.0] - 2026-04-11
+
+### Added
+- Native install option for AI agents (Claude, Codex, Gemini) — run agents directly on the host with sandboxed access to the current project
+- `SANDVAULT_ARGS` environment variable for setting default `sv` arguments
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.2.5] - 2026-04-10
 
 _No user-facing changes. This release includes internal CI fixes._
