@@ -625,8 +625,22 @@ show_help() {
     echo "  u, uninstall         Remove sandvault; keep shared files"
     echo ""
     echo "Arguments after -- are passed to the command (claude, gemini, codex, shell)"
+    echo ""
+    echo "Environment:"
+    echo "  SANDVAULT_ARGS       Default arguments (prepended to command line)"
+    echo "                       Example: export SANDVAULT_ARGS=\"--verbose --ssh --browser\""
     exit 0
 }
+
+# Prepend arguments from SV_ARGS environment variable
+if [[ -n "${SANDVAULT_ARGS:-}" ]]; then
+    # Use xargs to parse shell-style quoting without eval
+    sv_args_array=()
+    while IFS= read -r arg; do
+        sv_args_array+=("$arg")
+    done < <(xargs -n1 printf '%s\n' <<< "$SANDVAULT_ARGS")
+    set -- "${sv_args_array[@]}" "$@"
+fi
 
 # Parse optional arguments
 NEW_ARGS=()

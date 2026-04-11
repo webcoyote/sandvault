@@ -151,6 +151,28 @@ For local Git repositories, sandvault also wires remotes:
 ```
 
 
+## Environment Variables
+
+Set `SANDVAULT_ARGS` to supply default arguments that are prepended to the command line:
+
+```bash
+# Add to your shell profile (~/.zshrc, ~/.bashrc, etc.)
+export SANDVAULT_ARGS="--verbose --ssh --browser"
+
+# Now these are equivalent:
+sv claude
+sv --verbose --ssh --browser claude
+```
+
+Shell quoting is supported, so arguments with spaces work:
+
+```bash
+export SANDVAULT_ARGS='--clone "my project"'
+```
+
+Explicit command-line arguments are appended after `SANDVAULT_ARGS`, so they are processed afterwards.
+
+
 ## Maintenance Commands
 
 ```bash
