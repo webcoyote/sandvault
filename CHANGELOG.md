@@ -2,6 +2,16 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.6.0] - 2026-04-13
+
+### Added
+- Add OpenCode agent support ([#107](https://github.com/webcoyote/sandvault/pull/107)) — thanks @MikeMcQuaid!
+
+### Thanks to 2 contributors!
+
+- [@MikeMcQuaid](https://github.com/MikeMcQuaid)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.5.0] - 2026-04-12
 
 ### Fixed
