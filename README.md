@@ -6,7 +6,7 @@ SandVault (`sv`) manages a limited user account to sandbox shell commands and AI
 </br>
 </br>
 
-- **AI ready** - Includes Claude Code, OpenAI Codex, Google Gemini
+- **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini
 - **Fast context switching** - No VM overhead; instant user switching
 - **Passwordless** - switch accounts without a prompt (after setup)
 - **Shared workspace** - joint access to `/Users/Shared/sv-$USER`
@@ -79,6 +79,10 @@ Install via git:
 # Run OpenAI Codex in the sandbox
 # shortcut: sv co
   sv codex
+
+# Run OpenCode in the sandbox
+# shortcut: sv o
+  sv opencode
 
 # Run Google Gemini in the sandbox
 # shortcut: sv g
@@ -157,6 +161,7 @@ By default, SandVault installs AI tools via Homebrew on the host side. With `--n
 
 - **Claude Code** — installed via `curl -fsSL https://claude.ai/install.sh | bash`
 - **Codex** — installed via `npm install -g @openai/codex`
+- **OpenCode** — installed via `curl -fsSL https://opencode.ai/install | bash`
 - **Gemini** — installed via `npm install -g @google/gemini-cli`
 
 Tools are installed on first run and reused on subsequent runs.
@@ -168,6 +173,7 @@ sv -N claude
 
 # Works with all AI agents
 sv -N codex
+sv -N opencode
 sv -N gemini
 ```
 
@@ -425,6 +431,7 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Provides meaningful isolation without too much complexity
 - Runs Claude Code with `--dangerously-skip-permissions`
 - Runs OpenAI Codex with `--dangerously-bypass-approvals-and-sandbox`
+- Runs OpenCode with `--dangerously-skip-permissions`
 - Runs Google Gemini with `--yolo`
 - Maintains a clean separation between trusted and untrusted code
 
