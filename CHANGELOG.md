@@ -2,6 +2,15 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.4.0] - 2026-04-12
+
+### Fixed
+- Prevent keychain login dialog from popping up during sandbox sessions ([#104](https://github.com/webcoyote/sandvault/pull/104))
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.3.0] - 2026-04-11
 
 ### Added
