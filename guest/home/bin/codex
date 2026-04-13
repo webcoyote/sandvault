@@ -4,10 +4,11 @@ trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
 unset CODEX
 if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
-    NPM_BIN="$(npm prefix -g)/bin"
+    NPM_PREFIX="${HOME}/node_modules"
+    NPM_BIN="$NPM_PREFIX/bin"
     if [[ ! -x "$NPM_BIN/codex" ]]; then
         echo >&2 "Installing Codex natively with npm..."
-        npm install -g @openai/codex
+        npm install --prefix "$NPM_PREFIX" -g @openai/codex
     fi
     CODEX="$NPM_BIN/codex"
 elif command -v brew &>/dev/null ; then

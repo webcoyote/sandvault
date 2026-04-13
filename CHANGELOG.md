@@ -2,6 +2,15 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.5.0] - 2026-04-12
+
+### Fixed
+- Fix native install for Codex and Gemini agents when nvm is in use — `.npmrc` prefix setting was breaking nvm
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.4.0] - 2026-04-12
 
 ### Fixed
