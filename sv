@@ -334,6 +334,9 @@ install_tools () {
         codex)
             ensure_brew_tool "codex" "codex"
             ;;
+        opencode)
+            ensure_brew_tool "anomalyco/tap/opencode" "opencode"
+            ;;
         gemini)
             ensure_brew_tool "gemini-cli" "gemini"
             ;;
@@ -635,12 +638,13 @@ show_help() {
     echo "Commands:"
     echo "  cl, claude [PATH]    Open Claude Code in sandvault"
     echo "  co, codex  [PATH]    Open OpenAI Codex in sandvault"
+    echo "  o,  opencode [PATH]  Open OpenCode in sandvault"
     echo "  g,  gemini [PATH]    Open Google Gemini in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove sandvault; keep shared files"
     echo ""
-    echo "Arguments after -- are passed to the command (claude, gemini, codex, shell)"
+    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, shell)"
     echo ""
     echo "Environment:"
     echo "  SANDVAULT_ARGS       Default arguments (prepended to command line)"
@@ -747,6 +751,10 @@ case "${1:-}" in
         ;;
     co|codex)
         COMMAND=codex
+        INITIAL_DIR="${2:-}"
+        ;;
+    o|opencode)
+        COMMAND=opencode
         INITIAL_DIR="${2:-}"
         ;;
     g|gemini)
@@ -1264,7 +1272,7 @@ fi
 # Run the application
 ###############################################################################
 if [[ -n "$CLONE_REPOSITORY" ]]; then
-    CLONE_SUPPORTED_COMMANDS=(shell claude codex gemini)
+    CLONE_SUPPORTED_COMMANDS=(shell claude codex opencode gemini)
     for supported_command in "${CLONE_SUPPORTED_COMMANDS[@]}"; do
         if [[ "${COMMAND:-shell}" == "$supported_command" ]]; then
             break
@@ -1397,7 +1405,7 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
     # Fix homebrew symlinks for any installed tools
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in condition
     if brew_shellenv 2>/dev/null; then
-        for tool_cli in claude codex gemini; do
+        for tool_cli in claude codex opencode gemini; do
             brew_link="$(brew --prefix)/bin/$tool_cli"
             if [[ -L "$brew_link" ]]; then
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_link")
