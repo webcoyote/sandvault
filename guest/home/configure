@@ -58,9 +58,10 @@ if [[ ! -f "$LOGIN_KEYCHAIN" ]]; then
     security create-keychain -p '' "$LOGIN_KEYCHAIN"
 fi
 
-# Unlock the keychain to avoid password dialogs
+# Unlock the keychain and disable auto-lock to avoid password dialogs
 debug "Unlocking keychain..."
 security unlock-keychain -p '' "$LOGIN_KEYCHAIN"
+security set-keychain-settings "$LOGIN_KEYCHAIN"
 
 
 ###############################################################################
