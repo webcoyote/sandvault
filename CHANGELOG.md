@@ -2,6 +2,16 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.8.0] - 2026-04-14
+
+### Fixed
+- Fix OpenCode permission bypass so sandbox restrictions are properly enforced ([#111](https://github.com/webcoyote/sandvault/pull/111)) — thanks @MikeMcQuaid!
+
+### Thanks to 2 contributors!
+
+- [@MikeMcQuaid](https://github.com/MikeMcQuaid)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.7.0] - 2026-04-13
 
 ### Fixed
