@@ -302,12 +302,12 @@ run_tests() {
 
     test_opencode_wrapper_uses_skip_permissions() {
         if [[ -x "$SCRIPT_DIR/../guest/home/bin/opencode" ]] \
-            && grep -F -- "--dangerously-skip-permissions" \
+            && grep -F -- "OPENCODE_PERMISSION" \
                 "$SCRIPT_DIR/../guest/home/bin/opencode" &>/dev/null; then
             pass "opencode wrapper uses skip permissions"
         else
             fail "opencode wrapper uses skip permissions" \
-                "executable wrapper with --dangerously-skip-permissions" \
+                "executable wrapper with OPENCODE_PERMISSION" \
                 "$SCRIPT_DIR/../guest/home/bin/opencode"
         fi
     }
