@@ -2,6 +2,15 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.7.0] - 2026-04-13
+
+### Fixed
+- Preserve user customizations to `.gitconfig` and `.claude.json` across sandbox sessions instead of overwriting them on each launch ([#109](https://github.com/webcoyote/sandvault/pull/109))
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.6.0] - 2026-04-13
 
 ### Added
