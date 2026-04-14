@@ -22,5 +22,6 @@ if [[ -z "${OPENCODE:-}" || ! -x "$OPENCODE" ]]; then
     exit 1
 fi
 
-echo "$USER: running opencode --dangerously-skip-permissions"
-exec "$OPENCODE" --dangerously-skip-permissions "$@"
+export OPENCODE_PERMISSION='{"*":"allow"}'
+echo "$USER: running opencode with OPENCODE_PERMISSION='${OPENCODE_PERMISSION}'"
+exec "$OPENCODE" "$@"

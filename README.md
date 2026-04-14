@@ -431,7 +431,7 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Provides meaningful isolation without too much complexity
 - Runs Claude Code with `--dangerously-skip-permissions`
 - Runs OpenAI Codex with `--dangerously-bypass-approvals-and-sandbox`
-- Runs OpenCode with `--dangerously-skip-permissions`
+- Runs OpenCode with `OPENCODE_PERMISSION='{"*":"allow"}'`
 - Runs Google Gemini with `--yolo`
 - Maintains a clean separation between trusted and untrusted code
 
