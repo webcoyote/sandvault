@@ -548,7 +548,7 @@ configure_shared_folder_permssions() {
 }
 
 uninstall() {
-    debug "Uninstalling..."
+    info "Uninstalling..."
     force_cleanup_sandvault_processes force-all
     rm -rf "$SESSION_DIR"/chrome-data-* "$SESSION_DIR"/chrome-*.log
 
@@ -587,8 +587,15 @@ uninstall() {
 
     # Remove shared workspace
     # Do not remove $SHARED_WORKSPACE/user
+    rmdir "$SHARED_WORKSPACE/tmp" 2>/dev/null || true
+
+    rm -f "$SHARED_WORKSPACE/setup/gitconfig"
+    rm -f "$SHARED_WORKSPACE/setup/claude-json"
+    rmdir "$SHARED_WORKSPACE/setup" 2>/dev/null || true
+
     rm -f "$SHARED_WORKSPACE/SANDVAULT-README.md"
     rmdir "$SHARED_WORKSPACE" 2>/dev/null || true
+
     if [[ -d "$SHARED_WORKSPACE" ]]; then
         info "Keeping $SHARED_WORKSPACE directory (it is not empty)"
     else
@@ -1211,23 +1218,50 @@ fi
 
 
 ###############################################################################
-# Configure git
+# Write config merge scripts to shared workspace
+#
+# These scripts run as the sandbox user during session startup (called by
+# configure). They merge required settings into existing config files rather
+# than overwriting them, so agent/tool modifications persist across sessions.
 ###############################################################################
 if [[ "$NESTED" == "true" ]]; then
-    : # Git already configured
-else
-    trace "Configuring git..."
+    : # Already configured
+elif [[ "$REBUILD" == "true" ]]; then
+    trace "Writing config merge scripts..."
     GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
     GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
-    if [[ "$NO_BUILD" == "true" ]]; then
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
-    else
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
-    fi
+
+    mkdir -p "$SHARED_WORKSPACE/setup"
+
+    # .gitconfig: seed if missing, preserving user overrides
+    cat > "$SHARED_WORKSPACE/setup/gitconfig" << SETUP_EOF
+#!/bin/bash
+set -Eeuo pipefail
+if [[ ! -f "\$HOME/.gitconfig" ]]; then
+    git config -f "\$HOME/.gitconfig" user.name "$GIT_USER_NAME"
+    git config -f "\$HOME/.gitconfig" user.email "$GIT_USER_EMAIL"
+    git config -f "\$HOME/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
+fi
+SETUP_EOF
+    chmod +x "$SHARED_WORKSPACE/setup/gitconfig"
+
+    # .claude.json: seed if missing (onboarding flags only matter on first run)
+    cat > "$SHARED_WORKSPACE/setup/claude-json" << 'SETUP_EOF'
+#!/bin/bash
+set -Eeuo pipefail
+if [[ ! -f "$HOME/.claude.json" ]]; then
+    cat > "$HOME/.claude.json" << 'JSON_EOF'
+{
+  "hasCompletedOnboarding": true,
+  "bypassPermissionsModeAccepted": true,
+  "tipsHistory": {
+    "new-user-warmup": 1
+  }
+}
+JSON_EOF
+fi
+SETUP_EOF
+    chmod +x "$SHARED_WORKSPACE/setup/claude-json"
 fi
 
 
