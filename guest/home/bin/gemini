@@ -1,6 +1,6 @@
 #!/bin/bash
 set -Eeuo pipefail
-trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
 unset GEMINI
 if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
@@ -24,5 +24,5 @@ if [[ -z "${GEMINI:-}" || ! -x "$GEMINI" ]]; then
     exit 1
 fi
 
-echo "$USER: running gemini --yolo"
+echo >&2 "$USER: running gemini --yolo"
 exec "$GEMINI" --yolo "$@"
