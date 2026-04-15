@@ -2,6 +2,9 @@
 set -Eeuo pipefail
 trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
+# shellcheck source=sv-tool-prompts.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sv-tool-prompts.sh"
+
 unset CLAUDE
 if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
     if [[ ! -x "$HOME/.local/bin/claude" ]]; then
@@ -22,5 +25,11 @@ if [[ -z "${CLAUDE:-}" || ! -x "$CLAUDE" ]]; then
     exit 1
 fi
 
+TOOL_PROMPT=$(sv_tool_prompt)
+EXTRA_ARGS=()
+if [[ -n "$TOOL_PROMPT" ]]; then
+    EXTRA_ARGS+=(--append-system-prompt "$TOOL_PROMPT")
+fi
+
 echo >&2 "$USER: running claude --dangerously-skip-permissions"
-exec "$CLAUDE" --dangerously-skip-permissions "$@"
+exec "$CLAUDE" --dangerously-skip-permissions ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"
