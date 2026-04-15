@@ -2,6 +2,9 @@
 set -Eeuo pipefail
 trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
+# shellcheck source=sv-tool-prompts.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sv-tool-prompts.sh"
+
 unset CODEX
 if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
     NPM_PREFIX="${HOME}/node_modules"
@@ -24,5 +27,14 @@ if [[ -z "${CODEX:-}" || ! -x "$CODEX" ]]; then
     exit 1
 fi
 
+TOOL_PROMPT=$(sv_tool_prompt)
+EXTRA_ARGS=()
+if [[ -n "$TOOL_PROMPT" ]]; then
+    # Write combined tool prompt to a temp file for -c model_instructions_file
+    SV_PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/sv-tool-prompt.XXXXXX")
+    printf '%s\n' "$TOOL_PROMPT" > "$SV_PROMPT_FILE"
+    EXTRA_ARGS+=(-c "model_instructions_file=\"$SV_PROMPT_FILE\"")
+fi
+
 echo >&2 "$USER: running codex --dangerously-bypass-approvals-and-sandbox"
-exec "$CODEX" --dangerously-bypass-approvals-and-sandbox "$@"
+exec "$CODEX" --dangerously-bypass-approvals-and-sandbox ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"

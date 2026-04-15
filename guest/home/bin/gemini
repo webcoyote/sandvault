@@ -2,6 +2,9 @@
 set -Eeuo pipefail
 trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
+# shellcheck source=sv-tool-prompts.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sv-tool-prompts.sh"
+
 unset GEMINI
 if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
     NPM_PREFIX="${HOME}/node_modules"
@@ -24,5 +27,15 @@ if [[ -z "${GEMINI:-}" || ! -x "$GEMINI" ]]; then
     exit 1
 fi
 
+TOOL_PROMPT=$(sv_tool_prompt)
+EXTRA_ARGS=()
+if [[ -n "$TOOL_PROMPT" ]]; then
+    # Gemini CLI picks up GEMINI.md files from --include-directories paths.
+    # Write the tool prompt to a temp directory so Gemini loads it as context.
+    SV_PROMPT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sv-gemini-ctx.XXXXXX")
+    printf '%s\n' "$TOOL_PROMPT" > "$SV_PROMPT_DIR/GEMINI.md"
+    EXTRA_ARGS+=(--include-directories "$SV_PROMPT_DIR")
+fi
+
 echo >&2 "$USER: running gemini --yolo"
-exec "$GEMINI" --yolo "$@"
+exec "$GEMINI" --yolo ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"
