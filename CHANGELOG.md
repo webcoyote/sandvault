@@ -2,6 +2,16 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.9.0] - 2026-04-15
+
+### Fixed
+- Fix Ensure AI agent scripts write header to stderr ([#114](https://github.com/webcoyote/sandvault/pull/114)) — thanks @nichenke!
+
+### Thanks to 2 contributors!
+
+- [@nichenke](https://github.com/nichenke)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.8.0] - 2026-04-14
 
 ### Fixed
