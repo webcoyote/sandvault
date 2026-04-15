@@ -1,6 +1,6 @@
 #!/bin/bash
 set -Eeuo pipefail
-trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
 unset OPENCODE
 if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
@@ -23,5 +23,5 @@ if [[ -z "${OPENCODE:-}" || ! -x "$OPENCODE" ]]; then
 fi
 
 export OPENCODE_PERMISSION='{"*":"allow"}'
-echo "$USER: running opencode with OPENCODE_PERMISSION='${OPENCODE_PERMISSION}'"
+echo >&2 "$USER: running opencode with OPENCODE_PERMISSION='${OPENCODE_PERMISSION}'"
 exec "$OPENCODE" "$@"

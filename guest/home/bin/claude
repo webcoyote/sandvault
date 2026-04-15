@@ -1,6 +1,6 @@
 #!/bin/bash
 set -Eeuo pipefail
-trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
 unset CLAUDE
 if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
@@ -22,5 +22,5 @@ if [[ -z "${CLAUDE:-}" || ! -x "$CLAUDE" ]]; then
     exit 1
 fi
 
-echo "$USER: running claude --dangerously-skip-permissions"
+echo >&2 "$USER: running claude --dangerously-skip-permissions"
 exec "$CLAUDE" --dangerously-skip-permissions "$@"
