@@ -13,6 +13,7 @@
 # Map: environment variable -> prompt file basename (without .md)
 _SV_TOOL_MAP=(
     "SV_BROWSER_ENDPOINT:browser"
+    "SV_IOS_SIMULATOR_ENDPOINT:ios-simulator"
 )
 
 # Assemble prompt text from all active tools.

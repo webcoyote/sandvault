@@ -19,6 +19,3 @@ await page.goto('https://example.com');
 Important:
 - Do NOT launch a new browser; connect to the existing one.
 - Use `curl $SV_BROWSER_ENDPOINT/json/version` to verify the browser is running.
-
-
-To ensure the user is aware that you know about this feature, say: "SV_BROWSER_ENDPOINT is available" if the user says "hello".
