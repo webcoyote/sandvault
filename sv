@@ -500,6 +500,10 @@ register_session() {
 }
 
 unregister_session() {
+    # Per-session cleanup
+    [[ "$USE_BROWSER" == "true" ]] && stop_chrome
+    rm -f "$SHARED_WORKSPACE/tmp/sv-session-$SV_SESSION_ID" 2>/dev/null || true
+
     mkdir -p "$SESSION_DIR"
     local prev_count
     local new_count
@@ -551,6 +555,7 @@ uninstall() {
     info "Uninstalling..."
     force_cleanup_sandvault_processes force-all
     rm -rf "$SESSION_DIR"/chrome-data-* "$SESSION_DIR"/chrome-*.log
+    rm -f /tmp/sandvault-configure-* 2>/dev/null || true
 
     # Remove the install marker file first; it's a sentinel for "everything is complete".
     # By removing it first we force a rebuild if the user wants to run this again.
@@ -1511,7 +1516,7 @@ if [[ "$NESTED" == "false" ]]; then
     if [[ "$USE_BROWSER" == "true" ]]; then
         start_chrome
     fi
-    trap 'sv_exit_code=$?; set +e; [[ "$USE_BROWSER" == "true" ]] && stop_chrome; unregister_session; exit $sv_exit_code' EXIT
+    trap 'sv_exit_code=$?; set +e; unregister_session; exit $sv_exit_code' EXIT
 elif [[ "$USE_BROWSER" == "true" ]]; then
     # Nested session with --browser: Chrome cannot be launched inside the
     # sandbox, so the parent session must already have started it.
