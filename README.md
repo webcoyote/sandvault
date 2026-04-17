@@ -1,4 +1,4 @@
-# SandVault - Run AI agents and shell commands in a sandboxed macOS user account
+# SandVault - Run AI agents and shell commands in a sandboxed macOS user account. Sandboxed web and app testing with Chrome and iOS Simulator.
 
 <img src="https://www.codeofhonor.com/images/projects/sandvault.webp" align="left" width="200px"/>
 SandVault (`sv`) manages a limited user account to sandbox shell commands and AI agents, providing a lightweight alternative to application isolation using virtual machines.
@@ -7,7 +7,7 @@ SandVault (`sv`) manages a limited user account to sandbox shell commands and AI
 </br>
 
 - **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini
-- **iOS & Chrome automation** - Run iOS Simulator and Chrome to test apps / sites
+- **Web and iOS automation** - sandbox access to Chrome and iOS Simulator
 - **Fast context switching** - No VM overhead; instant user switching
 - **Passwordless** - switch accounts without a prompt (after setup)
 - **Shared workspace** - joint access to `/Users/Shared/sv-$USER`
@@ -399,7 +399,7 @@ From the host, you can query the endpoint URL:
 sv --endpoint
 ```
 
-See also `./tests/browser/*.js` for examples of using Playwright and Puppeteer.
+See also [`./tests/browser/*.js`](./tests/browser) for examples of using Playwright and Puppeteer. See [`guest/home/bin/prompts/browser.md`](./guest/home/bin/prompts/browser.md) for prompt.
 
 ### How it works
 
@@ -458,7 +458,7 @@ curl -o low_res.jpg $SV_IOS_SIMULATOR_ENDPOINT/view
 curl -o high_res.png $SV_IOS_SIMULATOR_ENDPOINT/view_pixels
 ```
 
-See `guest/home/bin/prompts/ios-simulator.md` for the full list of endpoints. This file is automatically included in your AI agent prompt when using --ios/--ios-gui. See `tests/ios-simulator/scripts/tests` for a runnable example.
+See [`guest/home/bin/prompts/ios-simulator.md`](./guest/home/bin/prompts/ios-simulator.md) for the full list of endpoints. This file is automatically included in your AI agent prompt when using --ios/--ios-gui. See [`tests/ios-simulator/scripts/tests`](./tests/ios-simulator/scripts/tests) for a runnable example.
 
 ### How it works
 
