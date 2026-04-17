@@ -10,7 +10,7 @@ const testDir = path.dirname(require.resolve('./package.json'));
 try { require.resolve('playwright-core'); } catch {
     const { execSync } = require('child_process');
     console.log('Installing dependencies...');
-    execSync('npm install --no-audit --no-fund', { cwd: testDir, stdio: 'inherit' });
+    execSync('npm install --no-audit --no-fund --no-update-notifier', { cwd: testDir, stdio: 'inherit' });
 }
 
 const { chromium } = require('playwright-core');

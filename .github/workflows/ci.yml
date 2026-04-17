@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Build
-        run: ./sv -vvv build
+        run: ./sv -vvv --ios --browser build
 
       - name: SandVault Tests
         env:

@@ -180,6 +180,14 @@ readonly CHROME_DATA_DIR="$SESSION_DIR/chrome-data-$SV_SESSION_ID"
 CHROME_PID=""
 CHROME_PORT=""
 
+# iOS Simulator bridge state (per-instance using session ID)
+readonly IOS_BRIDGE_LOG_FILE="$SESSION_DIR/ios-bridge-$SV_SESSION_ID.log"
+readonly IOS_SIM_DEVICE_NAME="sandvault-$SV_SESSION_ID"
+IOS_BRIDGE_PID=""
+IOS_BRIDGE_PORT=""
+IOS_BRIDGE_SCRATCH_DIR=""
+IOS_SIM_UDID=""
+
 readonly SSH_DIR="$HOME/.ssh"
 readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
 readonly SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
@@ -346,6 +354,52 @@ install_tools () {
     esac
 }
 
+# Ensure host-side dependencies for --ios are present: uv (via
+# Homebrew) and iosef (via `uv tool install`). The bridge runs as the host
+# user, so both tools must be available in the host user's PATH.
+install_ios_deps() {
+    # uv via Homebrew.
+    ensure_brew_tool "uv" "uv"
+
+    # iosef via `uv tool install`. `uv tool install` is idempotent, so we
+    # only call it when iosef is not already on PATH.
+    if command -v iosef &>/dev/null; then
+        return 0
+    fi
+
+    # Already-installed uv tools live in `uv tool dir`/bin. Check there so
+    # we don't spuriously re-install if PATH just doesn't include it yet.
+    # The bridge itself falls back to `uv tool run iosef` so bridge
+    # functionality doesn't depend on PATH; this is only a convenience note
+    # for host-side direct use.
+    local uv_bin_dir
+    if uv_bin_dir=$(uv tool dir --bin 2>/dev/null) && [[ -x "$uv_bin_dir/iosef" ]]; then
+        debug "iosef installed at $uv_bin_dir/iosef (not on PATH; bridge uses 'uv tool run iosef'). For direct host-side use, add \"$uv_bin_dir\" to PATH or run: uv tool update-shell"
+        return 0
+    fi
+
+    if [[ "$NESTED" == "true" ]]; then
+        abort "sandvault user cannot install iosef; run as $HOST_USER instead"
+    fi
+    if [[ "$NO_BUILD" == "true" ]]; then
+        abort "Missing iosef; refusing to install because --no-build flag set"
+    fi
+
+    debug "Installing iosef via uv..."
+    if ! uv tool install iosef >/dev/null 2>&1; then
+        abort "Failed to install iosef via uv. Try: uv tool install iosef"
+    fi
+
+    if ! command -v iosef &>/dev/null; then
+        uv_bin_dir=$(uv tool dir --bin 2>/dev/null || echo "")
+        if [[ -n "$uv_bin_dir" && -x "$uv_bin_dir/iosef" ]]; then
+            debug "iosef installed at $uv_bin_dir/iosef (not on PATH; bridge uses 'uv tool run iosef'). For direct host-side use, add \"$uv_bin_dir\" to PATH or run: uv tool update-shell"
+        else
+            abort "iosef install appeared to succeed but the binary is not available."
+        fi
+    fi
+}
+
 init_sandbox_run_for_repository() {
     SANDBOX_RUN=()
     if [[ "$NESTED" == "false" ]]; then
@@ -382,6 +436,9 @@ force_cleanup_sandvault_processes() {
     # Stop host-side Chrome if running
     stop_chrome
 
+    # Stop host-side iOS simulator bridge if running
+    stop_ios_simulator
+
     # Try to bootout the user session (this terminates all processes)
     trace "Terminating $SANDVAULT_USER user session..."
     local sandvault_uid
@@ -409,11 +466,12 @@ kill_chrome_pid() {
         kill "$pid" 2>/dev/null || true
         local i
         for (( i=0; i<20; i++ )); do
-            kill -0 "$pid" 2>/dev/null || return 0
+            kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
             sleep 0.1
         done
         trace "Force-killing Chrome (PID $pid)..."
         kill -9 "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
     fi
 }
 
@@ -484,6 +542,127 @@ start_chrome() {
     debug "Chrome started (PID $CHROME_PID, port $CHROME_PORT)"
 }
 
+kill_bridge_pid() {
+    local pid="$1"
+    if kill -0 "$pid" 2>/dev/null; then
+        debug "Stopping iOS bridge (PID $pid)..."
+        kill "$pid" 2>/dev/null || true
+        local i
+        for (( i=0; i<20; i++ )); do
+            kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
+            sleep 0.1
+        done
+        trace "Force-killing iOS bridge (PID $pid)..."
+        kill -9 "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+}
+
+stop_ios_simulator() {
+    if [[ -n "$IOS_BRIDGE_PID" ]]; then
+        kill_bridge_pid "$IOS_BRIDGE_PID"
+        IOS_BRIDGE_PID=""
+    fi
+    if [[ -n "$IOS_SIM_UDID" ]]; then
+        debug "Shutting down iOS simulator $IOS_SIM_UDID..."
+        /usr/bin/xcrun simctl shutdown "$IOS_SIM_UDID" >/dev/null 2>&1 || true
+        /usr/bin/xcrun simctl delete "$IOS_SIM_UDID" >/dev/null 2>&1 || true
+        IOS_SIM_UDID=""
+    fi
+    rm -f "$IOS_BRIDGE_LOG_FILE"
+    if [[ -n "$IOS_BRIDGE_SCRATCH_DIR" ]]; then
+        rm -rf "$IOS_BRIDGE_SCRATCH_DIR"
+        IOS_BRIDGE_SCRATCH_DIR=""
+    fi
+}
+
+# Find the newest available iPhone device type identifier and iOS runtime
+# identifier. Prints "<device_type>\t<runtime>" on stdout. Returns non-zero
+# if no usable pair is found.
+ios_pick_device_and_runtime() {
+    /usr/bin/xcrun simctl list -j devicetypes runtimes 2>/dev/null \
+        | "$WORKSPACE/helpers/sv-ios-pick-device"
+}
+
+start_ios_simulator() {
+    mkdir -p "$SESSION_DIR"
+
+    if [[ ! -x /usr/bin/xcrun ]]; then
+        abort "xcrun not found. Install Xcode or the Command Line Tools."
+    fi
+
+    # Select device type and runtime.
+    local device_type runtime pair
+    # shellcheck disable=SC2310 # ios_pick_device_and_runtime intentionally used in condition
+    if ! pair=$(ios_pick_device_and_runtime); then
+        abort "No iOS simulator runtime available. Install one via Xcode → Settings → Platforms."
+    fi
+    device_type="${pair%$'\t'*}"
+    runtime="${pair#*$'\t'}"
+    debug "Selected device=$device_type runtime=$runtime"
+
+    # Create a fresh scratch simulator for this session.
+    if ! IOS_SIM_UDID=$(/usr/bin/xcrun simctl create "$IOS_SIM_DEVICE_NAME" "$device_type" "$runtime" 2>/dev/null); then
+        abort "Failed to create iOS simulator (device=$device_type runtime=$runtime)"
+    fi
+    debug "Created simulator $IOS_SIM_DEVICE_NAME UDID=$IOS_SIM_UDID"
+
+    # Begin booting. Don't wait for bootstatus here — the bridge polls
+    # readiness in a background thread and rejects non-/ready endpoints
+    # with HTTP 503 until the simulator finishes booting (30-90s).
+    # Sandbox sessions can start interacting immediately and poll
+    # /ready until it returns 200.
+    if ! /usr/bin/xcrun simctl boot "$IOS_SIM_UDID" >/dev/null 2>&1; then
+        stop_ios_simulator
+        abort "Failed to boot iOS simulator $IOS_SIM_UDID"
+    fi
+    debug "iOS simulator boot started in background; bridge will report readiness."
+
+    if [[ "$USE_IOS_SIMULATOR_GUI" == "true" ]]; then
+        debug "Opening Simulator.app to display the device..."
+        /usr/bin/open -a Simulator >/dev/null 2>&1 || \
+            warn "Failed to open Simulator.app; the device is still running headless."
+    fi
+
+    # Launch the HTTP bridge.
+    # Place the scratch directory under $SHARED_WORKSPACE/tmp so that
+    # screenshots and other bridge artifacts are accessible to both the
+    # host user and the sandboxed user.
+    mkdir -p "$SHARED_WORKSPACE/tmp"
+    IOS_BRIDGE_SCRATCH_DIR="$(mktemp -d "$SHARED_WORKSPACE/tmp/sv-ios-bridge.XXXXXX")"
+    rm -f "$IOS_BRIDGE_LOG_FILE"
+    debug "Starting iOS bridge..."
+    "$WORKSPACE/helpers/sv-ios-bridge" --udid "$IOS_SIM_UDID" \
+        --host 127.0.0.1 --port 0 \
+        --scratch-dir "$IOS_BRIDGE_SCRATCH_DIR" \
+        > "$IOS_BRIDGE_LOG_FILE" 2>&1 &
+    IOS_BRIDGE_PID=$!
+
+    # Wait for the bridge to report its port (up to 5 seconds).
+    local port=""
+    local i
+    for (( i=0; i<50; i++ )); do
+        if ! kill -0 "$IOS_BRIDGE_PID" 2>/dev/null; then
+            IOS_BRIDGE_PID=""
+            stop_ios_simulator
+            abort "iOS bridge exited unexpectedly. Check $IOS_BRIDGE_LOG_FILE for details."
+        fi
+        port=$(sed -n 's|.*Bridge listening on http://127\.0\.0\.1:\([0-9]*\).*|\1|p' "$IOS_BRIDGE_LOG_FILE" 2>/dev/null | head -1)
+        if [[ -n "$port" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    if [[ -z "$port" ]]; then
+        stop_ios_simulator
+        abort "iOS bridge did not report a port within 5 seconds. Check $IOS_BRIDGE_LOG_FILE."
+    fi
+
+    IOS_BRIDGE_PORT="$port"
+    debug "iOS bridge started (PID $IOS_BRIDGE_PID, port $IOS_BRIDGE_PORT)"
+}
+
 register_session() {
     mkdir -p "$SESSION_DIR"
     local new_count
@@ -502,6 +681,7 @@ register_session() {
 unregister_session() {
     # Per-session cleanup
     [[ "$USE_BROWSER" == "true" ]] && stop_chrome
+    [[ "$USE_IOS_SIMULATOR" == "true" ]] && stop_ios_simulator
     rm -f "$SHARED_WORKSPACE/tmp/sv-session-$SV_SESSION_ID" 2>/dev/null || true
 
     mkdir -p "$SESSION_DIR"
@@ -555,6 +735,7 @@ uninstall() {
     info "Uninstalling..."
     force_cleanup_sandvault_processes force-all
     rm -rf "$SESSION_DIR"/chrome-data-* "$SESSION_DIR"/chrome-*.log
+    rm -f "$SESSION_DIR"/ios-bridge-*.log
     rm -f /tmp/sandvault-configure-* 2>/dev/null || true
 
     # Remove the install marker file first; it's a sentinel for "everything is complete".
@@ -616,6 +797,8 @@ REBUILD=false
 NO_BUILD=false
 USE_SANDBOX=true
 USE_BROWSER=false
+USE_IOS_SIMULATOR=false
+USE_IOS_SIMULATOR_GUI=false
 FIX_PERMISSIONS=false
 NATIVE_INSTALL=false
 MODE=shell
@@ -642,6 +825,8 @@ show_help() {
     echo "  -x, --no-sandbox     Disable sandbox-exec restrictions"
     echo "  -b, --browser        Launch headless Chrome and pass endpoint into sandbox"
     echo "  -e, --endpoint       Show Chrome endpoint URL (requires --browser session)"
+    echo "  -i, --ios            Boot iOS Simulator and expose HTTP bridge into sandbox"
+    echo "  -I, --ios-gui        Also show the Simulator.app window (implies --ios)"
     echo "  -c, --clone URL|PATH Clone Git repository into sandvault home and open there"
     echo "  -N, --native-install Use native installers instead of Homebrew for AI tools"
     echo "  --fix-permissions    Fix umask and file permissions [standalone or with build]"
@@ -717,6 +902,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         -b|--browser)
             USE_BROWSER=true
+            shift
+            ;;
+        -i|--ios)
+            USE_IOS_SIMULATOR=true
+            shift
+            ;;
+        -I|--ios-gui)
+            USE_IOS_SIMULATOR=true
+            USE_IOS_SIMULATOR_GUI=true
             shift
             ;;
         --fix-permissions)
@@ -886,6 +1080,9 @@ if [[ "$REBUILD" == "true" ]]; then
 fi
 
 install_tools
+if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
+    install_ios_deps
+fi
 
 
 ###############################################################################
@@ -1025,13 +1222,13 @@ if [[ "$REBUILD" == "true" || "$MODE" == "ssh" ]]; then
 fi
 
 # SSH smoke test
-if [[ "$COMMAND" == "build" || "$REBUILD" == "true" ]]; then
-    if ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEYFILE_PRIV" "$SANDVAULT_USER@$HOSTNAME" true 2>/dev/null; then
-        trace "SSH smoke test: $SANDVAULT_USER@$HOSTNAME connected successfully"
-    else
-        warn "SSH smoke test failed: $SANDVAULT_USER@$HOSTNAME could not connect. SSH mode may not work."
-    fi
-fi
+#if [[ "$COMMAND" == "build" || "$REBUILD" == "true" ]]; then
+#    if ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEYFILE_PRIV" "$SANDVAULT_USER@$HOSTNAME" true 2>/dev/null; then
+#        trace "SSH smoke test: $SANDVAULT_USER@$HOSTNAME connected successfully"
+#    else
+#        warn "SSH smoke test failed: $SANDVAULT_USER@$HOSTNAME could not connect. SSH mode may not work."
+#    fi
+#fi
 
 
 ###############################################################################
@@ -1513,15 +1710,23 @@ EOF
 if [[ "$NESTED" == "false" ]]; then
     sv_exit_code=0
     register_session
+    trap 'sv_exit_code=$?; set +e; unregister_session; exit $sv_exit_code' EXIT
     if [[ "$USE_BROWSER" == "true" ]]; then
         start_chrome
     fi
-    trap 'sv_exit_code=$?; set +e; unregister_session; exit $sv_exit_code' EXIT
-elif [[ "$USE_BROWSER" == "true" ]]; then
-    # Nested session with --browser: Chrome cannot be launched inside the
-    # sandbox, so the parent session must already have started it.
-    if [[ -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
+    if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
+        start_ios_simulator
+    fi
+else
+    if [[ "$USE_BROWSER" == "true" && -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
+        # Nested session with --browser: Chrome cannot be launched inside the
+        # sandbox, so the parent session must already have started it.
         abort "--browser requires Chrome, but the parent sandvault session was not started with --browser"
+    fi
+    if [[ "$USE_IOS_SIMULATOR" == "true" && -z "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
+        # Nested session with --ios: the simulator runs on the host,
+        # so the parent session must already have started it.
+        abort "--ios requires a simulator, but the parent sandvault session was not started with --ios"
     fi
 fi
 
@@ -1556,7 +1761,11 @@ else
     debug "Sandbox disabled: running without sandbox-exec restrictions"
 fi
 
-# Extra environment variables (e.g. browser CDP endpoint, native install flag)
+# Extra environment variables (e.g. browser CDP endpoint, iOS bridge
+# endpoint, native install flag). These are expanded into the "/usr/bin/env
+# -i ..." argv below so they survive sudo/SSH and the env scrubber, which
+# is how nested `sv --browser` / `sv --ios` invocations inherit
+# SV_BROWSER_ENDPOINT / SV_IOS_SIMULATOR_ENDPOINT from the parent session.
 EXTRA_ENV=()
 if [[ "$NATIVE_INSTALL" == "true" ]]; then
     EXTRA_ENV+=("SV_NATIVE_INSTALL=true")
@@ -1568,6 +1777,15 @@ if [[ "$USE_BROWSER" == "true" ]]; then
         EXTRA_ENV+=("SV_BROWSER_ENDPOINT=http://127.0.0.1:$CHROME_PORT")
     else
         abort "Chrome port not available. Chrome may have failed to start."
+    fi
+fi
+if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
+    if [[ -n "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
+        EXTRA_ENV+=("SV_IOS_SIMULATOR_ENDPOINT=$SV_IOS_SIMULATOR_ENDPOINT")
+    elif [[ -n "$IOS_BRIDGE_PORT" ]]; then
+        EXTRA_ENV+=("SV_IOS_SIMULATOR_ENDPOINT=http://127.0.0.1:$IOS_BRIDGE_PORT")
+    else
+        abort "iOS bridge port not available. Bridge may have failed to start."
     fi
 fi
 
