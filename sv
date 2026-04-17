@@ -466,11 +466,12 @@ kill_chrome_pid() {
         kill "$pid" 2>/dev/null || true
         local i
         for (( i=0; i<20; i++ )); do
-            kill -0 "$pid" 2>/dev/null || return 0
+            kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
             sleep 0.1
         done
         trace "Force-killing Chrome (PID $pid)..."
         kill -9 "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
     fi
 }
 
@@ -548,11 +549,12 @@ kill_bridge_pid() {
         kill "$pid" 2>/dev/null || true
         local i
         for (( i=0; i<20; i++ )); do
-            kill -0 "$pid" 2>/dev/null || return 0
+            kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
             sleep 0.1
         done
         trace "Force-killing iOS bridge (PID $pid)..."
         kill -9 "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
     fi
 }
 
