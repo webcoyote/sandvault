@@ -2,6 +2,19 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.10.0] - 2026-04-17
+
+### Added
+- Add iOS simulator sandbox bridge for testing mobile apps in sandboxed environments ([#118](https://github.com/webcoyote/sandvault/pull/118))
+- Make AI agents aware of browser endpoint so agents can interact with the sandbox browser ([#116](https://github.com/webcoyote/sandvault/pull/116))
+
+### Changed
+- Move session files to shared workspace so users can manage and delete them directly ([#117](https://github.com/webcoyote/sandvault/pull/117))
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.9.0] - 2026-04-15
 
 ### Fixed
