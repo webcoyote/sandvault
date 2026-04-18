@@ -74,21 +74,20 @@ if [[ "$launch_ok" -eq 0 ]]; then
     fail "simctl launch HTTP error (after 5 attempts)"
 fi
 
-# TODO: This test is flakey and needs work
-## Test 3: /describe returns a non-empty accessibility tree
-# log "Test 3: describe"
-# response=""
-# for i in $(seq 1 20); do
-#     response=$(curl -sf "$EP/describe") || response=""
-#     if [[ ${#response} -gt 100 ]]; then
-#         log "  PASS (${#response} bytes, after ${i}s)"
-#         break
-#     fi
-#     if [[ $i -eq 20 ]]; then
-#         fail "/describe returned unexpected output:\n${response}"
-#     fi
-#     sleep 1
-# done
+# Test 3: /describe returns a non-empty accessibility tree
+log "Test 3: describe"
+response=""
+for i in $(seq 1 15); do
+    response=$(curl -sf "$EP/describe") || response=""
+    if [[ ${#response} -gt 100 ]]; then
+        log "  PASS (${#response} bytes, after ${i}s)"
+        break
+    fi
+    if [[ $i -eq 15 ]]; then
+        fail "/describe returned unexpected output:\n${response}"
+    fi
+    sleep 2
+done
 
 # Test 4: /view_pixels returns a path to a valid PNG file
 log "Test 4: view_pixels"
