@@ -57,12 +57,21 @@ for i in $(seq 1 90); do
 done
 
 # Test 2: /launch com.apple.Preferences (stock iOS app, always available)
+# Retry a few times — the simulator may not accept launches immediately after
+# /ready returns, especially in CI where resources are constrained.
 log "Test 2: launch com.apple.Preferences"
-if curl -sf -X POST -H 'Content-Type: application/json' \
-    -d '{"bundle_id":"com.apple.Preferences"}' "$EP/launch" >/dev/null; then
-    log "  PASS"
-else
-    fail "simctl launch HTTP error"
+launch_ok=0
+for i in $(seq 1 5); do
+    if curl -sf -X POST -H 'Content-Type: application/json' \
+        -d '{"bundle_id":"com.apple.Preferences"}' "$EP/launch" >/dev/null; then
+        launch_ok=1
+        log "  PASS (attempt $i)"
+        break
+    fi
+    sleep 2
+done
+if [[ "$launch_ok" -eq 0 ]]; then
+    fail "simctl launch HTTP error (after 5 attempts)"
 fi
 
 # TODO: This test is flakey and needs work
