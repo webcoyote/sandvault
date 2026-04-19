@@ -1793,6 +1793,9 @@ if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
         abort "iOS bridge port not available. Bridge may have failed to start."
     fi
 fi
+if [[ -n "${COLORTERM:-}" ]]; then
+    EXTRA_ENV+=("COLORTERM=$COLORTERM")
+fi
 
 if [[ "$MODE" == "ssh" ]]; then
     # Only allocate a TTY for interactive shells.
