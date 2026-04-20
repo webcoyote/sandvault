@@ -1,0 +1,36 @@
+#!/bin/bash
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+# shellcheck source=sv-tool-prompts.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sv-tool-prompts.sh"
+
+unset OPENCODE
+if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
+    if [[ ! -x "$HOME/.local/bin/opencode" ]]; then
+        echo >&2 "Installing OpenCode natively..."
+        curl -fsSL https://opencode.ai/install | XDG_BIN_DIR="$HOME/.local/bin" bash
+    fi
+    OPENCODE="$HOME/.local/bin/opencode"
+elif command -v brew &>/dev/null ; then
+    HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
+    if [[ -x "$HOMEBREW_PREFIX/bin/opencode" ]]; then
+        # Homebrew install
+        OPENCODE="$HOMEBREW_PREFIX/bin/opencode"
+    fi
+fi
+
+if [[ -z "${OPENCODE:-}" || ! -x "$OPENCODE" ]]; then
+    echo >&2 "ERROR: opencode is not installed"
+    exit 1
+fi
+
+TOOL_PROMPT=$(sv_tool_prompt)
+EXTRA_ARGS=()
+if [[ -n "$TOOL_PROMPT" ]]; then
+    EXTRA_ARGS+=(--prompt "$TOOL_PROMPT")
+fi
+
+export OPENCODE_PERMISSION='{"*":"allow"}'
+echo >&2 "$USER: running opencode with OPENCODE_PERMISSION='${OPENCODE_PERMISSION}'"
+exec "$OPENCODE" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"

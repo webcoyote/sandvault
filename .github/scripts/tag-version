@@ -1,0 +1,35 @@
+#!/bin/bash
+# Tag the current version if it hasn't been tagged yet.
+# Called by CI after a successful build on the default branch.
+# Exits 0 (no-op) if the tag already exists — this is the normal case
+# when a push doesn't change the version.
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Note: branch guard is handled by the CI workflow (github.ref == 'refs/heads/main').
+# Do not duplicate it here — detached-HEAD checkouts in CI break git-based detection.
+
+# --- Read current version ---
+CURRENT_VERSION=$(awk -F'"' '/^readonly VERSION="[0-9.]*"/ {print $2; exit}' ./sv)
+if [[ -z "$CURRENT_VERSION" ]]; then
+  echo >&2 "Error: Could not parse version"
+  exit 1
+fi
+
+TAG_NAME="v$CURRENT_VERSION"
+
+# --- No-op if already tagged ---
+if git rev-parse -q --verify "refs/tags/$TAG_NAME" >/dev/null 2>&1; then
+  echo "Tag $TAG_NAME already exists — nothing to do."
+  exit 0
+fi
+
+# --- Create and push the tag on HEAD (the merge commit) ---
+echo "Tagging $TAG_NAME on $(git rev-parse --short HEAD)"
+git config user.name  "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+git tag -a "$TAG_NAME" -m "Version $CURRENT_VERSION"
+git push origin "$TAG_NAME"

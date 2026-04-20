@@ -89,6 +89,7 @@ wait_for_slot() {
 queue_suite() {
     local dir="$1"
     local tests="$2"
+    local sv_flags="${3:-}"
     local id
 
     ((TOTAL++)) || true
@@ -106,8 +107,8 @@ queue_suite() {
     wait_for_slot
     (
         set +e
-        # Run the tests in a sandbox
-        "../sv" shell -- "$tests" > "$RESULTS_DIR/$id.output" 2>&1
+        # shellcheck disable=SC2086
+        "../sv" $sv_flags --no-build shell -- "$tests" > "$RESULTS_DIR/$id.output" 2>&1
         status=$?
         printf '%s' "$status" > "$RESULTS_DIR/$id.status"
     ) &
@@ -157,13 +158,14 @@ collect_results() {
     done
 }
 
-shopt -s nullglob
-for dir in *; do
-    [[ -d "$dir" ]] || continue
-    tests="$SCRIPT_DIR/$dir/scripts/tests"
-    queue_suite "$dir" "$tests"
-done
-shopt -u nullglob
+###############################################################################
+# Run tests
+###############################################################################
+
+queue_suite "swift"         "$SCRIPT_DIR/swift/scripts/tests"
+queue_suite "xcodebuild"    "$SCRIPT_DIR/xcodebuild/scripts/tests"
+queue_suite "browser"       "$SCRIPT_DIR/browser/scripts/tests"       "--browser"
+queue_suite "ios-simulator" "$SCRIPT_DIR/ios-simulator/scripts/tests" "--ios"
 collect_results
 
 if [[ "$VERBOSE" -ne 0 ]]; then

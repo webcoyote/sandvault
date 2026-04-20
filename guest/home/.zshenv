@@ -1,7 +1,11 @@
 # Perform sandvault setup once per session
 if [[ -n "${SV_SESSION_ID:-}" ]]; then
-    sv_session_lock="/tmp/sandvault-configure-$SV_SESSION_ID"
-    trap 'rm -f "/tmp/sandvault-configure-$SV_SESSION_ID" 2>/dev/null || true' EXIT
+    # Use $SHARED_WORKSPACE/tmp for the lock file so the host user can delete it
+    # during session cleanup. /tmp has the sticky bit set, which prevents
+    # users from deleting files they don't own.
+    sv_session_dir="${SHARED_WORKSPACE:-}/tmp"
+    mkdir -p "$sv_session_dir"
+    sv_session_lock="$sv_session_dir/sv-session-$SV_SESSION_ID"
     if [[ ! -e "$sv_session_lock" ]]; then
         : > "$sv_session_lock"
 

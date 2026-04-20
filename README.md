@@ -1,25 +1,31 @@
-# SandVault - Run Claude Code, OpenAI Codex, Google Gemini and shell commands safely in a sandboxed macOS user account
+# SandVault - Run AI agents and shell commands in a sandboxed macOS user account. Sandboxed web and app testing with Chrome and iOS Simulator.
 
-![sandvault logo](https://webcoyote.github.io/images/shared/sandvault/sandvault-logo.jpg)
-
----
-
+<img src="https://www.codeofhonor.com/images/projects/sandvault.webp" align="left" width="200px"/>
 SandVault (`sv`) manages a limited user account to sandbox shell commands and AI agents, providing a lightweight alternative to application isolation using virtual machines.
 
-## Features
+</br>
+</br>
 
-- **AI ready** - Includes Claude Code, OpenAI Codex, Google Gemini
+- **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini
+- **Web and iOS automation** - sandbox access to Chrome and iOS Simulator
 - **Fast context switching** - No VM overhead; instant user switching
 - **Passwordless** - switch accounts without a prompt (after setup)
 - **Shared workspace** - joint access to `/Users/Shared/sv-$USER`
+- **Defense in depth** - limited user account + `sandbox-exec`
 - **Clean uninstall** - Complete removal with `sv uninstall`
 
+</br>
+</br>
+
+---
 
 ## Quick Links
 
-1. To run `xcodebuild` or `swift` see [Sandboxing xcodebuild and swift](#Sandboxing-xcodebuild-and-swift) for details.
-2. To run other sandboxed applications inside sandvault, use the `-x` option. See [Sandboxing other apps](#Sandboxing-other-apps) for details.
-3. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
+0. Run [Browser Automation](#Browser-Automation) from within the sandbox that can be used for testing web interactions.
+1. Run [iOS Simulator Automation](#iOS-Simulator-Automation) from within the sandbox that can be used for iOS app testing.
+2. To run `xcodebuild` or `swift` see [Sandboxing xcodebuild and swift](#Sandboxing-xcodebuild-and-swift) for details.
+3. To run other sandboxed applications inside sandvault, use the `-x` option. See [Sandboxing other apps](#Sandboxing-other-apps) for details.
+4. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
 
 
 ## Security Model
@@ -76,6 +82,10 @@ Install via git:
 # shortcut: sv co
   sv codex
 
+# Run OpenCode in the sandbox
+# shortcut: sv o
+  sv opencode
+
 # Run Google Gemini in the sandbox
 # shortcut: sv g
   sv gemini
@@ -88,12 +98,12 @@ Install via git:
 
 ## Connect via SSH
 
-The default mode for sandvault runs commands as a limited user (basically `sudo -u sandbox-$USER COMMAND`). Sandvault also configures the limited sandvault account so that you can run commands via SSH (basically `ssh sandbox-$USER@$HOSTNAME`), and everything works the same. Use the `-s` or `--ssh` option to use SSH mode with `sv`, or use `tmux` or `screen` (for users so inclined).
+The default mode for sandvault runs commands as a limited user (basically `sudo -u sandbox-$USER COMMAND`). Sandvault also configures the limited sandvault account so that you can run commands via SSH (basically `ssh sandbox-$USER@$HOSTNAME`), and everything works the same. Use the `-s` or `--ssh` option to use SSH mode with `sv`, or use `tmux` or `screen` for users so inclined.
 
 ```bash
 # Run using impersonation
 # sv COMMAND
-  sv codex
+  sv gemini
 
 # Run using ssh
 # sv -s/--ssh COMMAND
@@ -104,6 +114,13 @@ The default mode for sandvault runs commands as a limited user (basically `sudo 
 ## Advanced Commands
 
 ```bash
+# Run AI agent with optional arguments
+# Usage:
+#   sv <agent> [PATH] [-- AGENT_ARGUMENTS]
+# Example:
+  sv gemini -- --continue
+
+
 # Run shell command in sandvault and exit
 # Usage:
 #  sv shell [PATH] -- [SHELL_COMMAND]
@@ -111,11 +128,15 @@ The default mode for sandvault runs commands as a limited user (basically `sudo 
   sv shell /Users -- pwd      # output: /Users
 
 
-# Run AI agent with optional arguments
+# Send input via stdin
 # Usage:
-#   sv <agent> [PATH] [-- AGENT_ARGUMENTS]
-# Example:
-  sv gemini -- --continue
+#   <producer> | sv shell [PATH] [-- SHELL_COMMAND]
+# Examples:
+  echo "pwd ; exit" | sv shell /Users       # output: /Users
+
+  echo ABC | sv shell -- tr 'A-Z' 'a-z'     # output: abc
+
+  cat PROMPT.md | sv gemini
 
 
 # Clone local/remote Git repository into /Users/sandvault-$USER/repositories/<git-repository> and open there
@@ -133,18 +154,62 @@ For local Git repositories, sandvault also wires remotes:
 
 - Your local Git repository gets/updates remote `sandvault` -> `/Users/sandvault-$USER/repositories/<git-repository>`
 - This lets you run `git fetch sandvault` from the original local Git repository to pull commits made in the sandvault Git repository.
-
-
-# Send input via stdin
-# Usage:
-#   <producer> | sv shell [PATH] [-- SHELL_COMMAND]
-# Examples:
-  echo "pwd ; exit" | sv shell /Users       # output: /Users
-
-  echo ABC | sv shell -- tr 'A-Z' 'a-z'     # output: abc
-
-  cat PROMPT.md | sv gemini
 ```
+
+
+## Native Install
+
+By default, SandVault installs AI tools via Homebrew on the host side. With `--native-install` (`-N`), tools are instead installed inside the sandbox using their own installers:
+
+- **Claude Code** — installed via `curl -fsSL https://claude.ai/install.sh | bash`
+- **Codex** — installed via `npm install -g @openai/codex`
+- **OpenCode** — installed via `curl -fsSL https://opencode.ai/install | bash`
+- **Gemini** — installed via `npm install -g @google/gemini-cli`
+
+Tools are installed on first run and reused on subsequent runs.
+
+```bash
+# Install and run Claude Code natively
+sv --native-install claude
+sv -N claude
+
+# Works with all AI agents
+sv -N codex
+sv -N opencode
+sv -N gemini
+```
+
+To make native install the default, set `SANDVAULT_ARGS`:
+
+```bash
+# Add to your shell profile (~/.zshrc, ~/.bashrc, etc.)
+export SANDVAULT_ARGS="--native-install"
+
+# Now 'sv claude' uses native install automatically
+sv claude
+```
+
+
+## Environment Variables
+
+Set `SANDVAULT_ARGS` to supply default arguments that are prepended to the command line:
+
+```bash
+# Add to your shell profile (~/.zshrc, ~/.bashrc, etc.)
+export SANDVAULT_ARGS="--verbose --ssh"
+
+# Now these are equivalent:
+sv claude
+sv --verbose --ssh claude
+```
+
+Shell quoting is supported, so arguments with spaces work:
+
+```bash
+export SANDVAULT_ARGS='--clone "my project"'
+```
+
+Explicit command-line arguments are appended after `SANDVAULT_ARGS`, so they are processed afterwards.
 
 
 ## Maintenance Commands
@@ -223,7 +288,7 @@ xcodebuild \
 
 ### Sandboxing other apps
 
-If the app you intend to run does not support disabling it use of sandbox-exec like `xcodebuild` and `swift` you can run andvault without utilizing `sandbox-exec`:
+If the app you intend to run does not support disabling the use of sandbox-exec like `xcodebuild` and `swift` you can run sandvault without `sandbox-exec`:
 
 ```bash
 # Disable use of sandbox-exec (app still runs as sandvault user) using -x / --no-sandbox
@@ -306,6 +371,108 @@ Next time you run sandvault, your files will be copied to the sandvault user hom
 > **Note:** Earlier versions of sandvault supported configuration files in `guest/home/user/`, which didn't work for Homebrew installations. Consequently, this is no longer supported, and you'll get an error message asking you to move `guest/home/user` to `/Users/Shared/sv-${USER}/user/`.
 
 
+## Browser Automation
+
+SandVault supports headless Chrome for browser automation from within the sandbox. Chrome runs on the host side and the sandbox connects to it via the Chrome DevTools Protocol (CDP) over localhost.
+
+### Usage
+
+```bash
+# Launch with browser support
+sv --browser claude
+sv --browser shell
+```
+
+Inside the sandbox, the `SV_BROWSER_ENDPOINT` environment variable contains the CDP endpoint URL (e.g. `http://127.0.0.1:52858`).
+
+```javascript
+// Playwright
+const browser = await chromium.connectOverCDP(process.env.SV_BROWSER_ENDPOINT);
+
+// Puppeteer
+const browser = await puppeteer.connect({ browserURL: process.env.SV_BROWSER_ENDPOINT });
+```
+
+From the host, you can query the endpoint URL:
+```bash
+# Prints the CDP endpoint URL (or errors if browser is unavailable)
+sv --endpoint
+```
+
+See also [`./tests/browser/*.js`](./tests/browser) for examples of using Playwright and Puppeteer. See [`guest/home/bin/prompts/browser.md`](./guest/home/bin/prompts/browser.md) for prompt.
+
+### How it works
+
+- Chrome is launched headless on the host side with a dynamic port (`--remote-debugging-port=0`), and sandvault connections via `localhost`
+- Chrome stays running across sandbox sessions and is stopped when the last `--browser` session exits
+- Chrome uses an isolated user data directory, separate from your personal Chrome profile
+
+### Requirements
+
+Google Chrome or Chromium must be installed in `/Applications/`.
+
+
+## iOS Simulator Automation
+
+SandVault can expose the iOS Simulator to sandboxed AI agents for iOS app testing. The simulator runs on the host (it is a GUI app and cannot run inside the sandbox), and an HTTP bridge on localhost translates sandbox-side requests into `xcrun simctl` and [`iosef`](https://github.com/riwsky/iosef) invocations.
+
+### Usage
+
+```bash
+# Launch with iOS Simulator support
+sv --ios claude
+sv --ios shell
+```
+
+Add `--ios-gui` to also show the Simulator.app window — useful when debugging interactively or watching an agent's actions:
+
+```bash
+sv --ios-gui shell
+```
+
+Simulator.app is left running on session exit so that other simulators (yours or other tools') aren't disrupted.
+
+Inside the sandbox, the `SV_IOS_SIMULATOR_ENDPOINT` environment variable points at the HTTP bridge (e.g. `http://127.0.0.1:52861`).
+
+```bash
+# Check if simulator is ready
+curl $SV_IOS_SIMULATOR_ENDPOINT/ready
+
+# Read the accessibility tree
+curl $SV_IOS_SIMULATOR_ENDPOINT/describe
+
+# Tap a button by accessibility name
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"name":"Sign In"}' \
+  $SV_IOS_SIMULATOR_ENDPOINT/tap
+
+# Launch an app by bundle id
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"bundle_id":"com.apple.Preferences"}' \
+  $SV_IOS_SIMULATOR_ENDPOINT/launch
+
+# Save a screenshot as JPG (point resolution)
+curl -o low_res.jpg $SV_IOS_SIMULATOR_ENDPOINT/view
+
+# Save a screenshot as PNG (pixel resolution)
+curl -o high_res.png $SV_IOS_SIMULATOR_ENDPOINT/view_pixels
+```
+
+See [`guest/home/bin/prompts/ios-simulator.md`](./guest/home/bin/prompts/ios-simulator.md) for the full list of endpoints. This file is automatically included in your AI agent prompt when using --ios/--ios-gui. See [`tests/ios-simulator/scripts/tests`](./tests/ios-simulator/scripts/tests) for a runnable example.
+
+### How it works
+
+- A fresh scratch simulator (named `sandvault-<session-id>`) is created and booted on the host for each `--ios` session, and deleted on exit.
+- A Python HTTP bridge (`helpers/sv-ios-bridge`) listens on a dynamic localhost port and fronts a whitelisted set of `iosef` and `xcrun simctl` subcommands.
+- `.app` bundles passed to `/install` must live under `/Users/Shared/` (so the sandbox user can already access them); the bridge rejects paths outside that tree.
+- All subprocess calls use explicit argv lists, not shells.
+
+### Requirements
+
+- Xcode with at least one iOS runtime installed (Xcode → Settings → Platforms).
+- Homebrew (used to install `uv`, which installs `iosef`). sandvault installs both automatically on first use.
+
+
 ## Running GUI Applications
 
 TL;DR: Sorry, macOS security limitations prevent this from working.
@@ -314,7 +481,7 @@ It would be great to be able to run GUI applications (e.g. browsers, Claude Desk
 
 The issue seems to be that an application cannot report to a WindowServer that's owned by a different user.
 
-Internet posts suggest it's possible using `sudo su` and `sudo launchctl bsexec`, but those answers are from long ago and it seems likely that Apple improvements to macOS security have closed those doors.
+Internet posts suggest it's possible using `sudo su`, `sudo launchctl asuser`, and `sudo launchctl bsexec`, but those answers are from long ago and it seems likely that Apple improvements to macOS security have closed those doors.
 
 In the event you do find a solution, send a PR please :)
 
@@ -327,7 +494,10 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Provides meaningful isolation without too much complexity
 - Runs Claude Code with `--dangerously-skip-permissions`
 - Runs OpenAI Codex with `--dangerously-bypass-approvals-and-sandbox`
+- Runs OpenCode with `OPENCODE_PERMISSION='{"*":"allow"}'`
 - Runs Google Gemini with `--yolo`
+- Automates Chrome for web testing (via Chrome DevTools Protocol)
+- Automated iOS Simulator for app testing (via `xcrun simctl`, and `iosef`)
 - Maintains a clean separation between trusted and untrusted code
 
 SandVault uses macOS's Unix heritage and user account system to create a simple but effective sandbox.
@@ -362,10 +532,12 @@ This project builds on the great works of other open-source authors:
 
 - [Claude](https://www.anthropic.com/claude) - AI coding assistant
 - [Codex](https://openai.com/codex/) - AI coding assistant
+- [CMux](https://github.com/manaflow-ai/cmux) - an awesome terminal
+- [Ghostty](https://ghostty.org) - an awesome terminal & terminal library
 - [Homebrew](https://brew.sh): 🍺 The missing package manager for macOS (or Linux)
 - [Shellcheck](https://www.shellcheck.net): finds bugs in your shell scripts
 - [uv](https://docs.astral.sh/uv/): An extremely fast Python package and project manager, written in Rust
 - [Claude Code Hooks Mastery](https://github.com/disler/claude-code-hooks-mastery): Quickly master how to use Claude Code hooks to add deterministic (or non-deterministic) control over Claude Code's behavior
 - [StatusLine](https://gist.github.com/dhkts1/55709b1925b94aec55083dd1da9d8f39): project status information for Claude Code
 
-... as well as GNU, BSD, Linux, Git, Sqlite, Node, Python, netcat, jq, and more. "We stand upon the shoulders of giants."
+... as well as GNU, BSD, Linux, curl, Git, Sqlite, Node, Python, netcat, jq, and more. "We stand upon the shoulders of giants."

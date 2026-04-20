@@ -58,9 +58,10 @@ if [[ ! -f "$LOGIN_KEYCHAIN" ]]; then
     security create-keychain -p '' "$LOGIN_KEYCHAIN"
 fi
 
-# Unlock the keychain to avoid password dialogs
+# Unlock the keychain and disable auto-lock to avoid password dialogs
 debug "Unlocking keychain..."
 security unlock-keychain -p '' "$LOGIN_KEYCHAIN"
+security set-keychain-settings "$LOGIN_KEYCHAIN"
 
 
 ###############################################################################
@@ -92,7 +93,7 @@ defaults write com.apple.dt.Xcode IDECustomDerivedDataLocation ".DerivedData"
 ###############################################################################
 # Copy user directory contents to $HOME
 ###############################################################################
-# Use system rsync to avoid Homebrew dependencie; Homebrew rsync has different options
+# Use system rsync to avoid Homebrew dependencies; Homebrew rsync has different options
 if [[ -n "${SHARED_WORKSPACE:-}" ]]; then
     debug "Copying $SHARED_WORKSPACE/user contents to $HOME"
     mkdir -p "$SHARED_WORKSPACE/user"
@@ -110,4 +111,20 @@ if [[ -n "${SHARED_WORKSPACE:-}" ]]; then
         --exclude='.zlogin' \
         --exclude='.zlogout' \
         "$SHARED_WORKSPACE/user/" "$HOME/"
+fi
+
+
+###############################################################################
+# Run config merge scripts
+#
+# These scripts are written by sv into $SHARED_WORKSPACE/setup/ and merge
+# required settings into config files (e.g. .gitconfig, .claude.json) without
+# overwriting agent/tool modifications from previous sessions.
+###############################################################################
+if [[ -n "${SHARED_WORKSPACE:-}" && -d "$SHARED_WORKSPACE/setup" ]]; then
+    for _setup_script in "$SHARED_WORKSPACE/setup/"*; do
+        [[ -x "$_setup_script" ]] || continue
+        debug "Running setup script: $(basename "$_setup_script")"
+        "$_setup_script" >&2
+    done
 fi

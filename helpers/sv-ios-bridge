@@ -1,0 +1,604 @@
+#!/usr/bin/env python3
+"""
+sv-ios-bridge: HTTP bridge from the sandvault sandbox to the host-side
+iOS Simulator.
+
+Listens on 127.0.0.1:<port> and exposes a whitelisted set of endpoints that
+shell out to `xcrun simctl` (lifecycle) and `iosef` (UI automation) against a
+single simulator UDID.
+
+Usage:
+    sv-ios-bridge --udid <UDID> [--host 127.0.0.1] [--port 0]
+
+On startup, prints exactly one line to stdout:
+
+    Bridge listening on http://<host>:<port>
+
+so the parent process (`sv`) can parse the actual port when --port=0.
+"""
+
+import argparse
+import atexit
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+
+# Default per-call timeout for every subprocess. Long enough for log scrapes
+# and the usual simctl/iosef calls, short enough that a hung tool doesn't
+# wedge the bridge forever. Boot is a separate, longer budget (see below)
+# because cold runtimes routinely take longer than this.
+SUBPROCESS_TIMEOUT_SEC = 120
+
+# `simctl bootstatus -b` blocks server-side until the simulator finishes
+# booting. Cold first-boot of a freshly installed iOS runtime can exceed the
+# normal 120s budget, so give it its own (much larger) timeout. If even this
+# fires, something is genuinely stuck and READY_ERROR is the right state.
+BOOT_TIMEOUT_SEC = 600
+
+# Request bodies are intentionally small (JSON kwargs). Cap to avoid DoS from
+# a sandbox-side bug or compromise.
+MAX_BODY_BYTES = 1 * 1024 * 1024
+
+# Allowed path prefixes for file paths passed in via request bodies
+# (e.g. /install body.app_path). Restricts the bridge to files the
+# sandbox user can already see, preventing it from being coerced into installing
+# arbitrary host-side bundles.
+ALLOWED_PATH_PREFIXES = ("/Users/Shared/",)
+
+BUNDLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+# URL must start with an http(s) or an app-style custom scheme followed by
+# "://". This rejects schemes that can reach outside the simulator (file:,
+# data:, javascript:, about:, etc.) while still permitting the common case
+# of deep-linking into an app via its own scheme.
+URL_SCHEME_RE = re.compile(r"^(https?|[A-Za-z][A-Za-z0-9+.-]*)://", re.IGNORECASE)
+# Schemes that can trigger loads outside the simulator's app-URL dispatcher
+# or are otherwise high-risk. Checked separately from URL_SCHEME_RE so the
+# rejection message stays explicit.
+BLOCKED_URL_SCHEMES = frozenset({"file", "data", "javascript", "about"})
+# iosef describes elements by role/name/identifier strings; keep them printable
+# and bounded. Newlines would confuse logs and some shells even though we use
+# argv, not a shell.
+SIMPLE_STR_RE = re.compile(r"^[\x20-\x7e]{1,512}$")
+
+UDID = ""  # Set by main() before the server starts.
+
+# Readiness state, updated by the boot-watcher thread.
+# _ready_event is set once boot completes (success or failure).
+# READY_ERROR is non-empty if the watcher gave up (e.g. boot failed).
+_ready_event = threading.Event()
+READY_ERROR = ""
+
+
+def iosef_cmd():
+    """Return the argv prefix to invoke iosef, resolving uv-tool-managed installs."""
+    # Prefer a bare `iosef` on PATH first (uv tool install puts one there).
+    # Fall back to `uv tool run iosef` if only uv is available. This is probed
+    # each call so that a late install is picked up without restart.
+    if _which("iosef"):
+        return ["iosef"]
+    if _which("uv"):
+        return ["uv", "tool", "run", "iosef"]
+    raise RuntimeError("iosef not found on PATH and uv not available")
+
+
+def _which(name):
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        p = os.path.join(d, name)
+        if os.access(p, os.X_OK) and os.path.isfile(p):
+            return p
+    return None
+
+
+def run_argv(argv, stdin_bytes=None, timeout=SUBPROCESS_TIMEOUT_SEC):
+    """Run argv with no shell; return (exit_code, stdout_bytes, stderr_str)."""
+    try:
+        proc = subprocess.run(
+            argv,
+            input=stdin_bytes,
+            capture_output=True,
+            shell=False,
+            timeout=timeout,
+            check=False,
+        )
+        return proc.returncode, proc.stdout, proc.stderr.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired as e:
+        return 124, e.stdout or b"", f"timeout after {timeout}s"
+    except FileNotFoundError as e:
+        return 127, b"", f"executable not found: {e.filename}"
+
+
+def resolve_allowed_path(p):
+    """Resolve p to a realpath under ALLOWED_PATH_PREFIXES, or None if rejected.
+
+    Returns the realpath (which is what callers should pass to subprocesses,
+    so a symlink swap between validation and use can't escape the prefix).
+    """
+    if not isinstance(p, str) or not p:
+        return None
+    if not os.path.isabs(p):
+        return None
+    real = os.path.realpath(p)
+    for prefix in ALLOWED_PATH_PREFIXES:
+        if real == prefix.rstrip("/") or real.startswith(prefix):
+            return real
+    return None
+
+
+def validate_bundle_id(b):
+    return isinstance(b, str) and bool(BUNDLE_ID_RE.match(b))
+
+
+def validate_url(u):
+    if not isinstance(u, str) or not (0 < len(u) <= 2048):
+        return False
+    m = URL_SCHEME_RE.match(u)
+    if not m:
+        return False
+    scheme = m.group(1).lower()
+    return scheme not in BLOCKED_URL_SCHEMES
+
+
+def validate_simple_str(s):
+    return isinstance(s, str) and bool(SIMPLE_STR_RE.match(s))
+
+
+def validate_coord(n):
+    return isinstance(n, (int, float)) and -10000 <= n <= 10000
+
+
+def _image_ext(path):
+    """Return a file extension (without dot) matching the image format.
+
+    Checks the first few magic bytes; falls back to 'png' if unrecognized.
+    """
+    try:
+        with open(path, "rb") as f:
+            header = f.read(8)
+    except OSError:
+        return "png"
+    if header[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if header[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    return "png"
+
+
+def watch_boot(udid):
+    """Block until the simulator reports Booted, then signal readiness.
+
+    Runs in a background thread. Uses `xcrun simctl bootstatus -b` which
+    blocks server-side until boot completes (or fails).
+    """
+    global READY_ERROR
+    rc, _stdout, stderr = run_argv(
+        ["xcrun", "simctl", "bootstatus", udid, "-b"],
+        timeout=BOOT_TIMEOUT_SEC,
+    )
+    if rc != 0:
+        READY_ERROR = stderr.strip() or f"bootstatus exited {rc}"
+    _ready_event.set()
+
+
+class Handler(BaseHTTPRequestHandler):
+    # Silence the default noisy one-line-per-request stderr log.
+    def log_message(self, format, *args):
+        if os.environ.get("SV_IOS_BRIDGE_DEBUG"):
+            sys.stderr.write("[bridge] " + format % args + "\n")
+
+    # --- helpers ---------------------------------------------------------
+
+    def _wants_json(self):
+        """Check if the client wants JSON. Priority: ?format= > Accept header > default (text)."""
+        u = urlparse(self.path)
+        qs = parse_qs(u.query)
+        fmt = (qs.get("format") or [None])[0]
+        if fmt == "json":
+            return True
+        if fmt == "text":
+            return False
+        accept = self.headers.get("Accept", "")
+        if "application/json" in accept:
+            return True
+        return False
+
+    def _send_json(self, status, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_text(self, status, text):
+        body = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_error(self, status, message, **extra):
+        if self._wants_json():
+            obj = {"ok": False, "error": message}
+            obj.update(extra)
+            self._send_json(status, obj)
+        else:
+            self._send_text(status, message)
+
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length < 0 or length > MAX_BODY_BYTES:
+            return None, "request body too large"
+        raw = self.rfile.read(length) if length else b""
+        if not raw:
+            return {}, None
+        try:
+            return json.loads(raw.decode("utf-8")), None
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            return None, f"invalid JSON body: {e}"
+
+    def _send_shell_result(self, rc, stdout, stderr):
+        """Send the result of a shell command in the negotiated format."""
+        try:
+            out_text = stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            out_text = stdout.decode("utf-8", "replace")
+        if self._wants_json():
+            self._send_json(200 if rc == 0 else 500, {
+                "ok": rc == 0,
+                "exit_code": rc,
+                "stdout": out_text,
+                "stderr": stderr,
+            })
+        elif rc == 0:
+            self._send_text(200, out_text.strip() if out_text.strip() else "OK")
+        else:
+            self._send_text(500, stderr.strip() if stderr.strip() else f"command failed (exit {rc})")
+
+    def _iosef(self, *args):
+        # iosef accepts `--device <udid>` (or its `--udid` alias) as a
+        # per-subcommand option — it must appear AFTER the subcommand name,
+        # not before it. args[0] is the subcommand; everything else is its
+        # options.
+        if not args:
+            self._send_error(500, "no iosef subcommand specified")
+            return
+        subcommand = args[0]
+        rest = list(args[1:])
+        try:
+            # `--local` makes iosef use ./.iosef/state.json (rooted in this
+            # bridge's per-process scratch directory; see main()) so multiple
+            # parallel bridges don't trample each other's state.
+            argv = iosef_cmd() + [subcommand, "--local", "--device", UDID] + rest
+        except RuntimeError as e:
+            self._send_error(500, str(e))
+            return
+        rc, stdout, stderr = run_argv(argv)
+        self._send_shell_result(rc, stdout, stderr)
+
+    def _simctl(self, *args):
+        argv = ["xcrun", "simctl"] + list(args[:1]) + [UDID] + list(args[1:])
+        rc, stdout, stderr = run_argv(argv)
+        self._send_shell_result(rc, stdout, stderr)
+
+    # --- routing ---------------------------------------------------------
+
+    def _ensure_ready(self):
+        """Reject requests until the simulator is booted.
+
+        Returns True if the request may proceed, False if a 503 was sent.
+        /ready bypasses this check.
+        """
+        if _ready_event.is_set() and not READY_ERROR:
+            return True
+        if READY_ERROR:
+            self._send_error(
+                503, "simulator failed to boot",
+                detail=READY_ERROR,
+            )
+            return False
+        self._send_error(
+            503, "simulator not ready yet",
+            detail="poll /ready until it returns 200",
+        )
+        return False
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        path = u.path
+        qs = parse_qs(u.query)
+
+        if path == "/ready":
+            return self._ready()
+        if not self._ensure_ready():
+            return
+        if path == "/describe":
+            args = ["describe", "--json"]
+            for key in ("x", "y"):
+                if key in qs:
+                    args += [f"--{key}", qs[key][0]]
+            if "depth" in qs:
+                try:
+                    depth = int(qs["depth"][0])
+                except ValueError:
+                    return self._send_error(400, "invalid depth")
+                if not (0 <= depth <= 20):
+                    return self._send_error(400, "depth out of range")
+                args += ["--depth", str(depth)]
+            return self._iosef(*args)
+        if path == "/view":
+            return self._iosef_view()
+        if path == "/view_pixels":
+            return self._screenshot()
+        if path == "/log":
+            return self._simctl_log(qs)
+        return self._send_error(404, f"unknown path: {path}")
+
+    def do_POST(self):
+        if not self._ensure_ready():
+            return
+        path = urlparse(self.path).path
+        body, err = self._read_body()
+        if err is not None:
+            return self._send_error(400, err)
+
+        if path == "/tap":
+            return self._iosef_tap(body)
+        if path == "/type":
+            return self._iosef_type(body)
+        if path == "/swipe":
+            return self._iosef_swipe(body)
+        if path == "/install":
+            return self._simctl_install(body)
+        if path == "/uninstall":
+            return self._simctl_uninstall(body)
+        if path == "/launch":
+            return self._simctl_launch(body)
+        if path == "/terminate":
+            return self._simctl_terminate(body)
+        if path == "/openurl":
+            return self._simctl_openurl(body)
+        return self._send_error(404, f"unknown path: {path}")
+
+    # --- endpoint implementations ----------------------------------------
+
+    def _ready(self):
+        """Returns OK when the simulator is booted, 503 otherwise."""
+        if _ready_event.is_set() and not READY_ERROR:
+            if self._wants_json():
+                self._send_json(200, {"ok": True})
+            else:
+                self._send_text(200, "OK")
+        elif READY_ERROR:
+            self._send_error(503, f"simulator failed to boot: {READY_ERROR}")
+        else:
+            self._send_error(503, "simulator not ready yet")
+
+    def _iosef_view(self):
+        # `iosef view` saves a screenshot to a temp file and prints its path
+        # to stdout at iOS-point resolution.
+        # Do NOT pass --output; it doesn't work when the Simulator window
+        # is hidden (headless boot).
+        try:
+            argv = iosef_cmd() + ["view", "--local", "--device", UDID]
+        except RuntimeError as e:
+            return self._send_error(500, str(e))
+        rc, stdout, stderr = run_argv(argv)
+        if rc != 0 or not stdout:
+            return self._send_error(
+                500, "iosef view failed",
+                stderr=stderr,
+                stdout=stdout.decode("utf-8", "replace") if stdout else "",
+            )
+        # stdout contains the path to the temp screenshot file.
+        # Move it into our scratch dir with a consistent name.
+        src_path = stdout.decode("utf-8").strip().split("\n")[0]
+        if not os.path.exists(src_path):
+            return self._send_error(
+                500, f"iosef view output file not found: {src_path}",
+            )
+        # Detect actual image format from magic bytes so the file extension
+        # is correct.  iosef may produce JPEG despite no explicit guarantee.
+        ext = _image_ext(src_path)
+        out_path = os.path.join(
+            os.getcwd(), f"screenshot-view-{uuid.uuid4().hex}.{ext}"
+        )
+        try:
+            os.rename(src_path, out_path)
+        except OSError:
+            # rename fails across filesystems; fall back to copy + delete
+            shutil.copy2(src_path, out_path)
+            os.unlink(src_path)
+        if self._wants_json():
+            self._send_json(200, {
+                "ok": True, "exit_code": 0,
+                "stdout": out_path, "stderr": "",
+            })
+        else:
+            self._send_text(200, out_path)
+
+    def _screenshot(self):
+        # Use `xcrun simctl io <UDID> screenshot <path>` for /view_pixels.
+        # This captures from the simulator framebuffer directly at native
+        # pixel resolution (3× points) and works headless — no visible
+        # Simulator.app window required.
+        # Save to the bridge scratch dir (not tmp) so the agent can read it.
+        out_path = os.path.join(
+            os.getcwd(), f"screenshot-pixels-{uuid.uuid4().hex}.png"
+        )
+        argv = ["xcrun", "simctl", "io", UDID, "screenshot", out_path]
+        rc, stdout, stderr = run_argv(argv)
+        if rc != 0 or not os.path.exists(out_path):
+            return self._send_error(
+                500, "screenshot failed",
+                stderr=stderr,
+                stdout=stdout.decode("utf-8", "replace"),
+            )
+        if self._wants_json():
+            self._send_json(200, {
+                "ok": True, "exit_code": 0,
+                "stdout": out_path, "stderr": "",
+            })
+        else:
+            self._send_text(200, out_path)
+
+    def _iosef_tap(self, body):
+        # Accept either {x, y} coordinates or a {name|identifier|role} selector.
+        args = ["tap"]
+        if "x" in body or "y" in body:
+            if not (validate_coord(body.get("x")) and validate_coord(body.get("y"))):
+                return self._send_error(400, "x and y must be numbers")
+            args += ["--x", str(body["x"]), "--y", str(body["y"])]
+        else:
+            matched = False
+            for key in ("name", "identifier", "role"):
+                if key in body:
+                    if not validate_simple_str(body[key]):
+                        return self._send_error(400, f"invalid {key}")
+                    args += [f"--{key}", body[key]]
+                    matched = True
+            if not matched:
+                return self._send_error(400, "provide x+y or name/identifier/role")
+        return self._iosef(*args)
+
+    def _iosef_type(self, body):
+        text = body.get("text")
+        if not isinstance(text, str) or not text or len(text) > 4096:
+            return self._send_error(400, "text required (max 4096 chars)")
+        return self._iosef("type", "--text", text)
+
+    def _iosef_swipe(self, body):
+        for key in ("from_x", "from_y", "to_x", "to_y"):
+            if not validate_coord(body.get(key)):
+                return self._send_error(400, f"{key} must be a number")
+        args = [
+            "swipe",
+            "--x-start", str(body["from_x"]),
+            "--y-start", str(body["from_y"]),
+            "--x-end", str(body["to_x"]),
+            "--y-end", str(body["to_y"]),
+        ]
+        return self._iosef(*args)
+
+    def _simctl_install(self, body):
+        app_path = body.get("app_path")
+        real_path = resolve_allowed_path(app_path)
+        if real_path is None:
+            return self._send_error(
+                400, "app_path must be an absolute path under /Users/Shared/"
+            )
+        if not os.path.exists(real_path):
+            return self._send_error(400, "app_path does not exist")
+        # Pass the realpath to simctl so a symlink swap between the
+        # prefix check and the install call can't redirect the install
+        # target outside the allowed prefix.
+        return self._simctl("install", real_path)
+
+    def _simctl_uninstall(self, body):
+        b = body.get("bundle_id")
+        if not validate_bundle_id(b):
+            return self._send_error(400, "invalid bundle_id")
+        return self._simctl("uninstall", b)
+
+    def _simctl_launch(self, body):
+        b = body.get("bundle_id")
+        if not validate_bundle_id(b):
+            return self._send_error(400, "invalid bundle_id")
+        return self._simctl("launch", b)
+
+    def _simctl_terminate(self, body):
+        b = body.get("bundle_id")
+        if not validate_bundle_id(b):
+            return self._send_error(400, "invalid bundle_id")
+        return self._simctl("terminate", b)
+
+    def _simctl_openurl(self, body):
+        url = body.get("url")
+        if not validate_url(url):
+            return self._send_error(400, "invalid url")
+        return self._simctl("openurl", url)
+
+    def _simctl_log(self, qs):
+        # Expose `simctl spawn <UDID> log show` with a fixed argument shape.
+        # Accept optional ?last=<N>[m|h|s] style duration (defaults to 1m).
+        last = (qs.get("last") or ["1m"])[0]
+        if not re.match(r"^[0-9]{1,4}[smh]$", last):
+            return self._send_error(400, "invalid last= (e.g. 30s, 1m, 2h)")
+        argv = [
+            "xcrun", "simctl", "spawn", UDID,
+            "log", "show", "--style", "compact", "--last", last,
+        ]
+        rc, stdout, stderr = run_argv(argv)
+        self._send_shell_result(rc, stdout, stderr)
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--udid", required=True)
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=0)
+    p.add_argument("--scratch-dir",
+                   help="Pre-created scratch directory (caller manages cleanup)")
+    args = p.parse_args()
+
+    global UDID
+    UDID = args.udid
+
+    # Per-bridge scratch directory: each bridge process gets its own cwd so
+    # that iosef's `--local` flag stores state in `./.iosef/state.json` here
+    # instead of in the global `~/.iosef/state.json`. This prevents parallel
+    # sandvault sessions from corrupting each other's iosef state.
+    #
+    # When launched by `sv`, --scratch-dir points to a directory under
+    # $SHARED_WORKSPACE/tmp/ so that screenshots are accessible to the
+    # sandboxed user.  The caller owns cleanup in that case.
+    if args.scratch_dir:
+        scratch_dir = args.scratch_dir
+        os.makedirs(scratch_dir, exist_ok=True)
+    else:
+        scratch_dir = tempfile.mkdtemp(prefix="sv-ios-bridge-")
+
+        def _cleanup_scratch():
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+
+        atexit.register(_cleanup_scratch)
+
+    os.chdir(scratch_dir)
+
+    # Watch boot progress in the background; the bridge can serve /ready
+    # immediately and rejects other endpoints with 503 until ready.
+    threading.Thread(target=watch_boot, args=(UDID,), daemon=True).start()
+
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    # Print the listen line on stdout immediately so `sv` can parse it.
+    actual_host, actual_port = server.server_address[:2]
+    print(f"Bridge listening on http://{actual_host}:{actual_port}", flush=True)
+
+    # Clean shutdown on SIGTERM/SIGINT. server.shutdown() has to run on a
+    # separate thread because the server's own thread is blocked inside
+    # serve_forever.
+    def _shutdown(_signo, _frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    try:
+        server.serve_forever(poll_interval=0.5)
+    finally:
+        server.server_close()
+        # scratch_dir is removed by the atexit hook registered above.
+
+
+if __name__ == "__main__":
+    main()
