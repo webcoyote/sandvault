@@ -482,6 +482,7 @@ MODE=shell
 COMMAND_ARGS=()
 INITIAL_DIR=""
 CLONE_REPOSITORY=""
+DEPLOY_KEY=false
 
 show_help() {
     echo "SandVault $VERSION by Patrick Wyatt <pat@codeofhonor.com>"
@@ -502,6 +503,8 @@ show_help() {
     echo "  -x, --no-sandbox     Disable sandbox-exec restrictions"
     echo "  --fix-permissions    Override restrictive umask and fix file permissions [standalone or with build]"
     echo "  -c, --clone URL|PATH Clone Git repository into sandvault home and open there"
+    echo "  --deploy-key         Generate per-repo SSH deploy key (use with --clone SSH URL)"
+    echo "                       Auto-added to GitHub via gh CLI if authenticated"
     echo "  --version            Show version information"
     echo ""
     echo "Commands:"
@@ -568,6 +571,10 @@ while [[ $# -gt 0 ]]; do
             CLONE_REPOSITORY="$2"
             shift 2
             ;;
+        --deploy-key)
+            DEPLOY_KEY=true
+            shift
+            ;;
         -h|--help)
             show_help
             ;;
@@ -631,6 +638,10 @@ readonly CLONE_REPOSITORY
 
 if [[ "$FIX_PERMISSIONS" == "true" && "$COMMAND" != "build" ]]; then
     abort "--fix-permissions can only be used standalone or with build"
+fi
+
+if [[ "$DEPLOY_KEY" == "true" && -z "$CLONE_REPOSITORY" ]]; then
+    abort "--deploy-key requires --clone with an SSH URL"
 fi
 
 if [[ -z "$CLONE_REPOSITORY" ]]; then
@@ -1212,6 +1223,67 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
         sandbox_repository_git remote set-url origin "$REPOSITORY_SOURCE_URL"
     else
         sandbox_repository_git remote add origin "$REPOSITORY_SOURCE_URL"
+    fi
+
+    # Generate per-repo SSH deploy key so the sandvault user can push/pull
+    if [[ "$DEPLOY_KEY" == "true" ]] \
+        && [[ "$REPOSITORY_SOURCE_URL" == git@* || "$REPOSITORY_SOURCE_URL" == ssh://* ]]; then
+        DEPLOY_KEY_NAME="deploy_${REPOSITORY_NAME}"
+        DEPLOY_KEY_DIR="/Users/$SANDVAULT_USER/.ssh"
+        DEPLOY_KEY_PRIV="$DEPLOY_KEY_DIR/$DEPLOY_KEY_NAME"
+        DEPLOY_KEY_PUB="$DEPLOY_KEY_PRIV.pub"
+
+        if ! "${SANDBOX_RUN[@]}" test -f "$DEPLOY_KEY_PRIV"; then
+            "${SANDBOX_RUN[@]}" mkdir -p "$DEPLOY_KEY_DIR"
+            "${SANDBOX_RUN[@]}" /bin/chmod 0700 "$DEPLOY_KEY_DIR"
+            "${SANDBOX_RUN[@]}" ssh-keygen -t ed25519 \
+                -f "$DEPLOY_KEY_PRIV" \
+                -N "" \
+                -q \
+                -C "sandvault-deploy-${REPOSITORY_NAME}@${HOSTNAME}"
+            info "Generated deploy key for $REPOSITORY_NAME"
+        fi
+
+        # Configure this repo to use its deploy key
+        sandbox_repository_git config core.sshCommand \
+            "ssh -i '$DEPLOY_KEY_PRIV' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+
+        # Add deploy key to GitHub repo via gh CLI, or show it for manual addition
+        DEPLOY_KEY_REPO_PATH="${REPOSITORY_SOURCE_URL#git@github.com:}"
+        DEPLOY_KEY_REPO_PATH="${DEPLOY_KEY_REPO_PATH%.git}"
+
+        if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+            # Copy pub key to a temp file readable by the host user (gh runs as host)
+            DEPLOY_KEY_TMP="$(mktemp)"
+            "${SANDBOX_RUN[@]}" cat "$DEPLOY_KEY_PUB" > "$DEPLOY_KEY_TMP"
+
+            if gh repo deploy-key add "$DEPLOY_KEY_TMP" \
+                --allow-write \
+                --title "sandvault-deploy-${REPOSITORY_NAME}@${HOSTNAME}" \
+                -R "$DEPLOY_KEY_REPO_PATH" 2>/dev/null; then
+                info "Deploy key added to $DEPLOY_KEY_REPO_PATH (write access enabled)"
+            else
+                warn "Could not add deploy key via gh CLI (check repo permissions)"
+                echo ""
+                info "Deploy key for $REPOSITORY_NAME — add manually:"
+                echo "──────────────────────────────────────────────────────────"
+                cat "$DEPLOY_KEY_TMP"
+                echo "──────────────────────────────────────────────────────────"
+                info "https://github.com/$DEPLOY_KEY_REPO_PATH/settings/keys"
+                echo ""
+            fi
+
+            rm -f "$DEPLOY_KEY_TMP"
+        else
+            echo ""
+            info "Deploy key for $REPOSITORY_NAME — add manually (or install gh CLI for auto-setup):"
+            echo "──────────────────────────────────────────────────────────"
+            "${SANDBOX_RUN[@]}" cat "$DEPLOY_KEY_PUB"
+            echo "──────────────────────────────────────────────────────────"
+            info "https://github.com/$DEPLOY_KEY_REPO_PATH/settings/keys"
+            info "  (Enable \"Allow write access\" to push)"
+            echo ""
+        fi
     fi
 
     if [[ -n "${LOCAL_REPOSITORY:-}" ]]; then

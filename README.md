@@ -20,9 +20,10 @@ SandVault (`sv`) manages a limited user account to sandbox shell commands and AI
 
 ## Quick Links
 
-1. To run `xcodebuild` or `swift` see [Sandboxing xcodebuild and swift](#Sandboxing-xcodebuild-and-swift) for details.
-2. To run other sandboxed applications inside sandvault, use the `-x` option. See [Sandboxing other apps](#Sandboxing-other-apps) for details.
-3. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
+1. To push/pull from the sandbox, use `--deploy-key` with `--clone`. See [Clone with SSH deploy keys](#clone-with-ssh-deploy-keys) for details.
+2. To run `xcodebuild` or `swift` see [Sandboxing xcodebuild and swift](#Sandboxing-xcodebuild-and-swift) for details.
+3. To run other sandboxed applications inside sandvault, use the `-x` option. See [Sandboxing other apps](#Sandboxing-other-apps) for details.
+4. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
 
 
 ## Security Model
@@ -136,6 +137,25 @@ For local Git repositories, sandvault also wires remotes:
 
 - Your local Git repository gets/updates remote `sandvault` -> `/Users/sandvault-$USER/repositories/<git-repository>`
 - This lets you run `git fetch sandvault` from the original local Git repository to pull commits made in the sandvault Git repository.
+
+
+# Clone with SSH deploy keys
+
+When cloning via an SSH URL, use `--deploy-key` to generate a per-repo SSH deploy key so the sandvault user can push and pull directly:
+
+```bash
+# Clone with a deploy key (auto-added to GitHub if gh CLI is authenticated)
+  sv claude --clone git@github.com:myorg/myrepo.git --deploy-key
+
+# Also works with shell and other agents
+  sv shell --clone git@github.com:myorg/myrepo.git --deploy-key
+```
+
+Each repository gets its own ED25519 key stored at `/Users/sandvault-$USER/.ssh/deploy_<repo-name>`. The repo's local `core.sshCommand` is configured to use only that key, so keys are isolated between repositories.
+
+If the [GitHub CLI](https://cli.github.com/) (`gh`) is installed and authenticated, the deploy key is automatically uploaded to the repository with write access. Otherwise, the public key is printed so you can add it manually at **Settings > Deploy keys** on GitHub.
+
+> **Note:** GitHub deploy keys are unique per-repository — the same public key cannot be used on multiple repos. This is handled automatically since each repo gets its own key.
 
 
 # Send input via stdin
