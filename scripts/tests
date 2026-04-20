@@ -289,6 +289,30 @@ run_tests() {
     }
     queue_test test_help
 
+    test_help_lists_opencode() {
+        local output
+        output=$(sv_cmd --help 2>&1)
+        if [[ "$output" == *"opencode"* ]]; then
+            pass "--help lists opencode"
+        else
+            fail "--help lists opencode" "opencode command" "$output"
+        fi
+    }
+    queue_test test_help_lists_opencode
+
+    test_opencode_wrapper_uses_skip_permissions() {
+        if [[ -x "$SCRIPT_DIR/../guest/home/bin/opencode" ]] \
+            && grep -F -- "OPENCODE_PERMISSION" \
+                "$SCRIPT_DIR/../guest/home/bin/opencode" &>/dev/null; then
+            pass "opencode wrapper uses skip permissions"
+        else
+            fail "opencode wrapper uses skip permissions" \
+                "executable wrapper with OPENCODE_PERMISSION" \
+                "$SCRIPT_DIR/../guest/home/bin/opencode"
+        fi
+    }
+    queue_test test_opencode_wrapper_uses_skip_permissions
+
     # Unknown option
     test_unknown_option() {
         local output
@@ -376,7 +400,7 @@ run_tests() {
         fi
         local failed=false
         local link
-        for link in claude codex gemini; do
+        for link in claude codex opencode gemini; do
             if [[ -L "$brew_prefix/bin/$link" ]]; then
                 local link_perms
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_prefix/bin/$link")
@@ -637,7 +661,10 @@ run_tests() {
         fi
 
         set +e
-        remote_output=$(sv_cmd s -- git -C "$clone_path" remote get-url origin 2>&1)
+        # Use "git config remote.origin.url" instead of
+        # "git remote get-url" to avoid issues with
+        # git url remapping with insteadOf override.
+        remote_output=$(sv_cmd s -- git -C "$clone_path" config remote.origin.url 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 || "$remote_output" != *"$https_repository"* ]]; then

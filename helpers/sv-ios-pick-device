@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""
+Pick the newest available iPhone device type and iOS runtime.
+
+Reads `xcrun simctl list -j devicetypes runtimes` JSON on stdin and prints
+"<device_type_identifier>\t<runtime_identifier>" on stdout. Exits non-zero if
+no usable pair is available.
+"""
+
+import json
+import re
+import sys
+
+
+def rt_key(r):
+    m = re.search(r"(\d+)\.(\d+)", r.get("version", "") or "")
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def dt_key(d):
+    name = d.get("name", "")
+    m = re.search(r"iPhone\s+(\d+)", name)
+    return (int(m.group(1)) if m else 0, name)
+
+
+def main():
+    data = json.load(sys.stdin)
+
+    runtimes = [
+        r for r in data.get("runtimes", [])
+        if r.get("isAvailable") and "iOS" in (r.get("name") or "")
+    ]
+    runtimes.sort(key=rt_key, reverse=True)
+    if not runtimes:
+        sys.exit(1)
+    rt = runtimes[0]["identifier"]
+
+    devs = [
+        d for d in data.get("devicetypes", [])
+        if d.get("productFamily") == "iPhone" and "iPhone" in (d.get("name") or "")
+    ]
+    devs.sort(key=dt_key, reverse=True)
+    if not devs:
+        sys.exit(1)
+    dt = devs[0]["identifier"]
+
+    print(f"{dt}\t{rt}")
+
+
+if __name__ == "__main__":
+    main()

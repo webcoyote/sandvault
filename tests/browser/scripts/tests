@@ -1,0 +1,16 @@
+#!/bin/bash
+# Test browser automation via Playwright and Puppeteer
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
+if [[ -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
+    echo >&2 "ERROR: SV_BROWSER_ENDPOINT not set (use: sv --browser shell)"
+    exit 1
+fi
+
+node test-playwright.js
+node test-puppeteer.js

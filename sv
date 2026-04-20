@@ -11,6 +11,12 @@ while [[ -L "$SOURCE" ]]; do
     [[ "$SOURCE" = /* ]] || SOURCE="$SOURCE_DIR/$SOURCE"
 done
 WORKSPACE="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
+
+# If running from a Homebrew Cellar (e.g. /opt/homebrew/Cellar/sandvault/1.2.3),
+# use the stable opt/ symlink instead so generated scripts don't break on upgrade.
+if [[ "$WORKSPACE" =~ ^(.*)/homebrew/Cellar/([^/]+)/[^/]+$ ]]; then
+    WORKSPACE="${BASH_REMATCH[1]}/homebrew/opt/${BASH_REMATCH[2]}"
+fi
 readonly WORKSPACE
 
 
@@ -130,7 +136,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.1.31"
+readonly VERSION="1.10.0"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -168,6 +174,20 @@ readonly INSTALL_MARKER="$INSTALL_PRODUCT/install"
 readonly SESSION_DIR="$HOME/.local/state/sandvault"
 readonly SESSION_FILE="$SESSION_DIR/sandvault.count"
 
+# Chrome browser state (per-instance using session ID)
+readonly CHROME_LOG_FILE="$SESSION_DIR/chrome-$SV_SESSION_ID.log"
+readonly CHROME_DATA_DIR="$SESSION_DIR/chrome-data-$SV_SESSION_ID"
+CHROME_PID=""
+CHROME_PORT=""
+
+# iOS Simulator bridge state (per-instance using session ID)
+readonly IOS_BRIDGE_LOG_FILE="$SESSION_DIR/ios-bridge-$SV_SESSION_ID.log"
+readonly IOS_SIM_DEVICE_NAME="sandvault-$SV_SESSION_ID"
+IOS_BRIDGE_PID=""
+IOS_BRIDGE_PORT=""
+IOS_BRIDGE_SCRATCH_DIR=""
+IOS_SIM_UDID=""
+
 readonly SSH_DIR="$HOME/.ssh"
 readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
 readonly SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
@@ -182,6 +202,23 @@ readonly SANDBOX_PROFILE="/var/sandvault/sandbox-$SANDVAULT_USER.sb"
 ###############################################################################
 show_version() {
     echo "$(basename "${BASH_SOURCE[0]}") version $VERSION"
+    exit 0
+}
+
+show_endpoint() {
+    if [[ -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
+        echo >&2 "No browser available. Start sandvault with --browser flag:"
+        echo >&2 "  sv --browser shell"
+        exit 1
+    fi
+
+    if ! /usr/bin/curl -sf "$SV_BROWSER_ENDPOINT/json/version" > /dev/null 2>&1; then
+        echo >&2 "Browser endpoint $SV_BROWSER_ENDPOINT is not responding."
+        echo >&2 "Chrome may have crashed. Exit and restart with: sv --browser <command>"
+        exit 1
+    fi
+
+    echo "$SV_BROWSER_ENDPOINT"
     exit 0
 }
 
@@ -247,6 +284,14 @@ ensure_brew_tool() {
         fi
     fi
 
+    if [[ "$NESTED" == "false" && -x "$brew_bin" ]] \
+        && /usr/bin/xattr -p com.apple.quarantine "$brew_bin" &>/dev/null; then
+        debug "Warming up $cli_name outside sandvault..."
+        if ! "$brew_bin" --help &>/dev/null; then
+            abort "$cli_name is quarantined and failed to warm up. Run '$brew_bin --help' once as $HOST_USER and try again."
+        fi
+    fi
+
     # Fix homebrew symlink permissions only when explicitly requested.
     # sv doesn't own these symlinks (homebrew creates them), so only
     # modify them with --fix-permissions.
@@ -275,6 +320,20 @@ ensure_brew_tool() {
 }
 
 install_tools () {
+    if [[ "$NATIVE_INSTALL" == "true" ]]; then
+        # Native install is handled inside the sandbox by guest/home/bin/* scripts;
+        # ensure node is available for npm-based tools (codex, gemini).
+        case "${COMMAND:-}" in
+            codex|gemini)
+                ensure_brew_tool "node" "node"
+                ;;
+            *)
+                # node installation not required
+                ;;
+        esac
+        return 0
+    fi
+
     # Install homebrew tools only when the user invokes them.
     case "${COMMAND:-}" in
         claude)
@@ -283,6 +342,9 @@ install_tools () {
         codex)
             ensure_brew_tool "codex" "codex"
             ;;
+        opencode)
+            ensure_brew_tool "anomalyco/tap/opencode" "opencode"
+            ;;
         gemini)
             ensure_brew_tool "gemini-cli" "gemini"
             ;;
@@ -290,6 +352,52 @@ install_tools () {
             # No tool installation needed for other commands
             ;;
     esac
+}
+
+# Ensure host-side dependencies for --ios are present: uv (via
+# Homebrew) and iosef (via `uv tool install`). The bridge runs as the host
+# user, so both tools must be available in the host user's PATH.
+install_ios_deps() {
+    # uv via Homebrew.
+    ensure_brew_tool "uv" "uv"
+
+    # iosef via `uv tool install`. `uv tool install` is idempotent, so we
+    # only call it when iosef is not already on PATH.
+    if command -v iosef &>/dev/null; then
+        return 0
+    fi
+
+    # Already-installed uv tools live in `uv tool dir`/bin. Check there so
+    # we don't spuriously re-install if PATH just doesn't include it yet.
+    # The bridge itself falls back to `uv tool run iosef` so bridge
+    # functionality doesn't depend on PATH; this is only a convenience note
+    # for host-side direct use.
+    local uv_bin_dir
+    if uv_bin_dir=$(uv tool dir --bin 2>/dev/null) && [[ -x "$uv_bin_dir/iosef" ]]; then
+        debug "iosef installed at $uv_bin_dir/iosef (not on PATH; bridge uses 'uv tool run iosef'). For direct host-side use, add \"$uv_bin_dir\" to PATH or run: uv tool update-shell"
+        return 0
+    fi
+
+    if [[ "$NESTED" == "true" ]]; then
+        abort "sandvault user cannot install iosef; run as $HOST_USER instead"
+    fi
+    if [[ "$NO_BUILD" == "true" ]]; then
+        abort "Missing iosef; refusing to install because --no-build flag set"
+    fi
+
+    debug "Installing iosef via uv..."
+    if ! uv tool install iosef >/dev/null 2>&1; then
+        abort "Failed to install iosef via uv. Try: uv tool install iosef"
+    fi
+
+    if ! command -v iosef &>/dev/null; then
+        uv_bin_dir=$(uv tool dir --bin 2>/dev/null || echo "")
+        if [[ -n "$uv_bin_dir" && -x "$uv_bin_dir/iosef" ]]; then
+            debug "iosef installed at $uv_bin_dir/iosef (not on PATH; bridge uses 'uv tool run iosef'). For direct host-side use, add \"$uv_bin_dir\" to PATH or run: uv tool update-shell"
+        else
+            abort "iosef install appeared to succeed but the binary is not available."
+        fi
+    fi
 }
 
 init_sandbox_run_for_repository() {
@@ -315,9 +423,21 @@ local_repository_git() {
 }
 
 force_cleanup_sandvault_processes() {
+    local cleanup_mode="${1:-session-exit}"
     if [[ "$NESTED" == "true" ]]; then
         return 0
     fi
+
+    if [[ "$cleanup_mode" != "force-all" ]]; then
+        trace "Skipping user-wide cleanup on ordinary session exit"
+        return 0
+    fi
+
+    # Stop host-side Chrome if running
+    stop_chrome
+
+    # Stop host-side iOS simulator bridge if running
+    stop_ios_simulator
 
     # Try to bootout the user session (this terminates all processes)
     trace "Terminating $SANDVAULT_USER user session..."
@@ -339,6 +459,210 @@ force_cleanup_sandvault_processes() {
     fi
 }
 
+kill_chrome_pid() {
+    local pid="$1"
+    if kill -0 "$pid" 2>/dev/null; then
+        debug "Stopping Chrome (PID $pid)..."
+        kill "$pid" 2>/dev/null || true
+        local i
+        for (( i=0; i<20; i++ )); do
+            kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
+            sleep 0.1
+        done
+        trace "Force-killing Chrome (PID $pid)..."
+        kill -9 "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+}
+
+stop_chrome() {
+    if [[ -n "$CHROME_PID" ]]; then
+        kill_chrome_pid "$CHROME_PID"
+        CHROME_PID=""
+    fi
+    rm -f "$CHROME_LOG_FILE"
+    rm -rf "$CHROME_DATA_DIR"
+}
+
+start_chrome() {
+    mkdir -p "$SESSION_DIR"
+
+    # Locate Chrome binary
+    local chrome_bin=""
+    if [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+        chrome_bin="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    elif [[ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]]; then
+        chrome_bin="/Applications/Chromium.app/Contents/MacOS/Chromium"
+    else
+        abort "Chrome or Chromium not found. Install Google Chrome to use --browser."
+    fi
+
+    mkdir -p "$CHROME_DATA_DIR"
+    rm -f "$CHROME_LOG_FILE"
+    rm -f "$CHROME_DATA_DIR/SingletonLock" "$CHROME_DATA_DIR/SingletonCookie" "$CHROME_DATA_DIR/SingletonSocket"
+
+    # Launch Chrome headless with dynamic port allocation
+    debug "Starting headless Chrome..."
+    "$chrome_bin" \
+        --headless \
+        --no-sandbox \
+        --disable-gpu \
+        --remote-debugging-port=0 \
+        --remote-debugging-address=127.0.0.1 \
+        --user-data-dir="$CHROME_DATA_DIR" \
+        --no-first-run \
+        --no-default-browser-check \
+        --disable-extensions \
+        --disable-background-networking \
+        > "$CHROME_LOG_FILE" 2>&1 &
+    CHROME_PID=$!
+
+    # Wait for Chrome to report its debugging port (up to 5 seconds)
+    local port=""
+    local i
+    for (( i=0; i<50; i++ )); do
+        if ! kill -0 "$CHROME_PID" 2>/dev/null; then
+            CHROME_PID=""
+            abort "Chrome exited unexpectedly. Check $CHROME_LOG_FILE for details."
+        fi
+        port=$(sed -n 's|.*DevTools listening on ws://127\.0\.0\.1:\([0-9]*\)/.*|\1|p' "$CHROME_LOG_FILE" 2>/dev/null | head -1)
+        if [[ -n "$port" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    if [[ -z "$port" ]]; then
+        kill_chrome_pid "$CHROME_PID"
+        CHROME_PID=""
+        abort "Chrome did not report a debugging port within 5 seconds. Check $CHROME_LOG_FILE."
+    fi
+
+    CHROME_PORT="$port"
+    debug "Chrome started (PID $CHROME_PID, port $CHROME_PORT)"
+}
+
+kill_bridge_pid() {
+    local pid="$1"
+    if kill -0 "$pid" 2>/dev/null; then
+        debug "Stopping iOS bridge (PID $pid)..."
+        kill "$pid" 2>/dev/null || true
+        local i
+        for (( i=0; i<20; i++ )); do
+            kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
+            sleep 0.1
+        done
+        trace "Force-killing iOS bridge (PID $pid)..."
+        kill -9 "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+}
+
+stop_ios_simulator() {
+    if [[ -n "$IOS_BRIDGE_PID" ]]; then
+        kill_bridge_pid "$IOS_BRIDGE_PID"
+        IOS_BRIDGE_PID=""
+    fi
+    if [[ -n "$IOS_SIM_UDID" ]]; then
+        debug "Shutting down iOS simulator $IOS_SIM_UDID..."
+        /usr/bin/xcrun simctl shutdown "$IOS_SIM_UDID" >/dev/null 2>&1 || true
+        /usr/bin/xcrun simctl delete "$IOS_SIM_UDID" >/dev/null 2>&1 || true
+        IOS_SIM_UDID=""
+    fi
+    rm -f "$IOS_BRIDGE_LOG_FILE"
+    if [[ -n "$IOS_BRIDGE_SCRATCH_DIR" ]]; then
+        rm -rf "$IOS_BRIDGE_SCRATCH_DIR"
+        IOS_BRIDGE_SCRATCH_DIR=""
+    fi
+}
+
+# Find the newest available iPhone device type identifier and iOS runtime
+# identifier. Prints "<device_type>\t<runtime>" on stdout. Returns non-zero
+# if no usable pair is found.
+ios_pick_device_and_runtime() {
+    /usr/bin/xcrun simctl list -j devicetypes runtimes 2>/dev/null \
+        | "$WORKSPACE/helpers/sv-ios-pick-device"
+}
+
+start_ios_simulator() {
+    mkdir -p "$SESSION_DIR"
+
+    if [[ ! -x /usr/bin/xcrun ]]; then
+        abort "xcrun not found. Install Xcode or the Command Line Tools."
+    fi
+
+    # Select device type and runtime.
+    local device_type runtime pair
+    # shellcheck disable=SC2310 # ios_pick_device_and_runtime intentionally used in condition
+    if ! pair=$(ios_pick_device_and_runtime); then
+        abort "No iOS simulator runtime available. Install one via Xcode → Settings → Platforms."
+    fi
+    device_type="${pair%$'\t'*}"
+    runtime="${pair#*$'\t'}"
+    debug "Selected device=$device_type runtime=$runtime"
+
+    # Create a fresh scratch simulator for this session.
+    if ! IOS_SIM_UDID=$(/usr/bin/xcrun simctl create "$IOS_SIM_DEVICE_NAME" "$device_type" "$runtime" 2>/dev/null); then
+        abort "Failed to create iOS simulator (device=$device_type runtime=$runtime)"
+    fi
+    debug "Created simulator $IOS_SIM_DEVICE_NAME UDID=$IOS_SIM_UDID"
+
+    # Begin booting. Don't wait for bootstatus here — the bridge polls
+    # readiness in a background thread and rejects non-/ready endpoints
+    # with HTTP 503 until the simulator finishes booting (30-90s).
+    # Sandbox sessions can start interacting immediately and poll
+    # /ready until it returns 200.
+    if ! /usr/bin/xcrun simctl boot "$IOS_SIM_UDID" >/dev/null 2>&1; then
+        stop_ios_simulator
+        abort "Failed to boot iOS simulator $IOS_SIM_UDID"
+    fi
+    debug "iOS simulator boot started in background; bridge will report readiness."
+
+    if [[ "$USE_IOS_SIMULATOR_GUI" == "true" ]]; then
+        debug "Opening Simulator.app to display the device..."
+        /usr/bin/open -a Simulator >/dev/null 2>&1 || \
+            warn "Failed to open Simulator.app; the device is still running headless."
+    fi
+
+    # Launch the HTTP bridge.
+    # Place the scratch directory under $SHARED_WORKSPACE/tmp so that
+    # screenshots and other bridge artifacts are accessible to both the
+    # host user and the sandboxed user.
+    mkdir -p "$SHARED_WORKSPACE/tmp"
+    IOS_BRIDGE_SCRATCH_DIR="$(mktemp -d "$SHARED_WORKSPACE/tmp/sv-ios-bridge.XXXXXX")"
+    rm -f "$IOS_BRIDGE_LOG_FILE"
+    debug "Starting iOS bridge..."
+    "$WORKSPACE/helpers/sv-ios-bridge" --udid "$IOS_SIM_UDID" \
+        --host 127.0.0.1 --port 0 \
+        --scratch-dir "$IOS_BRIDGE_SCRATCH_DIR" \
+        > "$IOS_BRIDGE_LOG_FILE" 2>&1 &
+    IOS_BRIDGE_PID=$!
+
+    # Wait for the bridge to report its port (up to 5 seconds).
+    local port=""
+    local i
+    for (( i=0; i<50; i++ )); do
+        if ! kill -0 "$IOS_BRIDGE_PID" 2>/dev/null; then
+            IOS_BRIDGE_PID=""
+            stop_ios_simulator
+            abort "iOS bridge exited unexpectedly. Check $IOS_BRIDGE_LOG_FILE for details."
+        fi
+        port=$(sed -n 's|.*Bridge listening on http://127\.0\.0\.1:\([0-9]*\).*|\1|p' "$IOS_BRIDGE_LOG_FILE" 2>/dev/null | head -1)
+        if [[ -n "$port" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    if [[ -z "$port" ]]; then
+        stop_ios_simulator
+        abort "iOS bridge did not report a port within 5 seconds. Check $IOS_BRIDGE_LOG_FILE."
+    fi
+
+    IOS_BRIDGE_PORT="$port"
+    debug "iOS bridge started (PID $IOS_BRIDGE_PID, port $IOS_BRIDGE_PORT)"
+}
+
 register_session() {
     mkdir -p "$SESSION_DIR"
     local new_count
@@ -355,6 +679,11 @@ register_session() {
 }
 
 unregister_session() {
+    # Per-session cleanup
+    [[ "$USE_BROWSER" == "true" ]] && stop_chrome
+    [[ "$USE_IOS_SIMULATOR" == "true" ]] && stop_ios_simulator
+    rm -f "$SHARED_WORKSPACE/tmp/sv-session-$SV_SESSION_ID" 2>/dev/null || true
+
     mkdir -p "$SESSION_DIR"
     local prev_count
     local new_count
@@ -369,7 +698,7 @@ unregister_session() {
     ' bash "$SESSION_FILE")
     trace "Session unregistered (count: $new_count)"
     if [[ "$prev_count" -le 1 ]]; then
-        trace "Last session exited; cleaning up sandvault processes"
+        trace "Last session exited; skipping user-wide sandvault cleanup"
         force_cleanup_sandvault_processes
     else
         trace "Other sessions still active; skipping cleanup"
@@ -403,8 +732,11 @@ configure_shared_folder_permssions() {
 }
 
 uninstall() {
-    debug "Uninstalling..."
-    force_cleanup_sandvault_processes
+    info "Uninstalling..."
+    force_cleanup_sandvault_processes force-all
+    rm -rf "$SESSION_DIR"/chrome-data-* "$SESSION_DIR"/chrome-*.log
+    rm -f "$SESSION_DIR"/ios-bridge-*.log
+    rm -f /tmp/sandvault-configure-* 2>/dev/null || true
 
     # Remove the install marker file first; it's a sentinel for "everything is complete".
     # By removing it first we force a rebuild if the user wants to run this again.
@@ -441,8 +773,15 @@ uninstall() {
 
     # Remove shared workspace
     # Do not remove $SHARED_WORKSPACE/user
+    rmdir "$SHARED_WORKSPACE/tmp" 2>/dev/null || true
+
+    rm -f "$SHARED_WORKSPACE/setup/gitconfig"
+    rm -f "$SHARED_WORKSPACE/setup/claude-json"
+    rmdir "$SHARED_WORKSPACE/setup" 2>/dev/null || true
+
     rm -f "$SHARED_WORKSPACE/SANDVAULT-README.md"
     rmdir "$SHARED_WORKSPACE" 2>/dev/null || true
+
     if [[ -d "$SHARED_WORKSPACE" ]]; then
         info "Keeping $SHARED_WORKSPACE directory (it is not empty)"
     else
@@ -457,7 +796,11 @@ uninstall() {
 REBUILD=false
 NO_BUILD=false
 USE_SANDBOX=true
+USE_BROWSER=false
+USE_IOS_SIMULATOR=false
+USE_IOS_SIMULATOR_GUI=false
 FIX_PERMISSIONS=false
+NATIVE_INSTALL=false
 MODE=shell
 COMMAND_ARGS=()
 INITIAL_DIR=""
@@ -481,23 +824,43 @@ show_help() {
     echo "  -h, --help           Show this help message"
     echo "  -n, --no-build       Refuse to make any sandbox changes; error if changes are needed"
     echo "  -x, --no-sandbox     Disable sandbox-exec restrictions"
-    echo "  --fix-permissions    Override restrictive umask and fix file permissions [standalone or with build]"
+    echo "  -b, --browser        Launch headless Chrome and pass endpoint into sandbox"
+    echo "  -e, --endpoint       Show Chrome endpoint URL (requires --browser session)"
+    echo "  -i, --ios            Boot iOS Simulator and expose HTTP bridge into sandbox"
+    echo "  -I, --ios-gui        Also show the Simulator.app window (implies --ios)"
+    echo "  -N, --native-install Use native installers instead of Homebrew for AI tools"
     echo "  -c, --clone URL|PATH Clone Git repository into sandvault home and open there"
     echo "  --deploy-key         Generate per-repo SSH deploy key (use with --clone SSH URL)"
     echo "                       Auto-added to GitHub via gh CLI if authenticated"
+    echo "  --fix-permissions    Fix umask and file permissions [standalone or with build]"
     echo "  --version            Show version information"
     echo ""
     echo "Commands:"
     echo "  cl, claude [PATH]    Open Claude Code in sandvault"
     echo "  co, codex  [PATH]    Open OpenAI Codex in sandvault"
+    echo "  o,  opencode [PATH]  Open OpenCode in sandvault"
     echo "  g,  gemini [PATH]    Open Google Gemini in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove sandvault; keep shared files"
     echo ""
-    echo "Arguments after -- are passed to the command (claude, gemini, codex, shell)"
+    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, shell)"
+    echo ""
+    echo "Environment:"
+    echo "  SANDVAULT_ARGS       Default arguments (prepended to command line)"
+    echo "                       Example: export SANDVAULT_ARGS=\"--verbose --ssh --browser\""
     exit 0
 }
+
+# Prepend arguments from SV_ARGS environment variable
+if [[ -n "${SANDVAULT_ARGS:-}" ]]; then
+    # Use xargs to parse shell-style quoting without eval
+    sv_args_array=()
+    while IFS= read -r arg; do
+        sv_args_array+=("$arg")
+    done < <(xargs -n1 printf '%s\n' <<< "$SANDVAULT_ARGS")
+    set -- "${sv_args_array[@]}" "$@"
+fi
 
 # Parse optional arguments
 NEW_ARGS=()
@@ -540,8 +903,25 @@ while [[ $# -gt 0 ]]; do
             USE_SANDBOX=false
             shift
             ;;
+        -b|--browser)
+            USE_BROWSER=true
+            shift
+            ;;
+        -i|--ios)
+            USE_IOS_SIMULATOR=true
+            shift
+            ;;
+        -I|--ios-gui)
+            USE_IOS_SIMULATOR=true
+            USE_IOS_SIMULATOR_GUI=true
+            shift
+            ;;
         --fix-permissions)
             FIX_PERMISSIONS=true
+            shift
+            ;;
+        -N|--native-install)
+            NATIVE_INSTALL=true
             shift
             ;;
         -c|--clone)
@@ -557,6 +937,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         -h|--help)
             show_help
+            ;;
+        -e|--endpoint)
+            show_endpoint
             ;;
         --version)
             show_version
@@ -581,6 +964,10 @@ case "${1:-}" in
         ;;
     co|codex)
         COMMAND=codex
+        INITIAL_DIR="${2:-}"
+        ;;
+    o|opencode)
+        COMMAND=opencode
         INITIAL_DIR="${2:-}"
         ;;
     g|gemini)
@@ -704,6 +1091,9 @@ if [[ "$REBUILD" == "true" ]]; then
 fi
 
 install_tools
+if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
+    install_ios_deps
+fi
 
 
 ###############################################################################
@@ -840,16 +1230,16 @@ if [[ "$REBUILD" == "true" || "$MODE" == "ssh" ]]; then
     else
         trace "SSH access: Remote Login is not enabled (skipping, not in SSH mode)"
     fi
-
-    # Quick SSH smoke test if we have keys and SSH mode is requested
-    if [[ "$MODE" == "ssh" && -f "$SSH_KEYFILE_PRIV" ]]; then
-        if ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEYFILE_PRIV" "$SANDVAULT_USER@$HOSTNAME" true 2>/dev/null; then
-            trace "SSH smoke test: $SANDVAULT_USER@$HOSTNAME connected successfully"
-        else
-            warn "SSH smoke test failed: $SANDVAULT_USER@$HOSTNAME could not connect. SSH mode may not work."
-        fi
-    fi
 fi
+
+# SSH smoke test
+#if [[ "$COMMAND" == "build" || "$REBUILD" == "true" ]]; then
+#    if ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEYFILE_PRIV" "$SANDVAULT_USER@$HOSTNAME" true 2>/dev/null; then
+#        trace "SSH smoke test: $SANDVAULT_USER@$HOSTNAME connected successfully"
+#    else
+#        warn "SSH smoke test failed: $SANDVAULT_USER@$HOSTNAME could not connect. SSH mode may not work."
+#    fi
+#fi
 
 
 ###############################################################################
@@ -905,13 +1295,12 @@ sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 # Perform rsync from within the destination directory so that the paths
 # passed through xargs to chown are correct.
 #
-# Use tr to convert newlines to null terminators to pass to xargs -0
-#
-# In the event that no files need to be synchronized, send ":" to xargs to avoid error
+# Collect changed files first, then chown only if rsync reported changes.
+# macOS xargs lacks --no-run-if-empty so we guard against empty input.
 #
 # Use OSX chown, not GNU chown, because I've tested that it works
 cd "/Users/$SANDVAULT_USER/"
-/usr/bin/rsync \
+_changed=\$(/usr/bin/rsync \
     --itemize-changes \
     --out-format="%n" \
     --links \
@@ -921,9 +1310,11 @@ cd "/Users/$SANDVAULT_USER/"
     --perms \
     --times \
     "$WORKSPACE/guest/home/." \
-    "." \
-    | (tr '\n' '\0' || echo :) \
-    | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
+    ".")
+if [[ -n "\$_changed" ]]; then
+    echo "\$_changed" | tr '\n' '\0' \
+        | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
+fi
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     trace "Setting $(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME") to 0755 (world-traversable)"
@@ -1040,23 +1431,50 @@ fi
 
 
 ###############################################################################
-# Configure git
+# Write config merge scripts to shared workspace
+#
+# These scripts run as the sandbox user during session startup (called by
+# configure). They merge required settings into existing config files rather
+# than overwriting them, so agent/tool modifications persist across sessions.
 ###############################################################################
 if [[ "$NESTED" == "true" ]]; then
-    : # Git already configured
-else
-    trace "Configuring git..."
+    : # Already configured
+elif [[ "$REBUILD" == "true" ]]; then
+    trace "Writing config merge scripts..."
     GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
     GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
-    if [[ "$NO_BUILD" == "true" ]]; then
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
-        git_config_require_value "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
-    else
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" user.name "$GIT_USER_NAME"
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" user.email "$GIT_USER_EMAIL"
-        git_config_set_if_changed "$WORKSPACE/guest/home/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
-    fi
+
+    mkdir -p "$SHARED_WORKSPACE/setup"
+
+    # .gitconfig: seed if missing, preserving user overrides
+    cat > "$SHARED_WORKSPACE/setup/gitconfig" << SETUP_EOF
+#!/bin/bash
+set -Eeuo pipefail
+if [[ ! -f "\$HOME/.gitconfig" ]]; then
+    git config -f "\$HOME/.gitconfig" user.name "$GIT_USER_NAME"
+    git config -f "\$HOME/.gitconfig" user.email "$GIT_USER_EMAIL"
+    git config -f "\$HOME/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
+fi
+SETUP_EOF
+    chmod +x "$SHARED_WORKSPACE/setup/gitconfig"
+
+    # .claude.json: seed if missing (onboarding flags only matter on first run)
+    cat > "$SHARED_WORKSPACE/setup/claude-json" << 'SETUP_EOF'
+#!/bin/bash
+set -Eeuo pipefail
+if [[ ! -f "$HOME/.claude.json" ]]; then
+    cat > "$HOME/.claude.json" << 'JSON_EOF'
+{
+  "hasCompletedOnboarding": true,
+  "bypassPermissionsModeAccepted": true,
+  "tipsHistory": {
+    "new-user-warmup": 1
+  }
+}
+JSON_EOF
+fi
+SETUP_EOF
+    chmod +x "$SHARED_WORKSPACE/setup/claude-json"
 fi
 
 
@@ -1101,7 +1519,7 @@ fi
 # Run the application
 ###############################################################################
 if [[ -n "$CLONE_REPOSITORY" ]]; then
-    CLONE_SUPPORTED_COMMANDS=(shell claude codex gemini)
+    CLONE_SUPPORTED_COMMANDS=(shell claude codex opencode gemini)
     for supported_command in "${CLONE_SUPPORTED_COMMANDS[@]}"; do
         if [[ "${COMMAND:-shell}" == "$supported_command" ]]; then
             break
@@ -1303,7 +1721,7 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
     # Fix homebrew symlinks for any installed tools
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in condition
     if brew_shellenv 2>/dev/null; then
-        for tool_cli in claude codex gemini; do
+        for tool_cli in claude codex opencode gemini; do
             brew_link="$(brew --prefix)/bin/$tool_cli"
             if [[ -L "$brew_link" ]]; then
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_link")
@@ -1373,6 +1791,23 @@ if [[ "$NESTED" == "false" ]]; then
     sv_exit_code=0
     register_session
     trap 'sv_exit_code=$?; set +e; unregister_session; exit $sv_exit_code' EXIT
+    if [[ "$USE_BROWSER" == "true" ]]; then
+        start_chrome
+    fi
+    if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
+        start_ios_simulator
+    fi
+else
+    if [[ "$USE_BROWSER" == "true" && -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
+        # Nested session with --browser: Chrome cannot be launched inside the
+        # sandbox, so the parent session must already have started it.
+        abort "--browser requires Chrome, but the parent sandvault session was not started with --browser"
+    fi
+    if [[ "$USE_IOS_SIMULATOR" == "true" && -z "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
+        # Nested session with --ios: the simulator runs on the host,
+        # so the parent session must already have started it.
+        abort "--ios requires a simulator, but the parent sandvault session was not started with --ios"
+    fi
 fi
 
 # TMPDIR: claude (and perhaps other AI agents) creates temporary directories in locations
@@ -1404,6 +1839,34 @@ if [[ "$USE_SANDBOX" == "true" ]]; then
     SANDBOX_EXEC=(/usr/bin/sandbox-exec -f "$SANDBOX_PROFILE")
 else
     debug "Sandbox disabled: running without sandbox-exec restrictions"
+fi
+
+# Extra environment variables (e.g. browser CDP endpoint, iOS bridge
+# endpoint, native install flag). These are expanded into the "/usr/bin/env
+# -i ..." argv below so they survive sudo/SSH and the env scrubber, which
+# is how nested `sv --browser` / `sv --ios` invocations inherit
+# SV_BROWSER_ENDPOINT / SV_IOS_SIMULATOR_ENDPOINT from the parent session.
+EXTRA_ENV=()
+if [[ "$NATIVE_INSTALL" == "true" ]]; then
+    EXTRA_ENV+=("SV_NATIVE_INSTALL=true")
+fi
+if [[ "$USE_BROWSER" == "true" ]]; then
+    if [[ -n "${SV_BROWSER_ENDPOINT:-}" ]]; then
+        EXTRA_ENV+=("SV_BROWSER_ENDPOINT=$SV_BROWSER_ENDPOINT")
+    elif [[ -n "$CHROME_PORT" ]]; then
+        EXTRA_ENV+=("SV_BROWSER_ENDPOINT=http://127.0.0.1:$CHROME_PORT")
+    else
+        abort "Chrome port not available. Chrome may have failed to start."
+    fi
+fi
+if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
+    if [[ -n "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
+        EXTRA_ENV+=("SV_IOS_SIMULATOR_ENDPOINT=$SV_IOS_SIMULATOR_ENDPOINT")
+    elif [[ -n "$IOS_BRIDGE_PORT" ]]; then
+        EXTRA_ENV+=("SV_IOS_SIMULATOR_ENDPOINT=http://127.0.0.1:$IOS_BRIDGE_PORT")
+    else
+        abort "iOS bridge port not available. Bridge may have failed to start."
+    fi
 fi
 
 if [[ "$MODE" == "ssh" ]]; then
@@ -1469,6 +1932,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
             /bin/zsh -c "$ZSH_COMMAND_SSH"
     then
@@ -1517,6 +1981,7 @@ else
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_VERBOSE=$SV_VERBOSE" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
             /bin/zsh -c "$ZSH_COMMAND"
     then

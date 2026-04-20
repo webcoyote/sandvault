@@ -1,0 +1,129 @@
+#!/bin/bash
+# Test iOS simulator bridge via the HTTP endpoint.
+#
+# This suite is opt-in: it requires $SV_IOS_SIMULATOR_ENDPOINT, which is only
+# set when sandvault was launched with --ios. Booting a simulator
+# takes ~30-90 seconds, so this is not run by the default test harness (which
+# uses `sv --browser --no-build`). Invoke explicitly with:
+#
+#     sv --ios --no-build shell -- tests/ios-simulator/scripts/tests
+#
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
+if [[ -z "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
+    # Skip cleanly so the suite doesn't fail for users who ran `sv --browser`.
+    # Return 0 (pass) with a clear message; exit 77 would be the autoconf
+    # convention for "skipped" but the sandvault runner treats non-zero as
+    # FAIL, so we just skip as PASS with a log line.
+    if [[ "$VERBOSE" -ne 0 ]]; then
+        echo "SKIP: SV_IOS_SIMULATOR_ENDPOINT not set (re-run with: sv --ios shell -- $0)"
+    fi
+    exit 0
+fi
+
+EP="$SV_IOS_SIMULATOR_ENDPOINT"
+FAILED=0
+
+log() { if [[ "$VERBOSE" -ne 0 ]]; then echo "   $*"; fi; }
+fail() { echo "FAIL: $*" >&2; FAILED=$((FAILED + 1)); }
+
+# Test 1: /ready responds (may return 503 while booting, that's fine)
+log "Test 1: /ready"
+if curl -s "$EP/ready" >/dev/null 2>&1; then
+    log "  PASS (already ready)"
+else
+    log "  PASS (responded, not ready yet)"
+fi
+
+# Wait for the simulator to finish booting (the bridge rejects
+# non-/ready endpoints with 503 until the simulator is booted,
+# which takes ~30-90s).
+log "Waiting for simulator to finish booting..."
+for i in $(seq 1 90); do
+    if curl -sf "$EP/ready" >/dev/null 2>&1; then
+        log "  ready after ${i}s"
+        break
+    fi
+    if [[ $i -eq 90 ]]; then
+        fail "simulator did not become ready within 180s"
+        exit 1
+    fi
+    sleep 2
+done
+
+# Test 2: /launch com.apple.Preferences (stock iOS app, always available)
+# Retry a few times — the simulator may not accept launches immediately after
+# /ready returns, especially in CI where resources are constrained.
+log "Test 2: launch com.apple.Preferences"
+launch_ok=0
+for i in $(seq 1 5); do
+    if curl -sf -X POST -H 'Content-Type: application/json' \
+        -d '{"bundle_id":"com.apple.Preferences"}' "$EP/launch" >/dev/null; then
+        launch_ok=1
+        log "  PASS (attempt $i)"
+        break
+    fi
+    sleep 2
+done
+if [[ "$launch_ok" -eq 0 ]]; then
+    fail "simctl launch HTTP error (after 5 attempts)"
+fi
+
+# Test 3: /describe returns a non-empty accessibility tree
+log "Test 3: describe"
+response=""
+for i in $(seq 1 15); do
+    response=$(curl -sf "$EP/describe") || response=""
+    if [[ ${#response} -gt 100 ]]; then
+        log "  PASS (${#response} bytes, after ${i}s)"
+        break
+    fi
+    if [[ $i -eq 15 ]]; then
+        fail "/describe returned unexpected output:\n${response}"
+    fi
+    sleep 2
+done
+
+# Test 4: /view_pixels returns a path to a valid PNG file
+log "Test 4: view_pixels"
+png_path=$(curl -sf "$EP/view_pixels") || { fail "view_pixels HTTP error"; png_path=""; }
+if [[ -n "$png_path" && -s "$png_path" ]] && \
+   [[ "$(head -c 8 "$png_path" | xxd -p)" == "89504e470d0a1a0a" ]]; then
+    log "  PASS ($(wc -c < "$png_path") bytes)"
+else
+    fail "screenshot file missing or not a PNG: $png_path"
+fi
+
+# Test 5: bad input is rejected with 400
+log "Test 5: bad input rejection"
+http_status=$(curl -s -o /dev/null -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d '{"url":"not a url"}' "$EP/openurl" || echo "000")
+if [[ "$http_status" == "400" ]]; then
+    log "  PASS"
+else
+    fail "expected 400 for bad openurl, got $http_status"
+fi
+
+# Test 6: ?format=json returns JSON
+log "Test 6: ?format=json"
+response=$(curl -sf "$EP/ready?format=json") || { fail "/ready?format=json HTTP error"; response=""; }
+if [[ "$response" == *'"ok"'* ]]; then
+    log "  PASS"
+else
+    fail "/ready?format=json did not return JSON: $response"
+fi
+
+if [[ "$FAILED" -ne 0 ]]; then
+    echo "FAIL: $FAILED test(s) failed" >&2
+    exit 1
+fi
+if [[ "$VERBOSE" -ne 0 ]]; then
+    echo "All iOS simulator tests passed."
+fi
+exit 0

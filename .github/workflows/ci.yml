@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Build
-        run: ./sv -vvv build
+        run: ./sv -vvv --ios --browser build
 
       - name: SandVault Tests
         env:
@@ -27,3 +27,20 @@ jobs:
           XCODE_DESTINATION: platform=macOS,arch=arm64
           VERBOSE: 1
         run: ./tests/tests
+
+  tag-version:
+    name: Tag Version
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.HOMEBREW_GITHUB_API_TOKEN }}
+
+      - name: Tag version if updated
+        run: .github/scripts/tag-version

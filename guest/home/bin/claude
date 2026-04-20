@@ -1,21 +1,35 @@
 #!/bin/bash
 set -Eeuo pipefail
-trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
-HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
-if [[ -x "$HOMEBREW_PREFIX/bin/claude" ]]; then
-    # Homebrew install
-    claude="$HOMEBREW_PREFIX/bin/claude"
-elif [[ -x "$HOME/.local/bin/claude" ]]; then
-    # Claude native install
-    claude="$HOME/.local/bin/claude"
-elif [[ -x "$HOME/node_modules/bin/claude" ]]; then
-    # Deprecated
-    claude="$HOME/node_modules/bin/claude"
-else
-    echo >&2 "claude is not installed. Run: \`sv claude\` to install it."
+# shellcheck source=sv-tool-prompts.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sv-tool-prompts.sh"
+
+unset CLAUDE
+if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
+    if [[ ! -x "$HOME/.local/bin/claude" ]]; then
+        echo >&2 "Installing Claude Code natively..."
+        curl -fsSL https://claude.ai/install.sh | bash
+    fi
+    CLAUDE="$HOME/.local/bin/claude"
+elif command -v brew &>/dev/null ; then
+    HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
+    if [[ -x "$HOMEBREW_PREFIX/bin/claude" ]]; then
+        # Homebrew install
+        CLAUDE="$HOMEBREW_PREFIX/bin/claude"
+    fi
+fi
+
+if [[ -z "${CLAUDE:-}" || ! -x "$CLAUDE" ]]; then
+    echo >&2 "ERROR: claude is not installed"
     exit 1
 fi
 
-echo "$USER: running claude --dangerously-skip-permissions"
-exec "$claude" --dangerously-skip-permissions "$@"
+TOOL_PROMPT=$(sv_tool_prompt)
+EXTRA_ARGS=()
+if [[ -n "$TOOL_PROMPT" ]]; then
+    EXTRA_ARGS+=(--append-system-prompt "$TOOL_PROMPT")
+fi
+
+echo >&2 "$USER: running claude --dangerously-skip-permissions"
+exec "$CLAUDE" --dangerously-skip-permissions ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"

@@ -1,16 +1,40 @@
 #!/bin/bash
 set -Eeuo pipefail
-trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
-HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
-if [[ -x "$HOMEBREW_PREFIX/bin/codex" ]]; then
-    codex="$HOMEBREW_PREFIX/bin/codex"
-elif [[ -x "$HOME/node_modules/bin/codex" ]]; then
-    codex="$HOME/node_modules/bin/codex"
-else
-    echo >&2 "codex is not installed. Run: \`sv codex\` to install it."
+# shellcheck source=sv-tool-prompts.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sv-tool-prompts.sh"
+
+unset CODEX
+if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
+    NPM_PREFIX="${HOME}/node_modules"
+    NPM_BIN="$NPM_PREFIX/bin"
+    if [[ ! -x "$NPM_BIN/codex" ]]; then
+        echo >&2 "Installing Codex natively with npm..."
+        npm install --prefix "$NPM_PREFIX" -g @openai/codex
+    fi
+    CODEX="$NPM_BIN/codex"
+elif command -v brew &>/dev/null ; then
+    HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
+    if [[ -x "$HOMEBREW_PREFIX/bin/codex" ]]; then
+        # Homebrew install
+        CODEX="$HOMEBREW_PREFIX/bin/codex"
+    fi
+fi
+
+if [[ -z "${CODEX:-}" || ! -x "$CODEX" ]]; then
+    echo >&2 "ERROR: codex is not installed"
     exit 1
 fi
 
-echo "$USER: running codex --dangerously-bypass-approvals-and-sandbox"
-exec "$codex" --dangerously-bypass-approvals-and-sandbox "$@"
+TOOL_PROMPT=$(sv_tool_prompt)
+EXTRA_ARGS=()
+if [[ -n "$TOOL_PROMPT" ]]; then
+    # Write combined tool prompt to a temp file for -c model_instructions_file
+    SV_PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/sv-tool-prompt.XXXXXX")
+    printf '%s\n' "$TOOL_PROMPT" > "$SV_PROMPT_FILE"
+    EXTRA_ARGS+=(-c "model_instructions_file=\"$SV_PROMPT_FILE\"")
+fi
+
+echo >&2 "$USER: running codex --dangerously-bypass-approvals-and-sandbox"
+exec "$CODEX" --dangerously-bypass-approvals-and-sandbox ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"

@@ -2,20 +2,21 @@
 # Update the version number
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR/.."
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
 
 PROJECT_PATH="./sv"
 
 # Function to display usage
 show_usage() {
     cat << EOF
-Usage: bump-version [TYPE]
+Usage: bump-version TYPE
 
 Bump the version number, commit changes on a branch, and push for a PR.
 
 Arguments:
-  TYPE        Version bump type: major, minor, or patch (default: patch)
+  TYPE        Version bump type: major, minor, or patch (required)
               
               major: X.0.0 (increment major version, reset minor and patch)
               minor: X.Y.0 (increment minor version, reset patch)
@@ -34,10 +35,15 @@ Note: Requires a clean git workspace (no uncommitted changes or untracked files)
 EOF
 }
 
-# Check for help flag
-if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+# Check for help flag or missing/invalid argument
+BUMP_TYPE="${1:-}"
+if [[ "$BUMP_TYPE" == "-h" ]] || [[ "$BUMP_TYPE" == "--help" ]]; then
     show_usage
     exit 0
+fi
+if [[ "$BUMP_TYPE" != "patch" && "$BUMP_TYPE" != "minor" && "$BUMP_TYPE" != "major" ]]; then
+    show_usage
+    exit 1
 fi
 
 # Check the project file exists
@@ -61,9 +67,6 @@ echo "Current version: $CURRENT_VERSION"
 # Parse version components
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
 
-# Default to patch bump
-BUMP_TYPE="${1:-patch}"
-
 case "$BUMP_TYPE" in
   major)
     MAJOR=$((MAJOR + 1))
@@ -77,41 +80,11 @@ case "$BUMP_TYPE" in
   patch)
     PATCH=$((PATCH + 1))
     ;;
-  *)
-    echo "Invalid bump type. Use: major, minor, or patch"
-    exit 1
-    ;;
 esac
 
 NEW_VERSION="$MAJOR.$MINOR.$PATCH"
-echo "New version: $NEW_VERSION"
 
 # Update version
 sed -i '' "s/^readonly VERSION=\"$CURRENT_VERSION\"/readonly VERSION=\"$NEW_VERSION\"/" "$PROJECT_PATH"
 
-# Create a bump branch if currently on a protected default branch
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-case "$CURRENT_BRANCH" in
-  main|master)
-    BUMP_BRANCH="bump-version-v$NEW_VERSION"
-    if git show-ref --verify --quiet "refs/heads/$BUMP_BRANCH"; then
-      echo "Error: Branch $BUMP_BRANCH already exists."
-      echo "Please delete it or choose a different version."
-      exit 1
-    fi
-    git checkout -b "$BUMP_BRANCH"
-    ;;
-  *)
-    BUMP_BRANCH="$CURRENT_BRANCH"
-    ;;
-esac
-
-# Stage the changes
-git add -A
-
-# Commit with version message
-git commit -m "Bump version to $NEW_VERSION"
-git push -u origin "$BUMP_BRANCH"
-
-echo "✓ Version bumped to $NEW_VERSION on branch $BUMP_BRANCH"
-echo "Next: open a PR from $BUMP_BRANCH into your default branch."
+echo "New version: $NEW_VERSION"
