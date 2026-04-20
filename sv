@@ -1207,6 +1207,10 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
 
     # Generate per-repo SSH deploy key so the sandvault user can push/pull
     if [[ "$DEPLOY_KEY" == "true" ]] \
+        && [[ "$REPOSITORY_SOURCE_URL" != git@* && "$REPOSITORY_SOURCE_URL" != ssh://* ]]; then
+        warn "--deploy-key ignored: $REPOSITORY_SOURCE_URL is not an SSH URL"
+    fi
+    if [[ "$DEPLOY_KEY" == "true" ]] \
         && [[ "$REPOSITORY_SOURCE_URL" == git@* || "$REPOSITORY_SOURCE_URL" == ssh://* ]]; then
         DEPLOY_KEY_NAME="deploy_${REPOSITORY_NAME}"
         DEPLOY_KEY_DIR="/Users/$SANDVAULT_USER/.ssh"
@@ -1228,11 +1232,15 @@ if [[ -n "$CLONE_REPOSITORY" ]]; then
         sandbox_repository_git config core.sshCommand \
             "ssh -i '$DEPLOY_KEY_PRIV' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
 
-        # Add deploy key to GitHub repo via gh CLI, or show it for manual addition
-        DEPLOY_KEY_REPO_PATH="${REPOSITORY_SOURCE_URL#git@github.com:}"
+        # Extract owner/repo from SSH URL for gh CLI and GitHub settings link
+        # Handles both git@github.com:org/repo.git and ssh://git@github.com/org/repo.git
+        DEPLOY_KEY_REPO_PATH="$REPOSITORY_SOURCE_URL"
+        DEPLOY_KEY_REPO_PATH="${DEPLOY_KEY_REPO_PATH#ssh://}"
+        DEPLOY_KEY_REPO_PATH="${DEPLOY_KEY_REPO_PATH#git@github.com:}"
+        DEPLOY_KEY_REPO_PATH="${DEPLOY_KEY_REPO_PATH#git@github.com/}"
         DEPLOY_KEY_REPO_PATH="${DEPLOY_KEY_REPO_PATH%.git}"
 
-        if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+        if command -v gh &>/dev/null && gh auth status &>/dev/null; then
             # Copy pub key to a temp file readable by the host user (gh runs as host)
             DEPLOY_KEY_TMP="$(mktemp)"
             "${SANDBOX_RUN[@]}" cat "$DEPLOY_KEY_PUB" > "$DEPLOY_KEY_TMP"
