@@ -1179,6 +1179,11 @@ if [[ "$REBUILD" == "true" ]]; then
         abort "Failed to remove $SANDVAULT_USER GeneratedUID entry from staff group"
     fi
 
+    # Add sandvault user to the sandvault group
+    # PrimaryGroupID alone is insufficient for ACL and dseditgroup membership checks
+    trace "Adding $SANDVAULT_USER to $SANDVAULT_GROUP group..."
+    sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user "$SANDVAULT_GROUP"
+
     # Add host user to the sandvault group
     trace "Adding $HOST_USER to $SANDVAULT_GROUP group..."
     sudo dseditgroup -o edit -a "$HOST_USER" -t user "$SANDVAULT_GROUP"
@@ -1787,6 +1792,9 @@ if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
     else
         abort "iOS bridge port not available. Bridge may have failed to start."
     fi
+fi
+if [[ -n "${COLORTERM:-}" ]]; then
+    EXTRA_ENV+=("COLORTERM=$COLORTERM")
 fi
 
 if [[ "$MODE" == "ssh" ]]; then
