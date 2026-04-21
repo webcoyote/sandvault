@@ -25,9 +25,9 @@ SandVault (`sv`) manages a limited user account to sandbox shell commands and AI
 0. Run [Browser Automation](#Browser-Automation) from within the sandbox that can be used for testing web interactions.
 1. Run [iOS Simulator Automation](#iOS-Simulator-Automation) from within the sandbox that can be used for iOS app testing.
 2. To run `xcodebuild` or `swift` see [Sandboxing xcodebuild and swift](#Sandboxing-xcodebuild-and-swift) for details.
-3. To push/pull from the sandbox, use `--deploy-key` with `--clone`. See [Clone with SSH deploy keys](#clone-with-ssh-deploy-keys) for details.
 4. To run other sandboxed applications inside sandvault, use the `-x` option. See [Sandboxing other apps](#Sandboxing-other-apps) for details.
-5. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
+5. To push/pull from the sandbox, use `--deploy-key` with `--clone`. See [Clone with SSH deploy keys](#clone-with-ssh-deploy-keys) for details.
+6. It's not possible to run GUI applications from within the sandbox; see [Running GUI Applications](#Running-GUI-Applications) for details.
 
 
 ## Security Model
