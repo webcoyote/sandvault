@@ -308,6 +308,21 @@ fi
 
 
 ###############################################################################
+# Task handoff — inject into clone if present
+###############################################################################
+# A handoff file in the shared workspace contains task context for Claude.
+# Write it into the cloned repo as CLAUDE.md so Claude discovers it on startup.
+# This happens after git clone but before sv launches, so it's an untracked
+# file in the clone — never committed, never in the source repo.
+HANDOFF_FILE="$SHARED_WORKSPACE/handoff.md"
+if [[ -f "$HANDOFF_FILE" ]]; then
+    cp "$HANDOFF_FILE" "$REPO_DIR/CLAUDE.md"
+    rm -f "$HANDOFF_FILE"
+    info "Task context loaded from handoff file"
+fi
+
+
+###############################################################################
 # Launch sandvault session in the cloned repository
 ###############################################################################
 # Default to "shell" if no sv args were given
