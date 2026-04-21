@@ -308,33 +308,11 @@ fi
 
 
 ###############################################################################
-# Task handoff — pass context to Claude if present
-###############################################################################
-# If a handoff file exists in the shared workspace, pass it to Claude via
-# --append-system-prompt-file. sv-clone controls the exec line, so we can
-# append Claude flags directly without fighting sv's argument parsing.
-# The handoff file is left in place (shared workspace is readable by both users).
-HANDOFF_FILE="$SHARED_WORKSPACE/handoff.md"
-
-
-###############################################################################
 # Launch sandvault session in the cloned repository
 ###############################################################################
 # Default to "shell" if no sv args were given
 if [[ ${#SV_ARGS[@]} -eq 0 ]]; then
     SV_ARGS=("shell")
-fi
-
-# If handing off to Claude and a handoff file exists, append it as system prompt
-if [[ -f "$HANDOFF_FILE" ]]; then
-    # Check if the sv command is claude (first arg or after flags)
-    for arg in "${SV_ARGS[@]}"; do
-        if [[ "$arg" == "claude" ]]; then
-            SV_ARGS+=("--" "--append-system-prompt-file" "$HANDOFF_FILE")
-            info "Task context loaded from handoff file"
-            break
-        fi
-    done
 fi
 
 info "Starting sandvault in $REPO_DIR..."
