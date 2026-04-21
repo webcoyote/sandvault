@@ -1674,6 +1674,23 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
     debug "Permissions check complete"
 fi
 
+    # Install Claude Code /sv skill if ~/.claude/ exists
+    CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
+    SV_SKILL_SOURCE="$WORKSPACE/skills/sv"
+    if [[ -d "$HOME/.claude" && -d "$SV_SKILL_SOURCE" ]]; then
+        mkdir -p "$CLAUDE_SKILLS_DIR"
+        if [[ -L "$CLAUDE_SKILLS_DIR/sv" ]]; then
+            # Update existing symlink
+            ln -sfn "$SV_SKILL_SOURCE" "$CLAUDE_SKILLS_DIR/sv"
+            debug "Updated /sv skill symlink"
+        elif [[ ! -e "$CLAUDE_SKILLS_DIR/sv" ]]; then
+            ln -s "$SV_SKILL_SOURCE" "$CLAUDE_SKILLS_DIR/sv"
+            info "Installed /sv skill for Claude Code (type /sv to hand off tasks to sandvault)"
+        else
+            debug "/sv skill already exists (not a symlink, skipping)"
+        fi
+    fi
+
 if [[ "$COMMAND" == "build" ]]; then
     exit 0
 fi
