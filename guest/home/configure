@@ -97,6 +97,7 @@ defaults write com.apple.dt.Xcode IDECustomDerivedDataLocation ".DerivedData"
 if [[ -n "${SHARED_WORKSPACE:-}" ]]; then
     debug "Copying $SHARED_WORKSPACE/user contents to $HOME"
     mkdir -p "$SHARED_WORKSPACE/user"
+    # Exitcode 23 = partial transfer (e.g. .DS_Store locked) — acceptable here
     /usr/bin/rsync \
         --quiet \
         --archive \
@@ -110,7 +111,8 @@ if [[ -n "${SHARED_WORKSPACE:-}" ]]; then
         --exclude='.zshrc' \
         --exclude='.zlogin' \
         --exclude='.zlogout' \
-        "$SHARED_WORKSPACE/user/" "$HOME/"
+        "$SHARED_WORKSPACE/user/" "$HOME/" \
+        || [[ $? -eq 23 ]]
 fi
 
 
