@@ -193,7 +193,7 @@ if [[ -d "$REPO_DIR/.git" ]]; then
 else
     debug "Cloning into $REPO_DIR..."
     mkdir -p "$(dirname "$REPO_DIR")"
-    git clone "$CLONE_SOURCE" "$REPO_DIR"
+    git clone --no-hardlinks "$CLONE_SOURCE" "$REPO_DIR"
 
     # If cloned from a local path, set origin to the real remote URL
     if [[ -n "$LOCAL_REPOSITORY" ]]; then
