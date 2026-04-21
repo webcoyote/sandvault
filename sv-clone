@@ -308,6 +308,21 @@ fi
 
 
 ###############################################################################
+# Task handoff — inject context for Claude if present
+###############################################################################
+# If a handoff file exists in the shared workspace, copy it into the cloned
+# repo's .claude/ directory so Claude auto-discovers it on startup. The handoff
+# file is consumed (deleted) after copying.
+HANDOFF_FILE="$SHARED_WORKSPACE/handoff.md"
+if [[ -f "$HANDOFF_FILE" ]]; then
+    mkdir -p "$REPO_DIR/.claude"
+    cp "$HANDOFF_FILE" "$REPO_DIR/.claude/handoff.md"
+    rm -f "$HANDOFF_FILE"
+    info "Task context loaded from handoff file"
+fi
+
+
+###############################################################################
 # Launch sandvault session in the cloned repository
 ###############################################################################
 # Default to "shell" if no sv args were given
