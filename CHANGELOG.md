@@ -2,6 +2,19 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.11.0] - 2026-04-20
+
+### Fixed
+- Fix sandvault user not being added to the sandvault group ([#131](https://github.com/webcoyote/sandvault/pull/131))
+
+### Changed
+- Forward `COLORTERM` environment variable from host to guest for proper terminal color support ([#131](https://github.com/webcoyote/sandvault/pull/131))
+
+### Thanks to 2 contributors!
+
+- [@jesserobbins](https://github.com/jesserobbins)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.10.0] - 2026-04-18
 
 ### Added
