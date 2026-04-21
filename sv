@@ -136,7 +136,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.10.0"
+readonly VERSION="1.11.0"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -1872,6 +1872,9 @@ if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
     else
         abort "iOS bridge port not available. Bridge may have failed to start."
     fi
+fi
+if [[ -n "${COLORTERM:-}" ]]; then
+    EXTRA_ENV+=("COLORTERM=$COLORTERM")
 fi
 
 if [[ "$MODE" == "ssh" ]]; then
