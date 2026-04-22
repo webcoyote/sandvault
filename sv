@@ -400,28 +400,6 @@ install_ios_deps() {
     fi
 }
 
-init_sandbox_run_for_repository() {
-    SANDBOX_RUN=()
-    if [[ "$NESTED" == "false" ]]; then
-        SANDBOX_RUN+=("sudo" "--non-interactive" "--user=$SANDVAULT_USER")
-    fi
-    SANDBOX_RUN+=(
-        "/usr/bin/env" "-i"
-        "HOME=/Users/$SANDVAULT_USER"
-        "USER=$SANDVAULT_USER"
-        "SHELL=/bin/zsh"
-        "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
-    )
-}
-
-sandbox_repository_git() {
-    "${SANDBOX_RUN[@]}" git -C "$INITIAL_DIR" "$@"
-}
-
-local_repository_git() {
-    git -C "$LOCAL_REPOSITORY" "$@"
-}
-
 force_cleanup_sandvault_processes() {
     local cleanup_mode="${1:-session-exit}"
     if [[ "$NESTED" == "true" ]]; then
@@ -804,8 +782,6 @@ NATIVE_INSTALL=false
 MODE=shell
 COMMAND_ARGS=()
 INITIAL_DIR=""
-CLONE_REPOSITORY=""
-
 show_help() {
     echo "SandVault $VERSION by Patrick Wyatt <pat@codeofhonor.com>"
     echo "Project home page: https://github.com/webcoyote/sandvault"
@@ -827,7 +803,7 @@ show_help() {
     echo "  -e, --endpoint       Show Chrome endpoint URL (requires --browser session)"
     echo "  -i, --ios            Boot iOS Simulator and expose HTTP bridge into sandbox"
     echo "  -I, --ios-gui        Also show the Simulator.app window (implies --ios)"
-    echo "  -c, --clone URL|PATH Clone Git repository into sandvault home and open there"
+    echo "  -c, --clone URL|PATH (removed — use sv-clone instead)"
     echo "  -N, --native-install Use native installers instead of Homebrew for AI tools"
     echo "  --fix-permissions    Fix umask and file permissions [standalone or with build]"
     echo "  --version            Show version information"
@@ -922,11 +898,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -c|--clone)
-            if [[ $# -lt 2 ]]; then
-                abort "Missing argument for $1"
-            fi
-            CLONE_REPOSITORY="$2"
-            shift 2
+            abort "--clone has been removed from sv. Use sv-clone instead:\n  sv-clone <URL|PATH> [-- sv-args ...]"
             ;;
         -h|--help)
             show_help
@@ -994,20 +966,14 @@ case "${1:-}" in
         ;;
 esac
 readonly COMMAND
-readonly CLONE_REPOSITORY
 
 if [[ "$FIX_PERMISSIONS" == "true" && "$COMMAND" != "build" ]]; then
     abort "--fix-permissions can only be used standalone or with build"
 fi
 
-if [[ -z "$CLONE_REPOSITORY" ]]; then
-    # Resolve symlinks to get the real path
-    INITIAL_DIR="$(cd "${INITIAL_DIR:-"${PWD}"}" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
-    readonly INITIAL_DIR
-elif [[ -n "$INITIAL_DIR" ]]; then
-    # --clone wants to set INITIAL_DIRECTORY
-    abort "Cannot use [PATH] and --clone together; choose one"
-fi
+# Resolve symlinks to get the real path
+INITIAL_DIR="$(cd "${INITIAL_DIR:-"${PWD}"}" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
+readonly INITIAL_DIR
 
 
 ###############################################################################
@@ -1508,124 +1474,6 @@ if [[ -d "$WORKSPACE/guest/home/user" ]]; then
     abort "Storing user configuration in 'guest/home/user/' is no longer supported. Move it to the shared workspace instead:\n\n  /usr/bin/rsync --archive --remove-source-files '$WORKSPACE/guest/home/user/' '$SHARED_WORKSPACE/user/' && rmdir '$WORKSPACE/guest/home/user'"
 fi
 
-
-###############################################################################
-# Run the application
-###############################################################################
-if [[ -n "$CLONE_REPOSITORY" ]]; then
-    CLONE_SUPPORTED_COMMANDS=(shell claude codex opencode gemini)
-    for supported_command in "${CLONE_SUPPORTED_COMMANDS[@]}"; do
-        if [[ "${COMMAND:-shell}" == "$supported_command" ]]; then
-            break
-        fi
-    done
-    if [[ "${COMMAND:-shell}" != "${supported_command:-}" ]]; then
-        abort "--clone is only supported with: ${CLONE_SUPPORTED_COMMANDS[*]}"
-    fi
-
-    case "$(basename "${CLONE_REPOSITORY%/}")" in
-        ""|/)
-            abort "--clone path must include a directory name"
-            ;;
-        *)
-            :
-            ;;
-    esac
-
-    init_sandbox_run_for_repository
-
-    if [[ -d "$CLONE_REPOSITORY" ]]; then
-        LOCAL_REPOSITORY="$(cd "$CLONE_REPOSITORY" && pwd -P)"
-        REPOSITORY_SOURCE_URL="$(local_repository_git remote get-url origin)"
-        REPOSITORY_CLONE_SOURCE="$LOCAL_REPOSITORY"
-        REPOSITORY_NAME="$(basename "$LOCAL_REPOSITORY")"
-    else
-        REPOSITORY_SOURCE_URL="$CLONE_REPOSITORY"
-        REPOSITORY_CLONE_SOURCE="$REPOSITORY_SOURCE_URL"
-        REPOSITORY_NAME="${REPOSITORY_SOURCE_URL%/}"
-    fi
-
-    [[ "$REPOSITORY_NAME" == *"://"* ]] && REPOSITORY_NAME="${REPOSITORY_NAME##*/}"
-    if [[ "$REPOSITORY_NAME" == *:* ]]; then
-        REPOSITORY_NAME="${REPOSITORY_NAME##*:}"
-    fi
-    REPOSITORY_NAME="${REPOSITORY_NAME##*/}"
-    REPOSITORY_NAME="${REPOSITORY_NAME%.git}"
-    if [[ -z "$REPOSITORY_NAME" ]]; then
-        abort "Could not determine repository name from --clone argument"
-    fi
-
-    INITIAL_DIR="/Users/$SANDVAULT_USER/repositories/$REPOSITORY_NAME"
-
-    USE_DIRECT_LOCAL_CLONE=false
-    LOCAL_GIT_SAFE_DIRECTORY_ARGS=()
-    if [[ -n "${LOCAL_REPOSITORY:-}" ]]; then
-        LOCAL_GIT_SAFE_DIRECTORY_ARGS=(
-            -c "safe.directory=$LOCAL_REPOSITORY"
-            -c "safe.directory=$LOCAL_REPOSITORY/.git"
-        )
-        # Ensure sandvault user can read repository metadata before direct clone/fetch
-        if "${SANDBOX_RUN[@]}" test -r "$LOCAL_REPOSITORY" \
-            && "${SANDBOX_RUN[@]}" git \
-                "${LOCAL_GIT_SAFE_DIRECTORY_ARGS[@]}" \
-                -C "$LOCAL_REPOSITORY" rev-parse --git-dir &>/dev/null; then
-            USE_DIRECT_LOCAL_CLONE=true
-        fi
-    fi
-    # Clone into a directory writable by user and readable by sandvault-user
-    (
-        # Use directory that both $USER and sandvault-$USER find valid
-        cd "$SHARED_WORKSPACE"
-        "${SANDBOX_RUN[@]}" mkdir -p "$(dirname "$INITIAL_DIR")"
-
-        if [[ "$USE_DIRECT_LOCAL_CLONE" == "true" ]]; then
-            if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
-                "${SANDBOX_RUN[@]}" git \
-                    "${LOCAL_GIT_SAFE_DIRECTORY_ARGS[@]}" \
-                    clone --no-hardlinks "$LOCAL_REPOSITORY" "$INITIAL_DIR"
-            else
-                "${SANDBOX_RUN[@]}" git \
-                    "${LOCAL_GIT_SAFE_DIRECTORY_ARGS[@]}" \
-                    -C "$INITIAL_DIR" fetch "$LOCAL_REPOSITORY"
-            fi
-        else
-            mkdir -p "$SHARED_WORKSPACE/tmp"
-            HOST_SOURCE_DIR="$(mktemp -d "$SHARED_WORKSPACE/tmp/sv-clone-$REPOSITORY_NAME.XXXXXX")"
-            trap '
-                cd "$SHARED_WORKSPACE"
-                "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR" || true
-                "${SANDBOX_RUN[@]}" git config --global --unset-all --fixed-value safe.directory "$HOST_SOURCE_DIR/.git" || true
-                rm -rf "$HOST_SOURCE_DIR"
-            ' EXIT
-            "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR"
-            "${SANDBOX_RUN[@]}" git config --global --add safe.directory "$HOST_SOURCE_DIR/.git"
-
-            # Clone the repo in a way that sandvault-user has access to all files (--no-hardlinks)
-            git clone --mirror --no-hardlinks "$REPOSITORY_CLONE_SOURCE" "$HOST_SOURCE_DIR"
-            chmod -R a+rX "$HOST_SOURCE_DIR" 2>/dev/null || warn "Could not set permissions on cloned repository ($HOST_SOURCE_DIR). The sandvault user may not be able to read it."
-            if ! "${SANDBOX_RUN[@]}" test -d "$INITIAL_DIR/.git"; then
-                "${SANDBOX_RUN[@]}" git clone "$HOST_SOURCE_DIR" "$INITIAL_DIR"
-            else
-                "${SANDBOX_RUN[@]}" git -C "$INITIAL_DIR" fetch "$HOST_SOURCE_DIR"
-            fi
-        fi
-    )
-
-    if "${SANDBOX_RUN[@]}" git -C "$INITIAL_DIR" remote get-url origin &>/dev/null; then
-        sandbox_repository_git remote set-url origin "$REPOSITORY_SOURCE_URL"
-    else
-        sandbox_repository_git remote add origin "$REPOSITORY_SOURCE_URL"
-    fi
-
-    if [[ -n "${LOCAL_REPOSITORY:-}" ]]; then
-        if git -C "$LOCAL_REPOSITORY" remote get-url sandvault &>/dev/null; then
-            local_repository_git remote set-url sandvault "$INITIAL_DIR"
-        else
-            local_repository_git remote add sandvault "$INITIAL_DIR"
-        fi
-    fi
-fi
-readonly INITIAL_DIR
 
 ###############################################################################
 # Fix permissions (runs with --fix-permissions regardless of --rebuild)

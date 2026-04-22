@@ -1,0 +1,148 @@
+#!/bin/bash
+# Gather release data (commits, PRs, issues, contributors) since the last
+# tag and emit structured JSON to stdout.  Designed to be piped into an AI
+# agent that converts the raw data into a polished changelog section.
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+REPO="webcoyote/sandvault"
+
+# ── helpers ──────────────────────────────────────────────────────────────
+
+show_usage() {
+    cat <<'EOF'
+Usage: generate-release-data
+
+Collect commits, pull-request metadata, issue metadata, and contributor
+information since the most recent git tag.  Output is JSON on stdout.
+
+Prerequisites:
+  - gh CLI authenticated (`gh auth status`)
+  - jq installed
+  - At least one git tag in the repository
+
+Options:
+  -h, --help  Show this help message and exit
+EOF
+}
+
+die() { echo >&2 "Error: $*"; exit 1; }
+
+# ── args ─────────────────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+    show_usage
+    exit 0
+fi
+
+# ── prerequisites ────────────────────────────────────────────────────────
+
+command -v jq  >/dev/null 2>&1 || die "jq is required but not installed"
+command -v gh  >/dev/null 2>&1 || die "gh CLI is required but not installed"
+gh auth status >/dev/null 2>&1 || die "gh CLI is not authenticated — run 'gh auth login'"
+
+LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null)" \
+    || die "No git tags found in the repository"
+
+VERSION="$(./sv --version 2>/dev/null | head -1)" \
+    || die "Could not determine version from ./sv --version"
+
+DATE="$(date +%Y-%m-%d)"
+
+# ── commits ──────────────────────────────────────────────────────────────
+
+# Collect non-merge commits since the last tag.
+# For each commit extract: short hash, subject line, and PR number (if any).
+COMMITS_JSON="$(
+    git log --oneline --no-merges "${LAST_TAG}..HEAD" --format='%h%x09%s' |
+    while IFS=$'\t' read -r hash subject; do
+        # Try to extract a PR number from the subject (e.g. "(#123)")
+        pr_number=""
+        if [[ "$subject" =~ \(#([0-9]+)\) ]]; then
+            pr_number="${BASH_REMATCH[1]}"
+        fi
+        jq -n \
+            --arg hash    "$hash" \
+            --arg subject "$subject" \
+            --arg pr      "$pr_number" \
+            '{hash: $hash, subject: $subject, pr_number: ($pr | if . == "" then null else (. | tonumber) end)}'
+    done | jq -s '.'
+)"
+
+# If there are no commits, output empty but valid JSON.
+if [[ -z "$COMMITS_JSON" ]] || [[ "$COMMITS_JSON" == "null" ]]; then
+    COMMITS_JSON="[]"
+fi
+
+# ── contributors ─────────────────────────────────────────────────────────
+
+# We collect contributor GitHub logins from three sources:
+#   1. PR authors
+#   2. Linked issue reporters
+#   3. Commit authors (mapped from email → GitHub login)
+#
+# Each entry records the login and which source it came from.
+
+SEEN_LOGINS=""   # newline-delimited dedup list
+CONTRIBUTORS_JSON="[]"
+
+add_contributor() {
+    local login="$1" source="$2"
+    [[ -z "$login" ]] && return
+    # Skip if already seen from this source
+    local key="${login}:${source}"
+    case "$SEEN_LOGINS" in
+        *"$key"*) return ;;
+        *) ;;
+    esac
+    SEEN_LOGINS="${SEEN_LOGINS}${key}"$'\n'
+    CONTRIBUTORS_JSON="$(
+        echo "$CONTRIBUTORS_JSON" |
+        jq --arg login "$login" --arg source "$source" \
+            '. + [{login: $login, source: $source}]'
+    )"
+}
+
+# Collect unique PR numbers from commits
+PR_NUMBERS="$(echo "$COMMITS_JSON" | jq -r '.[].pr_number // empty' | sort -un)"
+
+for pr in $PR_NUMBERS; do
+    # PR author
+    login="$(gh pr view "$pr" --repo "$REPO" --json author --jq '.author.login' 2>/dev/null || true)"
+    add_contributor "$login" "pr_author"
+
+    # Linked issues — get closing issue references from the PR
+    closing_issues="$(gh pr view "$pr" --repo "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[].number' 2>/dev/null || true)"
+    for issue in $closing_issues; do
+        reporter="$(gh issue view "$issue" --repo "$REPO" --json author --jq '.author.login' 2>/dev/null || true)"
+        add_contributor "$reporter" "issue_reporter"
+    done
+done
+
+# Commit authors — map email to GitHub login
+COMMIT_EMAILS="$(git log --no-merges "${LAST_TAG}..HEAD" --format='%aE' | sort -u)"
+
+for email in $COMMIT_EMAILS; do
+    # Try the GitHub user search API to resolve email → login
+    login="$(gh api "/search/users?q=${email}+in:email" --jq '.items[0].login' 2>/dev/null || true)"
+    add_contributor "$login" "commit_author"
+done
+
+# ── assemble output ──────────────────────────────────────────────────────
+
+jq -n \
+    --arg version  "$VERSION" \
+    --arg last_tag "$LAST_TAG" \
+    --arg date     "$DATE" \
+    --argjson commits       "$COMMITS_JSON" \
+    --argjson contributors  "$CONTRIBUTORS_JSON" \
+    '{
+        version: $version,
+        last_tag: $last_tag,
+        date: $date,
+        commits: $commits,
+        contributors: $contributors
+    }'

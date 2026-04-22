@@ -1,0 +1,228 @@
+#!/bin/bash
+# Clone a git repository into the sandvault shared workspace.
+#
+# This script runs as $USER (the host user), which has full permissions to
+# read local repositories and clone from remote URLs. The clone destination
+# is $SHARED_WORKSPACE/repos/<name>, which is accessible to both the host
+# user and the sandvault user via group ACLs.
+#
+# After cloning, it launches an sv session in the cloned repository.
+#
+# Usage:
+#   sv-clone [-v|-vv|-vvv] <URL|PATH> [-- sv-args ...]
+#
+# Everything after -- is passed directly to sv (options, command, args).
+# If no command is given, defaults to "shell".
+#
+# Examples:
+#   sv-clone https://github.com/org/repo.git
+#   sv-clone git@github.com:org/repo.git -- claude
+#   sv-clone ~/projects/myrepo -- -b shell -- echo hello
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+# Resolve script location
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+    SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" = /* ]] || SOURCE="$SOURCE_DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
+WORKSPACE="$SCRIPT_DIR"
+
+# If running from a Homebrew Cellar, use the stable opt/ symlink
+if [[ "$WORKSPACE" =~ ^(.*)/homebrew/Cellar/([^/]+)/[^/]+$ ]]; then
+    WORKSPACE="${BASH_REMATCH[1]}/homebrew/opt/${BASH_REMATCH[2]}"
+fi
+
+SV="$WORKSPACE/sv"
+if [[ ! -x "$SV" ]]; then
+    echo >&2 "ERROR: sv not found at $SV"
+    exit 1
+fi
+
+
+###############################################################################
+# Functions
+###############################################################################
+[[ "${SV_VERBOSE:-0}" =~ ^[0-9]+$ ]] && SV_VERBOSE="${SV_VERBOSE:-0}" || SV_VERBOSE=1
+trace () {
+    [[ "$SV_VERBOSE" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
+}
+debug () {
+    [[ "$SV_VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
+}
+info () {
+    echo >&2 -e "ℹ️  \033[36m$*\033[0m"
+}
+warn () {
+    echo >&2 -e "⚠️  \033[33m$*\033[0m"
+}
+error () {
+    echo >&2 -e "❌ \033[31m$*\033[0m"
+}
+abort () {
+    error "$*"
+    exit 1
+}
+
+
+###############################################################################
+# Parse command line
+###############################################################################
+CLONE_REPOSITORY=""
+SV_ARGS=()
+
+if [[ $# -lt 1 ]]; then
+    echo >&2 "Usage: $(basename "$0") [OPTIONS] <URL|PATH> [-- sv-args ...]"
+    exit 1
+fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --)
+            shift
+            SV_ARGS=("$@")
+            break
+            ;;
+        -v|--verbose)
+            ((SV_VERBOSE++)) || true
+            shift
+            ;;
+        -vv)
+            ((SV_VERBOSE+=2)) || true
+            shift
+            ;;
+        -vvv)
+            ((SV_VERBOSE+=3)) || true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $(basename "$0") [-v|-vv|-vvv] <URL|PATH> [-- sv-args ...]"
+            echo ""
+            echo "Clone a git repository into the sandvault shared workspace and"
+            echo "launch an sv session there."
+            echo ""
+            echo "Options:"
+            echo "  -v, --verbose   Enable verbose output"
+    echo "  -vv / -vvv      More verbose / even more verbose"
+            echo "  -h, --help      Show this help message"
+            echo ""
+            echo "Everything after -- is passed directly to sv."
+            echo "If no sv command is given, defaults to 'shell'."
+            exit 0
+            ;;
+        -*)
+            abort "Unknown option: $1"
+            ;;
+        *)
+            if [[ -z "$CLONE_REPOSITORY" ]]; then
+                CLONE_REPOSITORY="$1"
+                shift
+            else
+                abort "Unexpected argument: $1 (use -- to pass arguments to sv)"
+            fi
+            ;;
+    esac
+done
+
+if [[ -z "$CLONE_REPOSITORY" ]]; then
+    abort "Missing repository URL or path"
+fi
+
+
+###############################################################################
+# Determine user and workspace paths
+###############################################################################
+if [[ "$USER" == sandvault-* ]]; then
+    HOST_USER="${USER#sandvault-}"
+else
+    HOST_USER="$USER"
+fi
+readonly HOST_USER
+readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
+
+if [[ ! -d "$SHARED_WORKSPACE" ]]; then
+    abort "Shared workspace not found: $SHARED_WORKSPACE (run 'sv build' first)"
+fi
+
+
+###############################################################################
+# Resolve repository name and source URL
+###############################################################################
+LOCAL_REPOSITORY=""
+if [[ -d "$CLONE_REPOSITORY" ]]; then
+    LOCAL_REPOSITORY="$(cd "$CLONE_REPOSITORY" && pwd -P)"
+    REPOSITORY_SOURCE_URL="$(git -C "$LOCAL_REPOSITORY" remote get-url origin 2>/dev/null)" \
+        || abort "Local repository $LOCAL_REPOSITORY has no 'origin' remote"
+    REPOSITORY_NAME="$(basename "$LOCAL_REPOSITORY")"
+else
+    REPOSITORY_SOURCE_URL="$CLONE_REPOSITORY"
+    REPOSITORY_NAME="${REPOSITORY_SOURCE_URL%/}"
+fi
+
+# Extract bare repository name from URL
+[[ "$REPOSITORY_NAME" == *"://"* ]] && REPOSITORY_NAME="${REPOSITORY_NAME##*/}"
+if [[ "$REPOSITORY_NAME" == *:* ]]; then
+    REPOSITORY_NAME="${REPOSITORY_NAME##*:}"
+fi
+REPOSITORY_NAME="${REPOSITORY_NAME##*/}"
+REPOSITORY_NAME="${REPOSITORY_NAME%.git}"
+if [[ -z "$REPOSITORY_NAME" ]]; then
+    abort "Could not determine repository name from: $CLONE_REPOSITORY"
+fi
+
+readonly REPOSITORY_NAME
+readonly REPOSITORY_SOURCE_URL
+readonly CLONE_SOURCE="${LOCAL_REPOSITORY:-$REPOSITORY_SOURCE_URL}"
+readonly REPO_DIR="$SHARED_WORKSPACE/repos/$REPOSITORY_NAME"
+
+debug "Repository: $REPOSITORY_NAME"
+debug "Source URL: $REPOSITORY_SOURCE_URL"
+debug "Clone from: $CLONE_SOURCE"
+debug "Destination: $REPO_DIR"
+
+
+###############################################################################
+# Clone or fetch
+###############################################################################
+if [[ -d "$REPO_DIR/.git" ]]; then
+    debug "Repository already exists; fetching..."
+    git -C "$REPO_DIR" fetch "${LOCAL_REPOSITORY:-origin}"
+else
+    debug "Cloning into $REPO_DIR..."
+    mkdir -p "$(dirname "$REPO_DIR")"
+    git clone --no-hardlinks "$CLONE_SOURCE" "$REPO_DIR"
+
+    # If cloned from a local path, set origin to the real remote URL
+    if [[ -n "$LOCAL_REPOSITORY" ]]; then
+        git -C "$REPO_DIR" remote set-url origin "$REPOSITORY_SOURCE_URL"
+    fi
+fi
+info "Repository ready at $REPO_DIR"
+
+
+###############################################################################
+# Add sandvault remote to local repository (if cloning from local)
+###############################################################################
+if [[ -n "$LOCAL_REPOSITORY" ]]; then
+    if git -C "$LOCAL_REPOSITORY" remote get-url sandvault &>/dev/null; then
+        git -C "$LOCAL_REPOSITORY" remote set-url sandvault "$REPO_DIR"
+    else
+        git -C "$LOCAL_REPOSITORY" remote add sandvault "$REPO_DIR"
+    fi
+    debug "Added 'sandvault' remote to $LOCAL_REPOSITORY"
+fi
+
+
+###############################################################################
+# Launch sandvault session in the cloned repository
+###############################################################################
+# Default to "shell" if no sv args were given
+if [[ ${#SV_ARGS[@]} -eq 0 ]]; then
+    SV_ARGS=("shell")
+fi
+
+info "Starting sandvault in $REPO_DIR..."
+exec "$SV" "${SV_ARGS[@]}" "$REPO_DIR"

@@ -1,0 +1,74 @@
+#!/bin/bash
+# Insert a changelog section into CHANGELOG.md, immediately after the
+# file header (the "# Changelog" heading and its description line).
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+CHANGELOG="CHANGELOG.md"
+
+# ── helpers ──────────────────────────────────────────────────────────────
+
+show_usage() {
+    cat <<'EOF'
+Usage: patch-changelog SECTION_FILE
+
+Insert the contents of SECTION_FILE into CHANGELOG.md after the file
+header.  The header is defined as everything before the first release
+section (a line starting with "## [").
+
+Arguments:
+  SECTION_FILE  Path to a Markdown file containing the new changelog
+                section (e.g., "## [1.12.0] - 2026-04-21\n\n### Added\n…")
+
+Options:
+  -h, --help    Show this help message and exit
+EOF
+}
+
+die() { echo >&2 "Error: $*"; exit 1; }
+
+# ── args ─────────────────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+    show_usage
+    exit 0
+fi
+
+SECTION_FILE="${1:-}"
+[[ -z "$SECTION_FILE" ]] && die "Missing required argument: SECTION_FILE (run with --help for usage)"
+[[ -f "$SECTION_FILE" ]] || die "File not found: $SECTION_FILE"
+
+# ── prerequisites ────────────────────────────────────────────────────────
+
+[[ -f "$CHANGELOG" ]] || die "$CHANGELOG not found in repository root"
+
+# ── find insertion point ─────────────────────────────────────────────────
+
+# The insertion point is the line before the first release heading ("## [").
+# Everything above that line is the file header.
+INSERT_LINE="$(grep -n '^## \[' "$CHANGELOG" | head -1 | cut -d: -f1)"
+
+if [[ -z "$INSERT_LINE" ]]; then
+    # No existing release sections — append after the entire file
+    INSERT_LINE="$(($(wc -l < "$CHANGELOG") + 1))"
+fi
+
+# ── splice the new section in ────────────────────────────────────────────
+
+{
+    # Header portion (everything before the first release section)
+    head -n "$((INSERT_LINE - 1))" "$CHANGELOG"
+    # New section
+    cat "$SECTION_FILE"
+    # Blank line separator
+    echo
+    # Rest of the file (existing release sections)
+    tail -n "+${INSERT_LINE}" "$CHANGELOG"
+} > "${CHANGELOG}.tmp"
+
+mv "${CHANGELOG}.tmp" "$CHANGELOG"
+
+echo "Patched $CHANGELOG with $(wc -l < "$SECTION_FILE" | tr -d ' ') lines from $SECTION_FILE"

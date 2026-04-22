@@ -7,6 +7,9 @@ START_TIME=$(date +%s.%N)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Prevent user's SANDVAULT_ARGS from interfering with test expectations.
+unset SANDVAULT_ARGS
+
 [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
 
 # We want to run the tests inside sandvault. However, sandvault
