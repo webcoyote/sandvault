@@ -106,7 +106,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  -v, --verbose   Enable verbose output"
-    echo "  -vv / -vvv      More verbose / even more verbose"
+            echo "  -vv / -vvv      More verbose / even more verbose"
             echo "  -h, --help      Show this help message"
             echo ""
             echo "Everything after -- is passed directly to sv."
@@ -204,6 +204,102 @@ info "Repository ready at $REPO_DIR"
 
 
 ###############################################################################
+# Deploy key — auto-generated for GitHub repositories
+###############################################################################
+# The sandvault user has no credentials. For any GitHub repo (cloned via SSH,
+# HTTPS, or local path), generate a per-repo ED25519 deploy key so the sandbox
+# can push/pull. The origin remote is rewritten to SSH so the deploy key works.
+# Keys are stored in $SHARED_WORKSPACE/.ssh/ — outside the repo working tree,
+# accessible to both users via group ACLs.
+
+# Extract owner/repo from origin URL (works for SSH, HTTPS, and local clones
+# whose origin points to GitHub)
+ORIGIN_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
+GITHUB_REPO_PATH=""
+if [[ -n "$ORIGIN_URL" ]]; then
+    # Normalize: strip protocol/host prefixes and .git suffix
+    GITHUB_REPO_PATH="$ORIGIN_URL"
+    GITHUB_REPO_PATH="${GITHUB_REPO_PATH#https://github.com/}"
+    GITHUB_REPO_PATH="${GITHUB_REPO_PATH#http://github.com/}"
+    GITHUB_REPO_PATH="${GITHUB_REPO_PATH#ssh://git@github.com/}"
+    GITHUB_REPO_PATH="${GITHUB_REPO_PATH#git@github.com:}"
+    GITHUB_REPO_PATH="${GITHUB_REPO_PATH#git@github.com/}"
+    GITHUB_REPO_PATH="${GITHUB_REPO_PATH%.git}"
+
+    # If it still looks like a full URL or local path, it's not GitHub
+    if [[ "$GITHUB_REPO_PATH" == *"://"* || "$GITHUB_REPO_PATH" == /* ]]; then
+        GITHUB_REPO_PATH=""
+    fi
+
+    # Validate the result looks like owner/repo
+    if [[ -n "$GITHUB_REPO_PATH" && ! "$GITHUB_REPO_PATH" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+        GITHUB_REPO_PATH=""
+    fi
+fi
+
+if [[ -n "$GITHUB_REPO_PATH" ]]; then
+    DEPLOY_KEY_NAME="deploy_${REPOSITORY_NAME}"
+    DEPLOY_KEY_DIR="$SHARED_WORKSPACE/.ssh"
+    DEPLOY_KEY_PRIV="$DEPLOY_KEY_DIR/$DEPLOY_KEY_NAME"
+    DEPLOY_KEY_PUB="$DEPLOY_KEY_PRIV.pub"
+
+    if [[ ! -f "$DEPLOY_KEY_PRIV" ]]; then
+        mkdir -p "$DEPLOY_KEY_DIR"
+        chmod 0700 "$DEPLOY_KEY_DIR"
+        ssh-keygen -t ed25519 \
+            -f "$DEPLOY_KEY_PRIV" \
+            -N "" \
+            -q \
+            -C "sandvault-deploy-${REPOSITORY_NAME}@${HOSTNAME}"
+        chmod 0600 "$DEPLOY_KEY_PRIV"
+        chmod 0644 "$DEPLOY_KEY_PUB"
+        info "Generated deploy key for $REPOSITORY_NAME"
+    else
+        debug "Deploy key already exists for $REPOSITORY_NAME"
+    fi
+
+    # Rewrite origin to SSH so the deploy key is used for push/pull
+    DEPLOY_SSH_URL="git@github.com:${GITHUB_REPO_PATH}.git"
+    if [[ "$ORIGIN_URL" != "$DEPLOY_SSH_URL" ]]; then
+        git -C "$REPO_DIR" remote set-url origin "$DEPLOY_SSH_URL"
+        debug "Rewrote origin to $DEPLOY_SSH_URL"
+    fi
+
+    # Configure this repo to use its deploy key (persists in .git/config)
+    git -C "$REPO_DIR" config core.sshCommand \
+        "ssh -i '$DEPLOY_KEY_PRIV' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+
+    # Upload deploy key to GitHub via gh CLI, or show it for manual addition
+    if command -v gh &>/dev/null && gh auth status &>/dev/null; then
+        if gh repo deploy-key add "$DEPLOY_KEY_PUB" \
+            --allow-write \
+            --title "sandvault-deploy-${REPOSITORY_NAME}@${HOSTNAME}" \
+            -R "$GITHUB_REPO_PATH" 2>/dev/null; then
+            info "Deploy key added to $GITHUB_REPO_PATH (write access enabled)"
+        else
+            warn "Could not add deploy key via gh CLI (may already exist or check repo permissions)"
+            echo ""
+            info "Deploy key for $REPOSITORY_NAME — add manually:"
+            echo "──────────────────────────────────────────────────────────"
+            cat "$DEPLOY_KEY_PUB"
+            echo "──────────────────────────────────────────────────────────"
+            info "https://github.com/$GITHUB_REPO_PATH/settings/keys"
+            echo ""
+        fi
+    else
+        echo ""
+        info "Deploy key for $REPOSITORY_NAME — add manually (or install gh CLI for auto-setup):"
+        echo "──────────────────────────────────────────────────────────"
+        cat "$DEPLOY_KEY_PUB"
+        echo "──────────────────────────────────────────────────────────"
+        info "https://github.com/$GITHUB_REPO_PATH/settings/keys"
+        info "  (Enable \"Allow write access\" to push)"
+        echo ""
+    fi
+fi
+
+
+###############################################################################
 # Add sandvault remote to local repository (if cloning from local)
 ###############################################################################
 if [[ -n "$LOCAL_REPOSITORY" ]]; then
@@ -224,5 +320,20 @@ if [[ ${#SV_ARGS[@]} -eq 0 ]]; then
     SV_ARGS=("shell")
 fi
 
+# Insert REPO_DIR after the first non-option argument (the sv command name)
+# so it is always parsed as PATH, even when sv options precede the command.
+LAUNCH_ARGS=()
+REPO_DIR_INSERTED=false
+for arg in "${SV_ARGS[@]}"; do
+    LAUNCH_ARGS+=("$arg")
+    if [[ "$REPO_DIR_INSERTED" == false && "$arg" != -* && "$arg" != "--" ]]; then
+        LAUNCH_ARGS+=("$REPO_DIR")
+        REPO_DIR_INSERTED=true
+    fi
+done
+if [[ "$REPO_DIR_INSERTED" == false ]]; then
+    LAUNCH_ARGS+=("$REPO_DIR")
+fi
+
 info "Starting sandvault in $REPO_DIR..."
-exec "$SV" "${SV_ARGS[@]}" "$REPO_DIR"
+exec "$SV" "${LAUNCH_ARGS[@]}"
