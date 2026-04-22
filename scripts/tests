@@ -57,6 +57,17 @@ fail() {
     write_result "FAIL" "$1" "${2:-}" "${3:-}"
 }
 
+# Extract owner/repo from any GitHub URL (HTTPS or SSH).
+# sv-clone rewrites HTTPS URLs to SSH for deploy key support,
+# so tests compare this normalized form instead of full URLs.
+github_repo_path() {
+    local url="$1"
+    url="${url#https://github.com/}"
+    url="${url#git@github.com:}"
+    url="${url%.git}"
+    echo "$url"
+}
+
 # Run sv command with current mode
 sv_cmd() {
     "${SV_CMD[@]}" --no-build "$@"
@@ -681,14 +692,10 @@ run_tests() {
         remote_output=$(git -C "$clone_path" config remote.origin.url 2>&1)
         status=$?
         set -e
-        # Extract owner/repo from both URLs for comparison
-        expected_repo="${expected_upstream#https://github.com/}"
-        expected_repo="${expected_repo#git@github.com:}"
-        expected_repo="${expected_repo%.git}"
-        actual_repo="${remote_output#https://github.com/}"
-        actual_repo="${actual_repo#git@github.com:}"
-        actual_repo="${actual_repo%.git}"
-        if [[ "$status" -ne 0 || "$actual_repo" != "$expected_repo" ]]; then
+        local actual_repo_path expected_repo_path
+        actual_repo_path="$(github_repo_path "$remote_output")"
+        expected_repo_path="$(github_repo_path "$expected_upstream")"
+        if [[ "$status" -ne 0 || "$actual_repo_path" != "$expected_repo_path" ]]; then
             fail "sv-clone clone origin points to upstream" "$expected_upstream" "$status | $remote_output"
             return
         fi
@@ -738,12 +745,11 @@ run_tests() {
         status=$?
         set -e
         # Deploy key setup may rewrite the URL to SSH, so compare repo path
-        expected_repo="${https_repository#https://github.com/}"
-        expected_repo="${expected_repo%.git}"
-        actual_repo="${remote_output#https://github.com/}"
-        actual_repo="${actual_repo#git@github.com:}"
-        actual_repo="${actual_repo%.git}"
-        if [[ "$status" -ne 0 || "$actual_repo" != "$expected_repo" ]]; then
+
+        local actual_repo_path expected_repo_path
+        actual_repo_path="$(github_repo_path "$remote_output")"
+        expected_repo_path="$(github_repo_path "$https_repository")"
+        if [[ "$status" -ne 0 || "$actual_repo_path" != "$expected_repo_path" ]]; then
             fail "sv-clone HTTPS clone origin points to remote URL" "$https_repository" "$status | $remote_output"
             return
         fi
