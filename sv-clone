@@ -251,8 +251,6 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
             -N "" \
             -q \
             -C "sandvault-deploy-${REPOSITORY_NAME}@${HOSTNAME}"
-        chmod 0600 "$DEPLOY_KEY_PRIV"
-        chmod 0644 "$DEPLOY_KEY_PUB"
         info "Generated deploy key for $REPOSITORY_NAME"
     else
         debug "Deploy key already exists for $REPOSITORY_NAME"
