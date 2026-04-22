@@ -674,12 +674,21 @@ run_tests() {
             return
         fi
 
-        # The clone's origin should point to the upstream URL.
+        # The clone's origin should point to the upstream repo. Deploy key
+        # setup may rewrite the URL from HTTPS to SSH, so compare the
+        # owner/repo path rather than the full URL.
         set +e
         remote_output=$(git -C "$clone_path" config remote.origin.url 2>&1)
         status=$?
         set -e
-        if [[ "$status" -ne 0 || "$remote_output" != *"$expected_upstream"* ]]; then
+        # Extract owner/repo from both URLs for comparison
+        expected_repo="${expected_upstream#https://github.com/}"
+        expected_repo="${expected_repo#git@github.com:}"
+        expected_repo="${expected_repo%.git}"
+        actual_repo="${remote_output#https://github.com/}"
+        actual_repo="${actual_repo#git@github.com:}"
+        actual_repo="${actual_repo%.git}"
+        if [[ "$status" -ne 0 || "$actual_repo" != "$expected_repo" ]]; then
             fail "sv-clone clone origin points to upstream" "$expected_upstream" "$status | $remote_output"
             return
         fi
@@ -728,7 +737,13 @@ run_tests() {
         remote_output=$(git -C "$clone_path" config remote.origin.url 2>&1)
         status=$?
         set -e
-        if [[ "$status" -ne 0 || "$remote_output" != *"$https_repository"* ]]; then
+        # Deploy key setup may rewrite the URL to SSH, so compare repo path
+        expected_repo="${https_repository#https://github.com/}"
+        expected_repo="${expected_repo%.git}"
+        actual_repo="${remote_output#https://github.com/}"
+        actual_repo="${actual_repo#git@github.com:}"
+        actual_repo="${actual_repo%.git}"
+        if [[ "$status" -ne 0 || "$actual_repo" != "$expected_repo" ]]; then
             fail "sv-clone HTTPS clone origin points to remote URL" "$https_repository" "$status | $remote_output"
             return
         fi
