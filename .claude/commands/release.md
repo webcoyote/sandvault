@@ -11,30 +11,45 @@ Prepare a new release for sandvault. This command updates the changelog, bumps t
 2. **Create a release branch**
    - Create branch: `git checkout -b release/vX.Y.Z`
 
-3. **Gather changes and contributors since the last release**
-   - Check to ensure the user is logged-in with `gh auth status`, otherwise halt
-   - Find the most recent git tag: `git describe --tags --abbrev=0`
-   - Get commits since that tag: `git log --oneline <last-tag>..HEAD --no-merges`
-   - **Filter for end-user visible changes only** - ignore developer tooling, CI, docs, tests
-   - Categorize changes into: Added, Changed, Fixed, Removed
-   - **Collect contributors:** For each PR referenced in the commits, get the author:
+3. **Generate release data**
+   - Run the data-gathering script, which collects commits, PR metadata, issue metadata, and contributors (PR authors, issue reporters, commit authors) into structured JSON:
      ```bash
-     gh pr view <N> --repo webcoyote/sandvault --json author --jq '.author.login'
+     .github/scripts/generate-release-data > /tmp/sv-release-data.json
      ```
-   - Also check for linked issue reporters (the person who filed the bug):
+   - If the script fails (e.g. `gh` not authenticated), fix the issue and retry
+
+4. **Generate changelog section via AI agent**
+   - Pipe a prompt into `sv claude` that instructs it to read the release data and write a polished changelog section. The prompt should include the Changelog Guidelines and Contributor Credits rules from this document:
      ```bash
-     gh issue view <N> --repo webcoyote/sandvault --json author --jq '.author.login'
+     cat <<'PROMPT' | ./sv claude
+     Read the file /tmp/sv-release-data.json — it contains structured release
+     data with commits, PR numbers, and contributor information.
+
+     Generate a changelog section following these rules:
+     - Only include end-user visible changes (ignore CI, docs, tests, internal refactoring)
+     - Categorize into: Added, Changed, Fixed, Removed (omit empty categories)
+     - Write clear, user-facing descriptions in present tense — not raw commit messages
+     - Link PRs: ([#N](https://github.com/webcoyote/sandvault/pull/N))
+     - Credit non-core contributors inline: — thanks @user!
+     - Credit bug reporters if different from PR author: — thanks @reporter for the report!
+     - Core team (webcoyote) gets no inline credit
+     - Add a "### Thanks to N contributors!" section listing all contributors alphabetically, linked to GitHub profiles
+     - Use the version and date from the JSON for the heading: ## [X.Y.Z] - YYYY-MM-DD
+
+     Write the result to /tmp/sv-changelog-section.md — nothing else, no explanation.
+     If there are no user-facing changes, write a single line: _No user-facing changes._
+     PROMPT
      ```
-   - Build a deduplicated list of all contributor `@handle`s for the release
+   - If the output contains `_No user-facing changes._`, ask the user if they still want to release
 
-4. **Update the changelog**
-   - Add a new section at the top of `CHANGELOG.md` with the new version and today's date
-   - **Only include changes that affect the end-user experience** - things users will see, feel, or interact with
-   - Write clear, user-facing descriptions (not raw commit messages)
-   - **Credit contributors inline** (see Contributor Credits below)
-   - If there are no user-facing changes, ask the user if they still want to release
+5. **Patch the changelog**
+   - Insert the generated section into `CHANGELOG.md`:
+     ```bash
+     .github/scripts/patch-changelog /tmp/sv-changelog-section.md
+     ```
+   - Show the user the diff (`git diff CHANGELOG.md`) and ask them to review before proceeding
 
-5. **Commit and push the release branch**
+6. **Commit and push the release branch**
    - Stage: `sv`, `CHANGELOG.md`
    - Commit message: `Bump version to X.Y.Z`
    - Push: `git push -u origin release/vX.Y.Z`
