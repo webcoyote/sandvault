@@ -297,6 +297,22 @@ run_tests() {
     }
     queue_test test_sandvault_args_ignored
 
+    # Verify SANDVAULT_ARGS is honored by sv when set.
+    test_sandvault_args_version() {
+        local output
+        local status
+        set +e
+        output=$(SANDVAULT_ARGS="--version" "$bash_path" "$SV_BASE" shell 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -eq 0 && "$output" == *"version"* ]]; then
+            pass "SANDVAULT_ARGS=--version prints version"
+        else
+            fail "SANDVAULT_ARGS=--version prints version" "exit 0 with version output" "$status | $output"
+        fi
+    }
+    queue_test test_sandvault_args_version
+
     # --help
     test_help() {
         local output
