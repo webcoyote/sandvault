@@ -568,6 +568,183 @@ run_tests() {
     queue_test test_clone_flag_rejected
 
     ###############################################################################
+    # sv-clone Tests
+    #
+    # sv-clone runs as the host user (not inside the sandbox), so these tests
+    # call the script directly rather than going through sv_cmd.  They are
+    # gated on mode_label to run only once (default mode, not SSH).
+    ###############################################################################
+    SV_CLONE_BASE="$SCRIPT_DIR/../sv-clone"
+
+    if [[ "$mode_label" != *" --ssh" && -x "$SV_CLONE_BASE" ]]; then
+
+    sv_clone_cmd() {
+        "$bash_path" "$SV_CLONE_BASE" "$@"
+    }
+
+    # Test cloning a local repository via sv-clone and wiring remotes.
+    test_sv_clone_local() {
+        local src_repository
+        local clone_name
+        local clone_path
+        local output
+        local status
+        local host_origin
+        local remote_output
+        local expected_upstream
+
+        src_repository="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null || true)"
+        if [[ -z "$src_repository" || ! -d "$src_repository/.git" ]]; then
+            fail "sv-clone clones local repository" "current repository available" "$src_repository"
+            return
+        fi
+
+        clone_name="$(basename "$src_repository")"
+        clone_path="$SHARED_WORKSPACE/repos/$clone_name"
+        expected_upstream="$(git -C "$src_repository" remote get-url origin 2>/dev/null || true)"
+        if [[ -z "$expected_upstream" ]]; then
+            fail "sv-clone clones local repository" "source repository has origin remote" "$src_repository"
+            return
+        fi
+
+        # Clean up any previous clone so the test is idempotent.
+        sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
+
+        # sv-clone clones the repo then exec's sv with the repo path.
+        # Pass "-- --no-build shell -- true" so the launched sv session
+        # exits immediately without requiring an interactive shell.
+        set +e
+        output=$(sv_clone_cmd "$src_repository" -- --no-build shell -- true 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            fail "sv-clone clones local repository" "exit 0" "$status | $output"
+            return
+        fi
+
+        # Verify the clone was created.
+        if [[ ! -d "$clone_path/.git" ]]; then
+            fail "sv-clone clones local repository" "$clone_path/.git exists" "directory not found"
+            return
+        fi
+
+        # Host origin should still point at the upstream remote.
+        host_origin="$(git -C "$src_repository" remote get-url origin 2>/dev/null)"
+        if [[ "$host_origin" != "$expected_upstream" ]]; then
+            fail "local repository keeps origin at upstream" "$expected_upstream" "$host_origin"
+            return
+        fi
+
+        # sv-clone should have added a 'sandvault' remote to the local repo.
+        remote_output="$(git -C "$src_repository" remote get-url sandvault 2>/dev/null)"
+        if [[ "$remote_output" != "$clone_path" ]]; then
+            fail "local repository gets sandvault remote" "$clone_path" "$remote_output"
+            return
+        fi
+
+        # The clone's origin should point to the upstream URL.
+        set +e
+        remote_output=$(git -C "$clone_path" config remote.origin.url 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 || "$remote_output" != *"$expected_upstream"* ]]; then
+            fail "sv-clone clone origin points to upstream" "$expected_upstream" "$status | $remote_output"
+            return
+        fi
+
+        pass "sv-clone clones local repository"
+
+        sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
+    }
+    queue_test test_sv_clone_local
+
+    # Clone tests share the same destination repo name (`sandvault`) and race if parallelized.
+    wait_for_all_running_tests
+
+    # Test cloning an HTTPS repository via sv-clone.
+    test_sv_clone_https() {
+        local clone_path
+        local output
+        local status
+        local remote_output
+        local https_repository
+
+        https_repository="https://github.com/webcoyote/sandvault.git"
+        clone_path="$SHARED_WORKSPACE/repos/sandvault"
+
+        # Start clean to avoid stale clone state influencing assertions.
+        sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
+
+        set +e
+        output=$(sv_clone_cmd "$https_repository" -- --no-build shell -- true 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            fail "sv-clone clones HTTPS repository" "exit 0" "$status | $output"
+            return
+        fi
+
+        if [[ ! -d "$clone_path/.git" ]]; then
+            fail "sv-clone clones HTTPS repository" "$clone_path/.git exists" "directory not found"
+            return
+        fi
+
+        # Use "git config remote.origin.url" instead of
+        # "git remote get-url" to avoid issues with
+        # git url remapping with insteadOf override.
+        set +e
+        remote_output=$(git -C "$clone_path" config remote.origin.url 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 || "$remote_output" != *"$https_repository"* ]]; then
+            fail "sv-clone HTTPS clone origin points to remote URL" "$https_repository" "$status | $remote_output"
+            return
+        fi
+
+        pass "sv-clone clones HTTPS repository"
+        sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
+    }
+    queue_test test_sv_clone_https
+
+    # Test that sv-clone rejects missing repository argument.
+    test_sv_clone_rejects_missing_arg() {
+        local output
+        local status
+
+        set +e
+        output=$(sv_clone_cmd 2>&1)
+        status=$?
+        set -e
+
+        if [[ "$status" -ne 0 && "$output" == *"Usage:"* ]]; then
+            pass "sv-clone rejects missing repository argument"
+        else
+            fail "sv-clone rejects missing repository argument" "non-zero exit with Usage message" "$status | $output"
+        fi
+    }
+    queue_test test_sv_clone_rejects_missing_arg
+
+    # Test that sv-clone --help works.
+    test_sv_clone_help() {
+        local output
+        local status
+
+        set +e
+        output=$(sv_clone_cmd --help 2>&1)
+        status=$?
+        set -e
+
+        if [[ "$status" -eq 0 && "$output" == *"Usage:"* ]]; then
+            pass "sv-clone --help shows usage"
+        else
+            fail "sv-clone --help shows usage" "exit 0 with Usage" "$status | $output"
+        fi
+    }
+    queue_test test_sv_clone_help
+
+    fi # end sv-clone tests (non-SSH only)
+
+    ###############################################################################
     # Shell Args Tests
     ###############################################################################
 
