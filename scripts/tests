@@ -7,6 +7,9 @@ START_TIME=$(date +%s.%N)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SV_BASE="$SCRIPT_DIR/../sv"
 
+# Prevent user's SANDVAULT_ARGS from interfering with test expectations.
+unset SANDVAULT_ARGS
+
 # Each user on the computer can have their own sandvault.
 # Inside sandvault, USER will be sandvault-<name>, where name is the host-users's name.
 if [[ "$USER" == sandvault-* ]]; then
