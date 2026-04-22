@@ -284,6 +284,19 @@ run_tests() {
     }
     queue_test test_version
 
+    # Verify SANDVAULT_ARGS is not leaking into test runs.
+    # The unset at the top of this script should have cleared any inherited value.
+    # If that guard is removed, a user's SANDVAULT_ARGS (e.g. --verbose --ssh)
+    # would inject unexpected flags into every sv invocation.
+    test_sandvault_args_ignored() {
+        if [[ -z "${SANDVAULT_ARGS+set}" ]]; then
+            pass "SANDVAULT_ARGS does not leak into tests"
+        else
+            fail "SANDVAULT_ARGS does not leak into tests" "unset" "SANDVAULT_ARGS='$SANDVAULT_ARGS'"
+        fi
+    }
+    queue_test test_sandvault_args_ignored
+
     # --help
     test_help() {
         local output
