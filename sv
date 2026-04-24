@@ -1522,6 +1522,19 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
     debug "Permissions check complete"
 fi
 
+# Install the Claude Code /sv skill when Claude Code is present. The skill
+# lives under the sandvault namespace (~/.claude/skills/sandvault/sv) so it
+# won't collide with any other skill named "sv". Use /bin/ln explicitly —
+# GNU coreutils `ln` on PATH (e.g. via Homebrew) has incompatible flag
+# handling that has bitten this project before.
+CLAUDE_SKILLS_ROOT="$HOME/.claude/skills/sandvault"
+SV_SKILL_SOURCE="$WORKSPACE/skills/sandvault/sv"
+if [[ -d "$HOME/.claude" && -d "$SV_SKILL_SOURCE" ]]; then
+    mkdir -p "$CLAUDE_SKILLS_ROOT"
+    /bin/ln -sfn "$SV_SKILL_SOURCE" "$CLAUDE_SKILLS_ROOT/sv"
+    debug "Installed /sv skill symlink at $CLAUDE_SKILLS_ROOT/sv"
+fi
+
 if [[ "$COMMAND" == "build" ]]; then
     exit 0
 fi
