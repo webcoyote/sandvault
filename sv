@@ -1728,6 +1728,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_VERBOSE=$SV_VERBOSE" \
+            "VERBOSE=${VERBOSE:-}" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
@@ -1777,6 +1778,7 @@ else
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_VERBOSE=$SV_VERBOSE" \
+            "VERBOSE=${VERBOSE:-}" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
