@@ -2,6 +2,20 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.12.0] - 2026-04-25
+
+### Added
+- Per-repo SSH deploy keys for cloned repositories ([#139](https://github.com/webcoyote/sandvault/pull/139)) — thanks @jesserobbins!
+- Standalone `sv-clone` command, replacing the previous `sv --clone` flag ([#133](https://github.com/webcoyote/sandvault/pull/133))
+
+### Fixed
+- File permissions no longer set the execute bit on regular files in the vault ([#141](https://github.com/webcoyote/sandvault/pull/141))
+
+### Thanks to 2 contributors!
+
+- [@jesserobbins](https://github.com/jesserobbins)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.11.0] - 2026-04-20
 
 ### Fixed
