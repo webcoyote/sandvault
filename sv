@@ -496,10 +496,12 @@ start_chrome() {
         > "$CHROME_LOG_FILE" 2>&1 &
     CHROME_PID=$!
 
-    # Wait for Chrome to report its debugging port (up to 5 seconds)
+    # Wait for Chrome to report its debugging port (up to 15 seconds).
+    # The window is generous because CI runners under load (parallel iOS
+    # simulator boot, Xcode jobs) can take several seconds to start Chrome.
     local port=""
     local i
-    for (( i=0; i<50; i++ )); do
+    for (( i=0; i<150; i++ )); do
         if ! kill -0 "$CHROME_PID" 2>/dev/null; then
             CHROME_PID=""
             abort "Chrome exited unexpectedly. Check $CHROME_LOG_FILE for details."
@@ -514,7 +516,7 @@ start_chrome() {
     if [[ -z "$port" ]]; then
         kill_chrome_pid "$CHROME_PID"
         CHROME_PID=""
-        abort "Chrome did not report a debugging port within 5 seconds. Check $CHROME_LOG_FILE."
+        abort "Chrome did not report a debugging port within 15 seconds. Check $CHROME_LOG_FILE."
     fi
 
     CHROME_PORT="$port"
@@ -617,10 +619,11 @@ start_ios_simulator() {
         > "$IOS_BRIDGE_LOG_FILE" 2>&1 &
     IOS_BRIDGE_PID=$!
 
-    # Wait for the bridge to report its port (up to 5 seconds).
+    # Wait for the bridge to report its port (up to 15 seconds). Generous
+    # because CI runners under load can be slow to start Python processes.
     local port=""
     local i
-    for (( i=0; i<50; i++ )); do
+    for (( i=0; i<150; i++ )); do
         if ! kill -0 "$IOS_BRIDGE_PID" 2>/dev/null; then
             IOS_BRIDGE_PID=""
             stop_ios_simulator
@@ -635,7 +638,7 @@ start_ios_simulator() {
 
     if [[ -z "$port" ]]; then
         stop_ios_simulator
-        abort "iOS bridge did not report a port within 5 seconds. Check $IOS_BRIDGE_LOG_FILE."
+        abort "iOS bridge did not report a port within 15 seconds. Check $IOS_BRIDGE_LOG_FILE."
     fi
 
     IOS_BRIDGE_PORT="$port"

@@ -32,92 +32,135 @@ FAILED=0
 log() { if [[ "$VERBOSE" -ne 0 ]]; then echo "   $*"; fi; }
 fail() { echo "FAIL: $*" >&2; FAILED=$((FAILED + 1)); }
 
-# Test 1: /ready responds (may return 503 while booting, that's fine)
-log "Test 1: /ready"
-if curl -s "$EP/ready" >/dev/null 2>&1; then
-    log "  PASS (already ready)"
-else
-    log "  PASS (responded, not ready yet)"
-fi
+# Run "$@" as a named phase and log its wall-clock duration. Phase output is
+# what reveals where the 4+ minutes go; without it the suite reports only the
+# total. Uses `date +%s` (whole seconds) for portability — sub-second precision
+# isn't useful when phases are dominated by simulator boot.
+phase() {
+    local name="$1"
+    shift
+    local start end
+    start=$(date +%s)
+    "$@"
+    end=$(date +%s)
+    log "[phase] ${name}: $((end - start))s"
+}
 
-# Wait for the simulator to finish booting (the bridge rejects
-# non-/ready endpoints with 503 until the simulator is booted,
-# which takes ~30-90s).
-log "Waiting for simulator to finish booting..."
-for i in $(seq 1 90); do
-    if curl -sf "$EP/ready" >/dev/null 2>&1; then
-        log "  ready after ${i}s"
-        break
+phase_ready_probe() {
+    log "Test 1: /ready"
+    if curl -s "$EP/ready" >/dev/null 2>&1; then
+        log "  PASS (already ready)"
+    else
+        log "  PASS (responded, not ready yet)"
     fi
-    if [[ $i -eq 90 ]]; then
-        fail "simulator did not become ready within 180s"
-        exit 1
+}
+
+phase_wait_for_boot() {
+    # Bridge rejects non-/ready endpoints with 503 until the simulator is
+    # booted, which takes ~30-90s.
+    log "Waiting for simulator to finish booting..."
+    local i
+    for i in $(seq 1 90); do
+        if curl -sf "$EP/ready" >/dev/null 2>&1; then
+            log "  ready after ${i} polls"
+            return
+        fi
+        if [[ $i -eq 90 ]]; then
+            fail "simulator did not become ready within 180s"
+            exit 1
+        fi
+        sleep 2
+    done
+}
+
+phase_launch_preferences() {
+    # Retry — `simctl bootstatus` returning success doesn't mean SpringBoard is
+    # ready to accept launches, especially on CI runners where it can lag
+    # 15-30s behind. Use ?format=json so a final failure surfaces simctl's
+    # stderr instead of a bare HTTP error.
+    log "Test 2: launch com.apple.Preferences"
+    local launch_ok=0
+    local launch_attempts=10
+    local launch_response=""
+    local launch_status=0
+    local i
+    for i in $(seq 1 "$launch_attempts"); do
+        launch_response=$(curl -s -o /dev/stdout -w '\n%{http_code}' \
+            -X POST -H 'Content-Type: application/json' \
+            -d '{"bundle_id":"com.apple.Preferences"}' "$EP/launch?format=json") || launch_response=""
+        launch_status="${launch_response##*$'\n'}"
+        if [[ "$launch_status" == "200" ]]; then
+            launch_ok=1
+            log "  PASS (attempt $i)"
+            return
+        fi
+        sleep 3
+    done
+    if [[ "$launch_ok" -eq 0 ]]; then
+        fail "simctl launch failed after ${launch_attempts} attempts (last status=${launch_status}): ${launch_response%$'\n'*}"
     fi
-    sleep 2
-done
+}
 
-# Test 2: /launch com.apple.Preferences (stock iOS app, always available)
-# Retry a few times — the simulator may not accept launches immediately after
-# /ready returns, especially in CI where resources are constrained.
-log "Test 2: launch com.apple.Preferences"
-launch_ok=0
-for i in $(seq 1 5); do
-    if curl -sf -X POST -H 'Content-Type: application/json' \
-        -d '{"bundle_id":"com.apple.Preferences"}' "$EP/launch" >/dev/null; then
-        launch_ok=1
-        log "  PASS (attempt $i)"
-        break
+phase_describe() {
+    log "Test 3: describe"
+    local response=""
+    local i
+    for i in $(seq 1 15); do
+        response=$(curl -sf "$EP/describe") || response=""
+        if [[ ${#response} -gt 100 ]]; then
+            log "  PASS (${#response} bytes, after ${i} polls)"
+            return
+        fi
+        if [[ $i -eq 15 ]]; then
+            fail "/describe returned unexpected output:\n${response}"
+        fi
+        sleep 2
+    done
+}
+
+phase_view_pixels() {
+    log "Test 4: view_pixels"
+    local png_path
+    png_path=$(curl -sf "$EP/view_pixels") || { fail "view_pixels HTTP error"; png_path=""; }
+    if [[ -n "$png_path" && -s "$png_path" ]] && \
+       [[ "$(head -c 8 "$png_path" | xxd -p)" == "89504e470d0a1a0a" ]]; then
+        log "  PASS ($(wc -c < "$png_path") bytes)"
+    else
+        fail "screenshot file missing or not a PNG: $png_path"
     fi
-    sleep 2
-done
-if [[ "$launch_ok" -eq 0 ]]; then
-    fail "simctl launch HTTP error (after 5 attempts)"
-fi
+}
 
-# Test 3: /describe returns a non-empty accessibility tree
-log "Test 3: describe"
-response=""
-for i in $(seq 1 15); do
-    response=$(curl -sf "$EP/describe") || response=""
-    if [[ ${#response} -gt 100 ]]; then
-        log "  PASS (${#response} bytes, after ${i}s)"
-        break
+phase_bad_input() {
+    log "Test 5: bad input rejection"
+    local http_status
+    http_status=$(curl -s -o /dev/null -w '%{http_code}' \
+        -X POST -H 'Content-Type: application/json' \
+        -d '{"url":"not a url"}' "$EP/openurl" || echo "000")
+    if [[ "$http_status" == "400" ]]; then
+        log "  PASS"
+    else
+        fail "expected 400 for bad openurl, got $http_status"
     fi
-    if [[ $i -eq 15 ]]; then
-        fail "/describe returned unexpected output:\n${response}"
+}
+
+phase_ready_json() {
+    log "Test 6: ?format=json"
+    local response
+    response=$(curl -sf "$EP/ready?format=json") || { fail "/ready?format=json HTTP error"; response=""; }
+    if [[ "$response" == *'"ok"'* ]]; then
+        log "  PASS"
+    else
+        fail "/ready?format=json did not return JSON: $response"
     fi
-    sleep 2
-done
+}
 
-# Test 4: /view_pixels returns a path to a valid PNG file
-log "Test 4: view_pixels"
-png_path=$(curl -sf "$EP/view_pixels") || { fail "view_pixels HTTP error"; png_path=""; }
-if [[ -n "$png_path" && -s "$png_path" ]] && \
-   [[ "$(head -c 8 "$png_path" | xxd -p)" == "89504e470d0a1a0a" ]]; then
-    log "  PASS ($(wc -c < "$png_path") bytes)"
-else
-    fail "screenshot file missing or not a PNG: $png_path"
-fi
-
-# Test 5: bad input is rejected with 400
-log "Test 5: bad input rejection"
-http_status=$(curl -s -o /dev/null -w '%{http_code}' \
-    -X POST -H 'Content-Type: application/json' \
-    -d '{"url":"not a url"}' "$EP/openurl" || echo "000")
-if [[ "$http_status" == "400" ]]; then
-    log "  PASS"
-else
-    fail "expected 400 for bad openurl, got $http_status"
-fi
-
-# Test 6: ?format=json returns JSON
-log "Test 6: ?format=json"
-response=$(curl -sf "$EP/ready?format=json") || { fail "/ready?format=json HTTP error"; response=""; }
-if [[ "$response" == *'"ok"'* ]]; then
-    log "  PASS"
-else
-    fail "/ready?format=json did not return JSON: $response"
-fi
+phase "ready_probe"        phase_ready_probe
+phase "wait_for_boot"      phase_wait_for_boot
+phase "launch_preferences" phase_launch_preferences
+phase "describe"           phase_describe
+phase "view_pixels"        phase_view_pixels
+phase "bad_input"          phase_bad_input
+phase "ready_json"         phase_ready_json
 
 if [[ "$FAILED" -ne 0 ]]; then
     echo "FAIL: $FAILED test(s) failed" >&2

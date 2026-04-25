@@ -110,10 +110,13 @@ queue_suite() {
     wait_for_slot
     (
         set +e
+        suite_start=$(date +%s.%N)
         # shellcheck disable=SC2086
         "../sv" $sv_flags --no-build shell -- "$tests" > "$RESULTS_DIR/$id.output" 2>&1
         status=$?
+        suite_end=$(date +%s.%N)
         printf '%s' "$status" > "$RESULTS_DIR/$id.status"
+        echo "$suite_end - $suite_start" | bc --mathlib | xargs printf "%.2f" > "$RESULTS_DIR/$id.elapsed"
     ) &
     TEST_PIDS+=("$!")
 }
@@ -136,6 +139,7 @@ collect_results() {
         dir=$(cat "$RESULTS_DIR/$id.name" 2>/dev/null || echo "unknown")
         tests=$(cat "$RESULTS_DIR/$id.tests" 2>/dev/null || echo "$dir/scripts/tests")
         status=$(cat "$RESULTS_DIR/$id.status" 2>/dev/null || echo "1")
+        elapsed=$(cat "$RESULTS_DIR/$id.elapsed" 2>/dev/null || echo "")
         output_file="$RESULTS_DIR/$id.output"
 
         if [[ "$VERBOSE" -ne 0 ]]; then
@@ -145,14 +149,19 @@ collect_results() {
             fi
         fi
 
+        suffix=""
+        if [[ "$VERBOSE" -ne 0 && -n "$elapsed" ]]; then
+            suffix=" (${elapsed}s)"
+        fi
+
         if [[ "$status" -eq 0 ]]; then
             ((PASSED++)) || true
             if [[ "$VERBOSE" -ne 0 ]]; then
-                echo -e "  ${GREEN}PASS${NC}: $(basename "$dir")"
+                echo -e "  ${GREEN}PASS${NC}: $(basename "$dir")${suffix}"
             fi
         else
             ((FAILED++)) || true
-            echo -e "  ${RED}FAIL${NC}: $(basename "$dir") (exit $status)"
+            echo -e "  ${RED}FAIL${NC}: $(basename "$dir") (exit $status)${suffix}"
         fi
 
         if [[ "$VERBOSE" -ne 0 ]]; then
@@ -165,10 +174,10 @@ collect_results() {
 # Run tests
 ###############################################################################
 
-queue_suite "swift"         "$SCRIPT_DIR/swift/scripts/tests"
-queue_suite "xcodebuild"    "$SCRIPT_DIR/xcodebuild/scripts/tests"
-queue_suite "browser"       "$SCRIPT_DIR/browser/scripts/tests"       "--browser"
 queue_suite "ios-simulator" "$SCRIPT_DIR/ios-simulator/scripts/tests" "--ios"
+queue_suite "browser"       "$SCRIPT_DIR/browser/scripts/tests"       "--browser"
+queue_suite "xcodebuild"    "$SCRIPT_DIR/xcodebuild/scripts/tests"
+queue_suite "swift"         "$SCRIPT_DIR/swift/scripts/tests"
 collect_results
 
 if [[ "$VERBOSE" -ne 0 ]]; then
