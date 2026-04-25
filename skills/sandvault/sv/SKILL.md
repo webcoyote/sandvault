@@ -24,7 +24,7 @@ Write a clear, actionable summary of what the user wants done. Include:
 
 ### 2. Write the handoff file
 
-Write the task briefing to `/Users/Shared/sv-$USER/handoff-<repo>.md`,
+Write the task briefing to `/Users/Shared/sv-$USER/tmp/handoff-<repo>.md`,
 where `$USER` is the host user and `<repo>` is the source repo's
 basename (e.g. `/Users/Shared/sv-jesse/handoff-sandvault.md`). This is
 the sandvault shared workspace — readable from inside the sandbox via
@@ -47,46 +47,28 @@ Show the user:
 
 ### 4. Launch in a new terminal window
 
-Detect the user's default terminal and launch `sv-clone` in a new window.
-
-**Detect the default terminal:**
+Use the bundled helper to launch `sv-clone` in a new window of whatever
+terminal the user is running (Terminal.app, iTerm2, Ghostty, WezTerm,
+kitty, Alacritty, cmux, Warp, with Terminal.app as a fallback):
 
 ```bash
-defaults read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers 2>/dev/null | grep -A1 "LSHandlerRoleShell" | grep -o '"[^"]*"' | tr -d '"'
+skills/sandvault/sv/scripts/launch-in-terminal.sh 'sv-clone <repo-path> -- claude -- "Read /Users/Shared/sv-<host-user>/tmp/handoff-<repo>.md and continue the task described there."'
 ```
 
-Look for `com.googlecode.iterm2` (iTerm2) or `com.apple.Terminal` (Terminal.app). If detection fails, default to Terminal.app.
+The helper detects the parent terminal app via
+`skills/sandvault/sv/scripts/find-terminal-app.sh` (which walks the process tree to find
+the first ancestor in `/Applications`) and dispatches to the
+appropriate launch mechanism for that terminal. To override detection,
+set `SV_TERMINAL` (e.g. `SV_TERMINAL=ghostty`, accepts either a short
+alias or a `.app` bundle name).
+
+Substitute `<repo-path>` (the source repo's absolute path),
+`<host-user>` (the host user's login — same `$USER` used when writing
+the handoff file), and `<repo>` (the source repo's basename) literally
+into the command string.
 
 The launch command runs `sv-clone`, passing the handoff path to the
 sandboxed Claude as its initial prompt via the `--` separator
-pass-through (`sv-clone` → `sv` → sandbox zshrc → `claude`):
-
-```
-sv-clone <repo-path> -- claude -- "Read /Users/Shared/sv-<host-user>/handoff-<repo>.md and continue the task described there."
-```
-
-Substitute `<host-user>` (the host user's login — same `$USER` used
-when writing the handoff file) and `<repo>` (the source repo's
-basename) literally into the prompt string.
+pass-through (`sv-clone` → `sv` → sandbox zshrc → `claude`).
 
 If `sv-clone` is not on PATH, the installed sandvault is out of date — tell the user to upgrade (e.g. `brew upgrade sandvault`) and retry. The old `sv --clone` flag has been removed in favor of the standalone `sv-clone` script.
-
-**For iTerm2:**
-
-```bash
-osascript <<'EOF'
-tell application "iTerm2"
-    activate
-    set newWindow to (create window with default profile)
-    tell current session of newWindow
-        write text "sv-clone <repo-path> -- claude -- \"Read /Users/Shared/sv-<host-user>/handoff-<repo>.md and continue the task described there.\""
-    end tell
-end tell
-EOF
-```
-
-**For Terminal.app:**
-
-```bash
-osascript -e 'tell application "Terminal" to activate' -e 'tell application "Terminal" to do script "sv-clone <repo-path> -- claude -- \"Read /Users/Shared/sv-<host-user>/handoff-<repo>.md and continue the task described there.\""'
-```
