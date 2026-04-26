@@ -2,6 +2,16 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.13.0] - 2026-04-26
+
+### Changed
+- Increase Chrome and iOS simulator startup timeouts from 5s to 15s for better reliability under load ([#146](https://github.com/webcoyote/sandvault/pull/146))
+- Pass `VERBOSE` environment variable through to sandboxed processes
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.12.0] - 2026-04-25
 
 ### Added
