@@ -1,30 +1,22 @@
 #!/bin/bash
 # Test iOS simulator bridge via the HTTP endpoint.
 #
-# This suite is opt-in: it requires $SV_IOS_SIMULATOR_ENDPOINT, which is only
-# set when sandvault was launched with --ios. Booting a simulator
-# takes ~30-90 seconds, so this is not run by the default test harness (which
-# uses `sv --browser --no-build`). Invoke explicitly with:
-#
-#     sv --ios --no-build shell -- tests/ios-simulator/scripts/tests
+# Self-elevates into a sandvault `--ios` session if not already in one, so
+# this script is runnable both standalone and from the harness. Booting a
+# simulator takes ~30-90 seconds.
 #
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Re-exec under `sv --ios` if the bridge endpoint isn't already wired in.
+if [[ -z "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
+    exec "$SCRIPT_DIR/../../../sv" --ios --no-build shell -- "$0" "$@"
+fi
+
 cd "$SCRIPT_DIR/.."
 
 [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
-
-if [[ -z "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
-    # Skip cleanly so the suite doesn't fail for users who ran `sv --browser`.
-    # Return 0 (pass) with a clear message; exit 77 would be the autoconf
-    # convention for "skipped" but the sandvault runner treats non-zero as
-    # FAIL, so we just skip as PASS with a log line.
-    if [[ "$VERBOSE" -ne 0 ]]; then
-        echo "SKIP: SV_IOS_SIMULATOR_ENDPOINT not set (re-run with: sv --ios shell -- $0)"
-    fi
-    exit 0
-fi
 
 EP="$SV_IOS_SIMULATOR_ENDPOINT"
 FAILED=0

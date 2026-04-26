@@ -92,7 +92,6 @@ wait_for_slot() {
 queue_suite() {
     local dir="$1"
     local tests="$2"
-    local sv_flags="${3:-}"
     local id
 
     ((TOTAL++)) || true
@@ -111,8 +110,7 @@ queue_suite() {
     (
         set +e
         suite_start=$(date +%s.%N)
-        # shellcheck disable=SC2086
-        "../sv" $sv_flags --no-build shell -- "$tests" > "$RESULTS_DIR/$id.output" 2>&1
+        "$tests" > "$RESULTS_DIR/$id.output" 2>&1
         status=$?
         suite_end=$(date +%s.%N)
         printf '%s' "$status" > "$RESULTS_DIR/$id.status"
@@ -174,8 +172,8 @@ collect_results() {
 # Run tests
 ###############################################################################
 
-queue_suite "ios-simulator" "$SCRIPT_DIR/ios-simulator/scripts/tests" "--ios"
-queue_suite "browser"       "$SCRIPT_DIR/browser/scripts/tests"       "--browser"
+queue_suite "ios-simulator" "$SCRIPT_DIR/ios-simulator/scripts/tests"
+queue_suite "browser"       "$SCRIPT_DIR/browser/scripts/tests"
 queue_suite "xcodebuild"    "$SCRIPT_DIR/xcodebuild/scripts/tests"
 queue_suite "swift"         "$SCRIPT_DIR/swift/scripts/tests"
 collect_results
