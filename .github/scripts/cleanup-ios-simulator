@@ -1,0 +1,20 @@
+#!/bin/bash
+# Tear down the simulator created by `preboot-ios-simulator`.
+# Always exits 0 — cleanup is best-effort on an ephemeral CI runner.
+set -Eeuo pipefail
+
+: "${RUNNER_TEMP:?RUNNER_TEMP must be set}"
+
+udid_file="$RUNNER_TEMP/sv-ios.udid"
+if [[ ! -f "$udid_file" ]]; then
+    echo "No UDID file at $udid_file — nothing to clean up"
+    exit 0
+fi
+
+udid="$(cat "$udid_file")"
+echo "Cleaning up simulator UDID=$udid"
+
+time xcrun simctl shutdown "$udid" >/dev/null 2>&1 || true
+time xcrun simctl delete   "$udid" >/dev/null 2>&1 || true
+rm -f "$udid_file"
+echo "Cleanup complete"

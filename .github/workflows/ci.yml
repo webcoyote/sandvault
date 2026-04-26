@@ -17,6 +17,14 @@ jobs:
       - name: Build
         run: ./sv -vvv --ios --browser build
 
+      - name: Pre-boot iOS simulator
+        # Boot a simulator now and export its UDID via SV_IOS_REUSE_UDID so the
+        # iOS test suite reuses it instead of paying create+boot inside
+        # tests/tests. Returns as soon as `simctl boot` accepts the request;
+        # the simulator finishes booting in the background during SandVault
+        # Tests. The bridge picks up via its own `bootstatus -b` call.
+        run: .github/scripts/preboot-ios-simulator
+
       - name: SandVault Tests
         env:
           VERBOSE: 1
@@ -27,6 +35,10 @@ jobs:
           XCODE_DESTINATION: platform=macOS,arch=arm64
           VERBOSE: 1
         run: ./tests/tests
+
+      - name: Clean up iOS simulator
+        if: always()
+        run: .github/scripts/cleanup-ios-simulator
 
   tag-version:
     name: Tag Version

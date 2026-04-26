@@ -1,0 +1,48 @@
+#!/bin/bash
+# Pre-boot an iOS simulator for sandvault test reuse.
+#
+# Creates a simulator (matching the bridge's device-pick logic), starts it
+# booting, and writes the UDID to a known path so subsequent workflow steps
+# can set SV_IOS_REUSE_UDID and skip the boot cost in their `sv --ios`
+# invocations.
+#
+# Pair with `cleanup-ios-simulator` to tear it down at the end of the job.
+#
+# Outputs:
+#   $RUNNER_TEMP/sv-ios.udid   the simulator's UDID
+#   $GITHUB_ENV                exports SV_IOS_REUSE_UDID for downstream steps
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+: "${RUNNER_TEMP:?RUNNER_TEMP must be set}"
+: "${GITHUB_ENV:?GITHUB_ENV must be set}"
+
+udid_file="$RUNNER_TEMP/sv-ios.udid"
+
+# Pick the same device type + runtime the bridge would pick, so the booted
+# device matches what `sv --ios` would create on its own.
+pair=$(/usr/bin/xcrun simctl list -j devicetypes runtimes \
+    | "$REPO_ROOT/helpers/sv-ios-pick-device")
+device_type="${pair%$'\t'*}"
+runtime="${pair#*$'\t'}"
+
+echo "Pre-booting simulator: device=$device_type runtime=$runtime"
+
+udid=$(xcrun simctl create "sv-ci-reuse" "$device_type" "$runtime")
+echo "Created simulator UDID=$udid"
+echo "$udid" > "$udid_file"
+
+xcrun simctl boot "$udid"
+# Don't call `simctl bootstatus -b` here — that would block this step for
+# 60-80s waiting for SpringBoard to finish first-launch indexing. Instead,
+# return immediately and let the simulator finish booting in the background
+# during the SandVault Tests step. The bridge in `helpers/sv-ios-bridge`
+# already runs `bootstatus -b` at startup, so the iOS test suite will block
+# there if any boot work is still pending — but in practice the background
+# boot will have finished by then and that call returns immediately.
+echo "Simulator boot started; will continue in background"
+
+echo "SV_IOS_REUSE_UDID=$udid" >> "$GITHUB_ENV"
+echo "Exported SV_IOS_REUSE_UDID=$udid for downstream steps"

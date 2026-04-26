@@ -188,6 +188,12 @@ IOS_BRIDGE_PID=""
 IOS_BRIDGE_PORT=""
 IOS_BRIDGE_SCRATCH_DIR=""
 IOS_SIM_UDID=""
+# When IOS_SIM_OWNED is "true", stop_ios_simulator destroys the simulator on
+# exit. When "false" (set via SV_IOS_REUSE_UDID), the simulator was supplied
+# by the caller (e.g. CI pre-boot) and its lifecycle is the caller's
+# responsibility. Default true: a normal `sv --ios` session creates and
+# destroys its own simulator.
+IOS_SIM_OWNED="true"
 
 readonly SSH_DIR="$HOME/.ssh"
 readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
@@ -545,9 +551,13 @@ stop_ios_simulator() {
         IOS_BRIDGE_PID=""
     fi
     if [[ -n "$IOS_SIM_UDID" ]]; then
-        debug "Shutting down iOS simulator $IOS_SIM_UDID..."
-        /usr/bin/xcrun simctl shutdown "$IOS_SIM_UDID" >/dev/null 2>&1 || true
-        /usr/bin/xcrun simctl delete "$IOS_SIM_UDID" >/dev/null 2>&1 || true
+        if [[ "$IOS_SIM_OWNED" == "true" ]]; then
+            debug "Shutting down iOS simulator $IOS_SIM_UDID..."
+            /usr/bin/xcrun simctl shutdown "$IOS_SIM_UDID" >/dev/null 2>&1 || true
+            /usr/bin/xcrun simctl delete "$IOS_SIM_UDID" >/dev/null 2>&1 || true
+        else
+            debug "Leaving externally-supplied simulator $IOS_SIM_UDID running"
+        fi
         IOS_SIM_UDID=""
     fi
     rm -f "$IOS_BRIDGE_LOG_FILE"
@@ -572,30 +582,41 @@ start_ios_simulator() {
         abort "xcrun not found. Install Xcode or the Command Line Tools."
     fi
 
-    # Select device type and runtime.
-    local device_type runtime pair
-    # shellcheck disable=SC2310 # ios_pick_device_and_runtime intentionally used in condition
-    if ! pair=$(ios_pick_device_and_runtime); then
-        abort "No iOS simulator runtime available. Install one via Xcode → Settings → Platforms."
-    fi
-    device_type="${pair%$'\t'*}"
-    runtime="${pair#*$'\t'}"
-    debug "Selected device=$device_type runtime=$runtime"
+    # When SV_IOS_REUSE_UDID is set (e.g. from a CI pre-boot step), reuse the
+    # supplied simulator instead of creating a fresh one. The caller owns
+    # the simulator's lifecycle — stop_ios_simulator will not destroy it.
+    # The bridge still calls `simctl bootstatus -b`, which returns
+    # immediately when the device is already booted.
+    if [[ -n "${SV_IOS_REUSE_UDID:-}" ]]; then
+        IOS_SIM_UDID="$SV_IOS_REUSE_UDID"
+        IOS_SIM_OWNED="false"
+        debug "Reusing externally-supplied simulator UDID=$IOS_SIM_UDID"
+    else
+        # Select device type and runtime.
+        local device_type runtime pair
+        # shellcheck disable=SC2310 # ios_pick_device_and_runtime intentionally used in condition
+        if ! pair=$(ios_pick_device_and_runtime); then
+            abort "No iOS simulator runtime available. Install one via Xcode → Settings → Platforms."
+        fi
+        device_type="${pair%$'\t'*}"
+        runtime="${pair#*$'\t'}"
+        debug "Selected device=$device_type runtime=$runtime"
 
-    # Create a fresh scratch simulator for this session.
-    if ! IOS_SIM_UDID=$(/usr/bin/xcrun simctl create "$IOS_SIM_DEVICE_NAME" "$device_type" "$runtime" 2>/dev/null); then
-        abort "Failed to create iOS simulator (device=$device_type runtime=$runtime)"
-    fi
-    debug "Created simulator $IOS_SIM_DEVICE_NAME UDID=$IOS_SIM_UDID"
+        # Create a fresh scratch simulator for this session.
+        if ! IOS_SIM_UDID=$(/usr/bin/xcrun simctl create "$IOS_SIM_DEVICE_NAME" "$device_type" "$runtime" 2>/dev/null); then
+            abort "Failed to create iOS simulator (device=$device_type runtime=$runtime)"
+        fi
+        debug "Created simulator $IOS_SIM_DEVICE_NAME UDID=$IOS_SIM_UDID"
 
-    # Begin booting. Don't wait for bootstatus here — the bridge polls
-    # readiness in a background thread and rejects non-/ready endpoints
-    # with HTTP 503 until the simulator finishes booting (30-90s).
-    # Sandbox sessions can start interacting immediately and poll
-    # /ready until it returns 200.
-    if ! /usr/bin/xcrun simctl boot "$IOS_SIM_UDID" >/dev/null 2>&1; then
-        stop_ios_simulator
-        abort "Failed to boot iOS simulator $IOS_SIM_UDID"
+        # Begin booting. Don't wait for bootstatus here — the bridge polls
+        # readiness in a background thread and rejects non-/ready endpoints
+        # with HTTP 503 until the simulator finishes booting (30-90s).
+        # Sandbox sessions can start interacting immediately and poll
+        # /ready until it returns 200.
+        if ! /usr/bin/xcrun simctl boot "$IOS_SIM_UDID" >/dev/null 2>&1; then
+            stop_ios_simulator
+            abort "Failed to boot iOS simulator $IOS_SIM_UDID"
+        fi
     fi
     debug "iOS simulator boot started in background; bridge will report readiness."
 
