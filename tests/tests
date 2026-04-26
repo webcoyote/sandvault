@@ -172,10 +172,10 @@ collect_results() {
 # Run tests
 ###############################################################################
 
-queue_suite "ios-simulator" "$SCRIPT_DIR/ios-simulator/scripts/tests"
+queue_suite "swift"         "$SCRIPT_DIR/swift/scripts/tests"
 queue_suite "browser"       "$SCRIPT_DIR/browser/scripts/tests"
 queue_suite "xcodebuild"    "$SCRIPT_DIR/xcodebuild/scripts/tests"
-queue_suite "swift"         "$SCRIPT_DIR/swift/scripts/tests"
+queue_suite "ios-simulator" "$SCRIPT_DIR/ios-simulator/scripts/tests"
 collect_results
 
 if [[ "$VERBOSE" -ne 0 ]]; then
