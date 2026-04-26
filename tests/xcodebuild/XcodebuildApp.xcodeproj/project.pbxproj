@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		9116A04EDB8C4942B9DDA772 = {isa = PBXBuildFile; fileRef = FD811B54A8B8434AB7E85C15; };
-		A1B2C3D4E5F60718293A4B5C = {isa = PBXBuildFile; productRef = D4E5F60718293A4B5C6D7E8F; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -56,9 +55,6 @@
 			dependencies = (
 			);
 			name = XcodebuildApp;
-			packageProductDependencies = (
-				D4E5F60718293A4B5C6D7E8F,
-			);
 			productName = XcodebuildApp;
 			productReference = AB905DD7F47845A6B36684FA;
 			productType = "com.apple.product-type.tool";
@@ -76,9 +72,6 @@
 				en,
 			);
 			mainGroup = 6F13F7C1DE064893B458B810;
-			packageReferences = (
-				C3D4E5F60718293A4B5C6D7E,
-			);
 			productRefGroup = 13D9A54D524E4755BA18FFF7;
 			projectDirPath = "";
 			projectRoot = "";
@@ -93,7 +86,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A1B2C3D4E5F60718293A4B5C,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -173,25 +165,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		C3D4E5F60718293A4B5C6D7E = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/apple/swift-algorithms.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.2.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		D4E5F60718293A4B5C6D7E8F = {
-			isa = XCSwiftPackageProductDependency;
-			package = C3D4E5F60718293A4B5C6D7E;
-			productName = Algorithms;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = DE12AE3216534790B5E95DA4;
 }
