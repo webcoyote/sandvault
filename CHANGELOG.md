@@ -2,6 +2,20 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.14.0] - 2026-04-28
+
+### Added
+- New `/sv` Claude Code skill for handing tasks off to sandvault directly from Claude Code
+- Automatically symlink `/sv` skill into `~/.claude/skills/` during `sv build`
+
+### Fixed
+- Fix skill link path and improve terminal compatibility for the `/sv` skill
+
+### Thanks to 2 contributors!
+
+- [@jesserobbins](https://github.com/jesserobbins)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.13.0] - 2026-04-26
 
 ### Changed
