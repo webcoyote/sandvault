@@ -1624,7 +1624,12 @@ fi
 # that are shared, e.g. /tmp/claude and /private/tmp/claude, which doesn't work when there
 # are multiple users running the agent on the same computer.
 # Fix: set TMPDIR after the shell has started running.
-ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; exec /bin/zsh --login"
+#
+# Source login files explicitly in a single zsh -c invocation rather than spawning
+# an intermediate "zsh --login". This avoids double-sourcing .zshenv and ensures
+# piped stdin passes through to the final process (an interactive login shell would
+# consume stdin as commands).
+ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; source ~/.zshenv; source ~/.zprofile; source ~/.zshrc"
 
 # Prepare command args as a single string
 COMMAND_ARGS_STR=""
@@ -1636,11 +1641,26 @@ if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
     # COMMAND_ARGS to a command that will be run by the shell.
     #
     # Example: sv shell -- echo foo
-    # Runs:    exec /bin/zsh --login -c 'echo foo'
+    # Runs:    source ~/.zshenv; source ~/.zprofile; source ~/.zshrc; echo foo
     if [[ "$COMMAND" == "" ]]; then
-        ZSH_COMMAND="$ZSH_COMMAND -c '${COMMAND_ARGS_STR}'"
+        ZSH_COMMAND="$ZSH_COMMAND; ${COMMAND_ARGS_STR}"
         COMMAND_ARGS_STR=""
         SHELL_COMMAND_MODE=true
+    fi
+fi
+
+# When COMMAND is set, .zshrc will exec it — no need to append anything.
+# When running a shell command (sv shell -- echo foo), it was already appended above.
+# For interactive shells (sv shell with no args), drop into a real interactive zsh
+# only when stdin is a TTY. When stdin is piped (e.g. `echo cmd | sv s`), exec a
+# non-interactive zsh that reads commands from stdin without printing prompts or
+# triggering interactive-only hooks like direnv.
+# Use -i (not --login) to avoid re-sourcing the login files.
+if [[ -z "$COMMAND" && "$SHELL_COMMAND_MODE" == "false" ]]; then
+    if [[ -t 0 ]]; then
+        ZSH_COMMAND="$ZSH_COMMAND; exec /bin/zsh -i"
+    else
+        ZSH_COMMAND="$ZSH_COMMAND; exec /bin/zsh"
     fi
 fi
 
@@ -1726,7 +1746,7 @@ if [[ "$MODE" == "ssh" ]]; then
     # Without them, the remote shell would word-split the command, causing incorrect execution.
     # Example: "'export TMPDIR=...'" becomes a single arg after local expansion, then the remote
     # shell strips the outer quotes, passing 'export TMPDIR=...' correctly to /bin/zsh -c
-    if ssh \
+    exec ssh \
         -q \
         "$SSH_TTY_OPT" \
         -o StrictHostKeyChecking=no \
@@ -1749,11 +1769,6 @@ if [[ "$MODE" == "ssh" ]]; then
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
             /bin/zsh -c "$ZSH_COMMAND_SSH"
-    then
-        :
-    else
-        exit $?
-    fi
 else
 
     LAUNCHER=()
@@ -1782,7 +1797,7 @@ else
     # Simple double quotes "$ZSH_COMMAND" are sufficient because sudo passes arguments
     # directly to the command without an intermediate shell parsing layer.
     # This is different from SSH (see above) which requires extra quoting.
-    if "${LAUNCHER[@]+"${LAUNCHER[@]}"}" \
+    exec "${LAUNCHER[@]+"${LAUNCHER[@]}"}" \
         /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
@@ -1799,9 +1814,4 @@ else
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
             /bin/zsh -c "$ZSH_COMMAND"
-    then
-        :
-    else
-        exit $?
-    fi
 fi
