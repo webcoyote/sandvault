@@ -1,0 +1,19 @@
+#!/bin/bash
+# Test browser automation via Playwright and Puppeteer
+set -Eeuo pipefail
+trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Re-exec under `sv --lightpanda` if Chrome's CDP endpoint isn't already wired
+# in. `sv` handles nesting safely, so re-execing when already inside an sv
+# session is harmless.
+if [[ -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
+    exec "$SCRIPT_DIR/../../../sv" --lightpanda --no-build shell -- "$0" "$@"
+fi
+
+cd "$SCRIPT_DIR/.."
+
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
+node test-playwright.js
+node test-puppeteer.js
