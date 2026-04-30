@@ -715,21 +715,22 @@ configure_shared_folder_permssions() {
         sudo /usr/sbin/chown -f -R "$HOST_USER:$(id -gn)" "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE permissions..."
         sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
-        # Remove all ACL entries for the sandvault group. Try removing
-        # both the old single-ACL format and the new split dir/file ACLs,
-        # plus the old combined ACL (from before the dir/file split).
-        # Each -a removal is a no-op (fails silently) if the ACE doesn't exist.
-        # Single find pass to avoid walking the tree three times.
+        # Remove all ACL entries for the sandvault group. Apply the
+        # directory ACE only to directories and the file ACE only to
+        # files, mirroring the `enable=true` branch above. Also remove
+        # the legacy combined ACE (from before the dir/file split),
+        # which was historically applied to every entry. Each -a removal
+        # is a no-op (fails silently) if the ACE doesn't exist. Single
+        # find pass to avoid walking the tree twice.
         trace "Configuring $SHARED_WORKSPACE: remove $SANDVAULT_GROUP ACLs"
-        local file_list
-        file_list=$(mktemp)
-        sudo find "$SHARED_WORKSPACE" -print0 2>/dev/null | sudo tee "$file_list" > /dev/null || true
-        xargs -0 sudo /bin/chmod -h -a "$SANDVAULT_DIR_RIGHTS" < "$file_list" 2>/dev/null || true
-        xargs -0 sudo /bin/chmod -h -a "$SANDVAULT_FILE_RIGHTS" < "$file_list" 2>/dev/null || true
-        xargs -0 sudo /bin/chmod -h \
-            -a "group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit" \
-            < "$file_list" 2>/dev/null || true
-        rm -f "$file_list"
+        local legacy_ace="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
+        sudo find "$SHARED_WORKSPACE" \
+            \( -type d -exec /bin/chmod -h -a "$SANDVAULT_DIR_RIGHTS" {} + \
+                       -exec /bin/chmod -h -a "$legacy_ace" {} + \) \
+            -o \
+            \( ! -type d -exec /bin/chmod -h -a "$SANDVAULT_FILE_RIGHTS" {} + \
+                         -exec /bin/chmod -h -a "$legacy_ace" {} + \) \
+            2>/dev/null || true
     fi
 }
 
