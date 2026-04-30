@@ -1079,20 +1079,72 @@ fi
 ###############################################################################
 # Create sandvault user and group
 ###############################################################################
+
+# Pick the first free integer ID at or above SV_MIN_ID, scanning the
+# union of existing user UIDs and group GIDs. Avoids three failure
+# modes of the old "max(UniqueID)+1" approach:
+#   1) collisions with reserved/system IDs that sit above the current max
+#   2) cross-collisions where a group GID equals a user UID (or vice versa)
+#   3) gaps left by deleted accounts being reused without coordination
+# SV_MIN_ID defaults to 600 to stay above macOS service accounts (which
+# cluster below 500) and the typical first local user (501).
+SV_MIN_ID="${SV_MIN_ID:-600}"
+next_free_id() {
+    local taken
+    taken=$( {
+        dscl . -list /Users UniqueID
+        dscl . -list /Groups PrimaryGroupID
+    } | awk '{print $2}' | sort -un)
+    awk -v min="$SV_MIN_ID" '
+        BEGIN { next_id = min; printed = 0 }
+        {
+            if ($1 < next_id) next
+            if ($1 == next_id) { next_id++; next }
+            print next_id; printed = 1; exit
+        }
+        END { if (!printed) print next_id }
+    ' <<< "$taken"
+}
+
+# Coarse advisory lock so concurrent `sv build` invocations on the same
+# Mac do not race on ID allocation. mkdir is atomic on POSIX, so the
+# first creator wins. The lock holder writes its PID; if a stale lock
+# is found (PID no longer running) we steal it.
+SV_ID_LOCK_DIR="/tmp/sandvault-id-alloc.lock"
+acquire_id_alloc_lock() {
+    local waited=0
+    while ! mkdir "$SV_ID_LOCK_DIR" 2>/dev/null; do
+        local holder=""
+        [[ -r "$SV_ID_LOCK_DIR/pid" ]] && holder=$(cat "$SV_ID_LOCK_DIR/pid" 2>/dev/null || true)
+        if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+            warn "Removing stale ID-allocation lock from PID $holder"
+            rm -rf "$SV_ID_LOCK_DIR"
+            continue
+        fi
+        if (( waited >= 30 )); then
+            abort "Timed out waiting for ID-allocation lock at $SV_ID_LOCK_DIR (held by PID ${holder:-unknown})"
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    echo "$$" > "$SV_ID_LOCK_DIR/pid"
+    trap 'rm -rf "$SV_ID_LOCK_DIR"' EXIT
+}
+release_id_alloc_lock() {
+    rm -rf "$SV_ID_LOCK_DIR"
+    trap - EXIT
+}
+
 if [[ "$REBUILD" == "true" ]]; then
     debug "Creating $SANDVAULT_USER user and $SANDVAULT_GROUP group..."
+
+    acquire_id_alloc_lock
 
     # Check if group exists, create if needed
     if ! dscl . -read "/Groups/$SANDVAULT_GROUP" &>/dev/null 2>&1; then
         trace "Creating $SANDVAULT_GROUP group..."
-
-        # Find next available UID/GID starting from 501
-        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
-        NEXT_UID=$((NEXT_UID + 1))
-
-        # Create group
         sudo dscl . -create "/Groups/$SANDVAULT_GROUP"
-        GROUP_ID=$NEXT_UID
+        GROUP_ID=$(next_free_id)
     else
         trace "Group $SANDVAULT_GROUP already exists"
         GROUP_ID=$(dscl . -read "/Groups/$SANDVAULT_GROUP" PrimaryGroupID 2>/dev/null | awk '{print $2}')
@@ -1101,35 +1153,27 @@ if [[ "$REBUILD" == "true" ]]; then
     # Ensure group has all required properties (idempotent)
     if [[ -z "${GROUP_ID:-}" ]]; then
         # Group exists but has no PrimaryGroupID, find next available
-        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
-        GROUP_ID=$((NEXT_UID + 1))
+        GROUP_ID=$(next_free_id)
     fi
-    trace "Configuring $SANDVAULT_GROUP group properties..."
+    trace "Configuring $SANDVAULT_GROUP group properties (GID=$GROUP_ID)..."
     sudo dscl . -create "/Groups/$SANDVAULT_GROUP" PrimaryGroupID "$GROUP_ID"
     sudo dscl . -create "/Groups/$SANDVAULT_GROUP" RealName "$SANDVAULT_GROUP Group"
 
     # Check if user exists, create if needed
     if ! dscl . -read "/Users/$SANDVAULT_USER" &>/dev/null 2>&1; then
         trace "Creating $SANDVAULT_USER user..."
-
-        # Find next available UID
-        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
-        NEXT_UID=$((NEXT_UID + 1))
-
-        # Create user
         sudo dscl . -create "/Users/$SANDVAULT_USER"
-        USER_ID=$NEXT_UID
+        USER_ID=$(next_free_id)
     else
         trace "User $SANDVAULT_USER already exists"
         USER_ID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
     fi
 
     # Ensure user has all required properties (idempotent)
-    trace "Configuring $SANDVAULT_USER user properties..."
+    trace "Configuring $SANDVAULT_USER user properties (UID=$USER_ID)..."
     if [[ -z "${USER_ID:-}" ]]; then
         # User exists but has no UniqueID, find next available
-        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
-        USER_ID=$((NEXT_UID + 1))
+        USER_ID=$(next_free_id)
     fi
     sudo dscl . -create "/Users/$SANDVAULT_USER" UniqueID "$USER_ID"
     sudo dscl . -create "/Users/$SANDVAULT_USER" PrimaryGroupID "$GROUP_ID"
@@ -1178,6 +1222,8 @@ if [[ "$REBUILD" == "true" ]]; then
     # Add host user to the sandvault group
     trace "Adding $HOST_USER to $SANDVAULT_GROUP group..."
     sudo dseditgroup -o edit -a "$HOST_USER" -t user "$SANDVAULT_GROUP"
+
+    release_id_alloc_lock
 fi
 
 
