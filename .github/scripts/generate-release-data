@@ -122,12 +122,14 @@ for pr in $PR_NUMBERS; do
     done
 done
 
-# Commit authors — map email to GitHub login
-COMMIT_EMAILS="$(git log --no-merges "${LAST_TAG}..HEAD" --format='%aE' | sort -u)"
+# Commit authors — look up each commit SHA via the GitHub API to resolve
+# the committer's GitHub login.  This works even when the committer's email
+# is private, as long as it is linked to their GitHub account.  It replaces
+# the previous email-search approach, which silently failed for private emails.
+COMMIT_SHAS="$(git log --no-merges "${LAST_TAG}..HEAD" --format='%H' | sort -u)"
 
-for email in $COMMIT_EMAILS; do
-    # Try the GitHub user search API to resolve email → login
-    login="$(gh api "/search/users?q=${email}+in:email" --jq '.items[0].login' 2>/dev/null || true)"
+for sha in $COMMIT_SHAS; do
+    login="$(gh api "repos/${REPO}/commits/${sha}" --jq '.author.login' 2>/dev/null || true)"
     add_contributor "$login" "commit_author"
 done
 
