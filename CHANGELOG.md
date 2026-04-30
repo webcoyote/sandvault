@@ -2,6 +2,20 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.15.0] - 2026-04-29
+
+### Fixed
+
+- Fix stdin processing so piped input works with `sv claude` and `sv claude -- -p` (e.g. `echo "who are you" | sv claude`) ([#150](https://github.com/webcoyote/sandvault/pull/150))
+
+### Removed
+
+- Remove `.zlogin`/`.zlogout` handling in the guest shell ([#150](https://github.com/webcoyote/sandvault/pull/150))
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.14.0] - 2026-04-28
 
 ### Added
