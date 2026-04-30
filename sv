@@ -182,11 +182,13 @@ readonly SESSION_FILE="$SESSION_DIR/sandvault.count"
 # ran on this host"; presence skips the migration on subsequent runs.
 readonly ACL_LEGACY_STRIPPED_MARKER="$SESSION_DIR/acl-legacy-stripped"
 
-# Chrome browser state (per-instance using session ID)
+# Browser state (per-instance using session ID). Used by both Chrome and
+# Lightpanda backends; CHROME_DATA_DIR is Chrome-only.
 readonly CHROME_LOG_FILE="$SESSION_DIR/chrome-$SV_SESSION_ID.log"
 readonly CHROME_DATA_DIR="$SESSION_DIR/chrome-data-$SV_SESSION_ID"
-CHROME_PID=""
-CHROME_PORT=""
+readonly LIGHTPANDA_LOG_FILE="$SESSION_DIR/lightpanda-$SV_SESSION_ID.log"
+BROWSER_PID=""
+BROWSER_PORT=""
 
 # iOS Simulator bridge state (per-instance using session ID)
 readonly IOS_BRIDGE_LOG_FILE="$SESSION_DIR/ios-bridge-$SV_SESSION_ID.log"
@@ -222,7 +224,7 @@ show_endpoint() {
 
     if ! /usr/bin/curl -sf "$SV_BROWSER_ENDPOINT/json/version" > /dev/null 2>&1; then
         echo >&2 "Browser endpoint $SV_BROWSER_ENDPOINT is not responding."
-        echo >&2 "Chrome may have crashed. Exit and restart with: sv --browser <command>"
+        echo >&2 "The browser may have crashed. Exit and restart with: sv --browser <command>"
         exit 1
     fi
 
@@ -419,8 +421,8 @@ force_cleanup_sandvault_processes() {
         return 0
     fi
 
-    # Stop host-side Chrome if running
-    stop_chrome
+    # Stop host-side browser if running
+    stop_browser
 
     # Stop host-side iOS simulator bridge if running
     stop_ios_simulator
@@ -445,42 +447,41 @@ force_cleanup_sandvault_processes() {
     fi
 }
 
-kill_chrome_pid() {
+kill_browser_pid() {
     local pid="$1"
+    local label="${2:-browser}"
     if kill -0 "$pid" 2>/dev/null; then
-        debug "Stopping Chrome (PID $pid)..."
+        debug "Stopping $label (PID $pid)..."
         kill "$pid" 2>/dev/null || true
         local i
         for (( i=0; i<20; i++ )); do
             kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
             sleep 0.1
         done
-        trace "Force-killing Chrome (PID $pid)..."
+        trace "Force-killing $label (PID $pid)..."
         kill -9 "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     fi
 }
 
-stop_chrome() {
-    if [[ -n "$CHROME_PID" ]]; then
-        kill_chrome_pid "$CHROME_PID"
-        CHROME_PID=""
+stop_browser() {
+    if [[ -n "$BROWSER_PID" ]]; then
+        kill_browser_pid "$BROWSER_PID" "$BROWSER_KIND"
+        BROWSER_PID=""
     fi
-    rm -f "$CHROME_LOG_FILE"
+    BROWSER_PORT=""
+    rm -f "$CHROME_LOG_FILE" "$LIGHTPANDA_LOG_FILE"
     rm -rf "$CHROME_DATA_DIR"
 }
 
 start_chrome() {
-    mkdir -p "$SESSION_DIR"
-
-    # Locate Chrome binary
     local chrome_bin=""
     if [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
         chrome_bin="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     elif [[ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]]; then
         chrome_bin="/Applications/Chromium.app/Contents/MacOS/Chromium"
     else
-        abort "Chrome or Chromium not found. Install Google Chrome to use --browser."
+        abort "Chrome or Chromium not found. Install Google Chrome to use --browser/--chrome, or use --lightpanda."
     fi
 
     mkdir -p "$CHROME_DATA_DIR"
@@ -501,7 +502,7 @@ start_chrome() {
         --disable-extensions \
         --disable-background-networking \
         > "$CHROME_LOG_FILE" 2>&1 &
-    CHROME_PID=$!
+    BROWSER_PID=$!
 
     # Wait for Chrome to report its debugging port (up to 15 seconds).
     # The window is generous because CI runners under load (parallel iOS
@@ -509,8 +510,8 @@ start_chrome() {
     local port=""
     local i
     for (( i=0; i<150; i++ )); do
-        if ! kill -0 "$CHROME_PID" 2>/dev/null; then
-            CHROME_PID=""
+        if ! kill -0 "$BROWSER_PID" 2>/dev/null; then
+            BROWSER_PID=""
             abort "Chrome exited unexpectedly. Check $CHROME_LOG_FILE for details."
         fi
         port=$(sed -n 's|.*DevTools listening on ws://127\.0\.0\.1:\([0-9]*\)/.*|\1|p' "$CHROME_LOG_FILE" 2>/dev/null | head -1)
@@ -521,13 +522,73 @@ start_chrome() {
     done
 
     if [[ -z "$port" ]]; then
-        kill_chrome_pid "$CHROME_PID"
-        CHROME_PID=""
+        kill_browser_pid "$BROWSER_PID" chrome
+        BROWSER_PID=""
         abort "Chrome did not report a debugging port within 15 seconds. Check $CHROME_LOG_FILE."
     fi
 
-    CHROME_PORT="$port"
-    debug "Chrome started (PID $CHROME_PID, port $CHROME_PORT)"
+    BROWSER_PORT="$port"
+    debug "Chrome started (PID $BROWSER_PID, port $BROWSER_PORT)"
+}
+
+start_lightpanda() {
+    # Apple Silicon-only: no prebuilt Intel binary exists upstream.
+    if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" != "arm64" ]]; then
+        abort "Lightpanda has no prebuilt macOS binary for $(uname -m). Install via Docker/source, or use --chrome instead."
+    fi
+
+    # Ensure lightpanda binary is available (installs via brew tap when missing)
+    ensure_brew_tool "lightpanda-io/browser/lightpanda" "lightpanda"
+
+    local lightpanda_bin
+    lightpanda_bin="$(command -v lightpanda 2>/dev/null || true)"
+    if [[ -z "$lightpanda_bin" ]]; then
+        abort "lightpanda binary not found on PATH after install attempt."
+    fi
+
+    rm -f "$LIGHTPANDA_LOG_FILE"
+
+    debug "Starting lightpanda on 127.0.0.1..."
+    "$lightpanda_bin" serve \
+        --host 127.0.0.1 \
+        --port 0 \
+        --log-level info \
+        > "$LIGHTPANDA_LOG_FILE" 2>&1 &
+    BROWSER_PID=$!
+
+    # Wait for lightpanda to log its bound address (up to 15 seconds).
+    # Format: $msg="server running" address=127.0.0.1:NNNNN
+    local port=""
+    local i
+    for (( i=0; i<150; i++ )); do
+        if ! kill -0 "$BROWSER_PID" 2>/dev/null; then
+            BROWSER_PID=""
+            abort "lightpanda exited unexpectedly. Check $LIGHTPANDA_LOG_FILE for details."
+        fi
+        port=$(sed -n 's|.*"server running" address=127\.0\.0\.1:\([0-9]*\).*|\1|p' "$LIGHTPANDA_LOG_FILE" 2>/dev/null | head -1)
+        if [[ -n "$port" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    if [[ -z "$port" ]]; then
+        kill_browser_pid "$BROWSER_PID" lightpanda
+        BROWSER_PID=""
+        abort "lightpanda did not report a port within 15 seconds. Check $LIGHTPANDA_LOG_FILE."
+    fi
+
+    BROWSER_PORT="$port"
+    debug "lightpanda started (PID $BROWSER_PID, port $BROWSER_PORT)"
+}
+
+start_browser() {
+    mkdir -p "$SESSION_DIR"
+    case "$BROWSER_KIND" in
+        chrome)     start_chrome ;;
+        lightpanda) start_lightpanda ;;
+        *)          abort "Unknown browser kind: $BROWSER_KIND" ;;
+    esac
 }
 
 kill_bridge_pid() {
@@ -669,7 +730,7 @@ register_session() {
 
 unregister_session() {
     # Per-session cleanup
-    [[ "$USE_BROWSER" == "true" ]] && stop_chrome
+    [[ "$USE_BROWSER" == "true" ]] && stop_browser
     [[ "$USE_IOS_SIMULATOR" == "true" ]] && stop_ios_simulator
 
     mkdir -p "$SESSION_DIR"
@@ -808,6 +869,7 @@ REBUILD=false
 NO_BUILD=false
 USE_SANDBOX=true
 USE_BROWSER=false
+BROWSER_KIND=chrome
 USE_IOS_SIMULATOR=false
 USE_IOS_SIMULATOR_GUI=false
 FIX_PERMISSIONS=false
@@ -832,8 +894,10 @@ show_help() {
     echo "  -h, --help           Show this help message"
     echo "  -n, --no-build       Refuse to make any sandbox changes; error if changes are needed"
     echo "  -x, --no-sandbox     Disable sandbox-exec restrictions"
-    echo "  -b, --browser        Launch headless Chrome and pass endpoint into sandbox"
-    echo "  -e, --endpoint       Show Chrome endpoint URL (requires --browser session)"
+    echo "  -b, --browser        Launch headless browser and pass endpoint into sandbox (alias of --chrome)"
+    echo "      --chrome         Use Google Chrome / Chromium as the browser backend [default]"
+    echo "      --lightpanda     Use Lightpanda as the browser backend (lighter, ARM-only on macOS)"
+    echo "  -e, --endpoint       Show browser endpoint URL (requires --browser session)"
     echo "  -i, --ios            Boot iOS Simulator and expose HTTP bridge into sandbox"
     echo "  -I, --ios-gui        Also show the Simulator.app window (implies --ios)"
     echo "  -c, --clone URL|PATH (removed — use sv-clone instead)"
@@ -909,8 +973,14 @@ while [[ $# -gt 0 ]]; do
             USE_SANDBOX=false
             shift
             ;;
-        -b|--browser)
+        -b|--browser|--chrome)
             USE_BROWSER=true
+            BROWSER_KIND=chrome
+            shift
+            ;;
+        --lightpanda)
+            USE_BROWSER=true
+            BROWSER_KIND=lightpanda
             shift
             ;;
         -i|--ios)
@@ -1672,16 +1742,16 @@ if [[ "$NESTED" == "false" ]]; then
     register_session
     trap 'sv_exit_code=$?; set +e; unregister_session; exit $sv_exit_code' EXIT
     if [[ "$USE_BROWSER" == "true" ]]; then
-        start_chrome
+        start_browser
     fi
     if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
         start_ios_simulator
     fi
 else
     if [[ "$USE_BROWSER" == "true" && -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
-        # Nested session with --browser: Chrome cannot be launched inside the
-        # sandbox, so the parent session must already have started it.
-        abort "--browser requires Chrome, but the parent sandvault session was not started with --browser"
+        # Nested session with --browser: the browser cannot be launched inside
+        # the sandbox, so the parent session must already have started it.
+        abort "--browser requires a host-side browser, but the parent sandvault session was not started with --browser/--chrome/--lightpanda"
     fi
     if [[ "$USE_IOS_SIMULATOR" == "true" && -z "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
         # Nested session with --ios: the simulator runs on the host,
@@ -1761,10 +1831,10 @@ fi
 if [[ "$USE_BROWSER" == "true" ]]; then
     if [[ -n "${SV_BROWSER_ENDPOINT:-}" ]]; then
         EXTRA_ENV+=("SV_BROWSER_ENDPOINT=$SV_BROWSER_ENDPOINT")
-    elif [[ -n "$CHROME_PORT" ]]; then
-        EXTRA_ENV+=("SV_BROWSER_ENDPOINT=http://127.0.0.1:$CHROME_PORT")
+    elif [[ -n "$BROWSER_PORT" ]]; then
+        EXTRA_ENV+=("SV_BROWSER_ENDPOINT=http://127.0.0.1:$BROWSER_PORT")
     else
-        abort "Chrome port not available. Chrome may have failed to start."
+        abort "Browser port not available. The browser may have failed to start."
     fi
 fi
 if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then

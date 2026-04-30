@@ -173,7 +173,8 @@ collect_results() {
 ###############################################################################
 
 queue_suite "ios-simulator" "$SCRIPT_DIR/ios-simulator/scripts/tests"
-queue_suite "browser"       "$SCRIPT_DIR/browser/scripts/tests"
+queue_suite "chrome"        "$SCRIPT_DIR/browser/scripts/test-chrome"
+queue_suite "lightpanda"    "$SCRIPT_DIR/browser/scripts/test-lightpanda"
 queue_suite "xcodebuild"    "$SCRIPT_DIR/xcodebuild/scripts/tests"
 queue_suite "swift"         "$SCRIPT_DIR/swift/scripts/tests"
 collect_results

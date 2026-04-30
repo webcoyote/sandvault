@@ -4,11 +4,11 @@ set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Re-exec under `sv --browser` if Chrome's CDP endpoint isn't already wired
+# Re-exec under `sv --chrome` if Chrome's CDP endpoint isn't already wired
 # in. `sv` handles nesting safely, so re-execing when already inside an sv
 # session is harmless.
 if [[ -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
-    exec "$SCRIPT_DIR/../../../sv" --browser --no-build shell -- "$0" "$@"
+    exec "$SCRIPT_DIR/../../../sv" --chrome --no-build shell -- "$0" "$@"
 fi
 
 cd "$SCRIPT_DIR/.."

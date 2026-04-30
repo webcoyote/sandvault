@@ -7,7 +7,7 @@ SandVault (`sv`) manages a limited user account to sandbox shell commands and AI
 </br>
 
 - **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini
-- **Web and iOS automation** - sandbox access to Chrome and iOS Simulator
+- **Web and iOS automation** - sandbox access to Chrome / Lightpanda and iOS Simulator
 - **Fast context switching** - No VM overhead; instant user switching
 - **Passwordless** - switch accounts without a prompt (after setup)
 - **Shared workspace** - joint access to `/Users/Shared/sv-$USER`
@@ -386,14 +386,18 @@ Next time you run sandvault, your files will be copied to the sandvault user hom
 
 ## Browser Automation
 
-SandVault supports headless Chrome for browser automation from within the sandbox. Chrome runs on the host side and the sandbox connects to it via the Chrome DevTools Protocol (CDP) over localhost.
+SandVault supports a headless browser for automation from within the sandbox. The browser runs on the host side and the sandbox connects to it via the Chrome DevTools Protocol (CDP) over localhost. Two backends are supported: **Chrome** (default) and **Lightpanda**.
 
 ### Usage
 
 ```bash
-# Launch with browser support
+# Launch with browser support (Chrome by default)
 sv --browser claude
 sv --browser shell
+
+# Explicit backend selection
+sv --chrome claude       # same as --browser
+sv --lightpanda claude   # use Lightpanda instead of Chrome
 ```
 
 Inside the sandbox, the `SV_BROWSER_ENDPOINT` environment variable contains the CDP endpoint URL (e.g. `http://127.0.0.1:52858`).
@@ -416,13 +420,14 @@ See also [`./tests/browser/*.js`](./tests/browser) for examples of using Playwri
 
 ### How it works
 
-- Chrome is launched headless on the host side with a dynamic port (`--remote-debugging-port=0`), and sandvault connections via `localhost`
-- Chrome stays running across sandbox sessions and is stopped when the last `--browser` session exits
-- Chrome uses an isolated user data directory, separate from your personal Chrome profile
+- The browser is launched headless on the host side (one per sandvault session), and the sandbox connects via `localhost`.
+- For Chrome, an isolated user data directory is used, separate from your personal Chrome profile
+- Chrome binds to a kernel-assigned port (`--remote-debugging-port=0`) and reports it via its log; Lightpanda is given a free port pre-picked on the host, since it doesn't disclose the resolved port when started with `--port 0`
 
 ### Requirements
 
-Google Chrome or Chromium must be installed in `/Applications/`.
+- **Chrome backend**: Google Chrome or Chromium must be installed in `/Applications/`
+- **Lightpanda backend**: Apple Silicon (arm64) only; installed automatically on first use via `brew install lightpanda-io/browser/lightpanda`. Lightpanda's CDP coverage is narrower than Chrome's, so some Puppeteer/Playwright scripts that work with Chrome may fail against Lightpanda — start with Chrome and switch to Lightpanda when its lower memory footprint matters more than full compatibility.
 
 
 ## iOS Simulator Automation
