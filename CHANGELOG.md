@@ -2,6 +2,17 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.16.0] - 2026-05-01
+
+### Fixed
+
+- Fix race condition and collisions in UID/GID allocation.
+- Fix TOCTOU vulnerability in shared-folder ACL removal.
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.15.0] - 2026-04-29
 
 ### Fixed
