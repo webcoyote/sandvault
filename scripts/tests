@@ -818,6 +818,94 @@ run_tests() {
     queue_test test_stdin_piping
 
     ###############################################################################
+    # Agentsview Export Tests
+    ###############################################################################
+
+    AGENTSVIEW_CONFIG_SCRIPT="$SCRIPT_DIR/../helpers/agentsview-config.py"
+    AGENTSVIEW_PATHS_SCRIPT="$SCRIPT_DIR/../helpers/agentsview-paths.sh"
+
+    # Path map sanity: every agent has all four associated keys defined.
+    test_agentsview_path_map_complete() {
+        # shellcheck source=../helpers/agentsview-paths.sh
+        # shellcheck disable=SC1091
+        . "$AGENTSVIEW_PATHS_SCRIPT"
+        local agent missing=""
+        for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            for field in SUBDIR DEFAULT TOMLKEY; do
+                if [[ -z "$(agentsview_field "$field" "$agent")" ]]; then
+                    missing="$missing $agent.$field"
+                fi
+            done
+        done
+        if [[ -z "$missing" ]]; then
+            pass "agentsview path map has all fields for all agents"
+        else
+            fail "agentsview path map has all fields for all agents" "no missing" "missing:$missing"
+        fi
+    }
+    queue_test test_agentsview_path_map_complete
+
+    # The Python writer has its own --self-test covering the load/merge/write
+    # logic against a tmp dir. Run it here as part of the suite.
+    test_agentsview_config_writer_self_test() {
+        local output status
+        set +e
+        output=$(/usr/bin/python3 "$AGENTSVIEW_CONFIG_SCRIPT" --self-test \
+            --config-path /tmp/agentsview-self-test --home /tmp/agentsview-home 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -eq 0 ]]; then
+            pass "agentsview-config.py --self-test passes"
+        else
+            fail "agentsview-config.py --self-test passes" "exit 0" "exit $status: $output"
+        fi
+    }
+    queue_test test_agentsview_config_writer_self_test
+
+    # End-to-end: --diff against an empty file produces the expected four-key
+    # TOML, and --write produces a file that re-parses cleanly with the same
+    # tool (round-trip stability).
+    test_agentsview_config_writer_round_trip() {
+        local tmpdir cfg home output status
+        tmpdir=$(mktemp -d)
+        cfg="$tmpdir/config.toml"
+        home="$tmpdir/home"
+        mkdir -p "$home"
+        set +e
+        /usr/bin/python3 "$AGENTSVIEW_CONFIG_SCRIPT" \
+            --config-path "$cfg" --home "$home" --write \
+            --agent claude_project_dirs="$tmpdir/sessions/claude" \
+            --agent codex_sessions_dirs="$tmpdir/sessions/codex" \
+            --agent opencode_dirs="$tmpdir/sessions/opencode" \
+            --agent gemini_dirs="$tmpdir/sessions/gemini" \
+            > /dev/null 2>&1
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            rm -rf "$tmpdir"
+            fail "agentsview config writer round-trip" "exit 0 on first write" "exit $status"
+            return
+        fi
+        # Second invocation should produce empty diff (idempotent)
+        set +e
+        output=$(/usr/bin/python3 "$AGENTSVIEW_CONFIG_SCRIPT" \
+            --config-path "$cfg" --home "$home" --diff \
+            --agent claude_project_dirs="$tmpdir/sessions/claude" \
+            --agent codex_sessions_dirs="$tmpdir/sessions/codex" \
+            --agent opencode_dirs="$tmpdir/sessions/opencode" \
+            --agent gemini_dirs="$tmpdir/sessions/gemini" 2>&1)
+        status=$?
+        set -e
+        rm -rf "$tmpdir"
+        if [[ "$status" -eq 0 && -z "$output" ]]; then
+            pass "agentsview config writer round-trip is idempotent"
+        else
+            fail "agentsview config writer round-trip is idempotent" "empty diff" "exit $status, output: $output"
+        fi
+    }
+    queue_test test_agentsview_config_writer_round_trip
+
+    ###############################################################################
     # Summary
     ###############################################################################
 
