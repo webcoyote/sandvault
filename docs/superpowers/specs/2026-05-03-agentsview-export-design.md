@@ -109,13 +109,22 @@ sandbox startup. For each agent in the path map:
 3. Idempotent: `mkdir -p` is safe; macOS `chmod +a` deduplicates identical
    ACEs.
 
-The script does *not* attempt to fix ownership of pre-existing dirs that
-aren't owned by `sandvault-$USER` (e.g., a contaminated `.claude/` from an
-earlier accidental host-side `claude` invocation with `HOME` pointing at the
-sandbox home). If the parent agent dir exists and is not owned by the
-sandbox user, the script logs a one-line warning and skips that agent's
-ACL — symlink will still resolve, files may or may not be readable
-depending on existing perms.
+**Contamination pre-flight check (host side, before opt-in).** Before
+showing the prompt, for each agent's subdir, `stat` the owner if it
+exists. If any subdir is owned by something other than `sandvault-$USER`
+(typical cause: an accidental host-side `claude` run with `HOME` pointing
+at the sandbox home), abort with a clear message:
+
+> Cannot enable agentsview export: /Users/sandvault-$USER/.claude is owned
+> by <user>:<group> (expected sandvault-$USER:sandvault-$USER). This
+> usually means an earlier agent run had HOME set to the sandbox home.
+> Fix with:
+>     sudo chown -R sandvault-$USER:sandvault-$USER /Users/sandvault-$USER/.claude
+> then re-run `sv setup`.
+
+The pre-flight runs unconditionally before the opt-in prompt. Sandvault
+does not chown for the user — the user decides whether the dir contains
+data they want to keep before fixing ownership.
 
 This handles the umask question cleanly: ACLs with inherit flags are
 applied at the parent dir, and macOS HFS+/APFS propagates them to all
