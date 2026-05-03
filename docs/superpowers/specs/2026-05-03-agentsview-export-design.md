@@ -91,12 +91,38 @@ preparer and the host-side symlink installer:
 These match agentsview's `parser.Registry` `DefaultDirs` exactly (verified at
 `agentsview/agentsview-public/internal/parser/types.go`).
 
-**Session-dir preparation.** On every sandbox launch (when agentsview export
-is enabled), ensure each agent's sandbox subdirectory exists and apply
-group-read permissions (`chmod -R g+rX`) so the host user can read through
-the symlink. Idempotent. Implemented as a setup-merge script under
+**Session-dir preparation.** Implemented as a setup-merge script under
 `$SHARED_WORKSPACE/setup/agentsview-export`, mirroring the existing
-`gitconfig` and `claude-json` pattern.
+`gitconfig` and `claude-json` pattern. Runs as the sandbox user during
+sandbox startup. For each agent in the path map:
+
+1. `mkdir -p $HOME/<subdir>` (creates with sandbox user's umask).
+2. Apply ACL granting the `sandvault-$USER` group read/list/search rights
+   *with `file_inherit,directory_inherit`*, so any new JSONL files agents
+   create automatically inherit group-read regardless of umask. Use the same
+   `+a` ACL approach already used at line 700 of `sv` for the shared
+   workspace, but with a read-only rights string:
+   ```
+   AGENTSVIEW_RIGHTS="group:$SANDVAULT_GROUP allow read,readattr,readextattr,readsecurity,search,list,file_inherit,directory_inherit"
+   chmod +a "$AGENTSVIEW_RIGHTS" "$HOME/<subdir>"
+   ```
+3. Idempotent: `mkdir -p` is safe; macOS `chmod +a` deduplicates identical
+   ACEs.
+
+The script does *not* attempt to fix ownership of pre-existing dirs that
+aren't owned by `sandvault-$USER` (e.g., a contaminated `.claude/` from an
+earlier accidental host-side `claude` invocation with `HOME` pointing at the
+sandbox home). If the parent agent dir exists and is not owned by the
+sandbox user, the script logs a one-line warning and skips that agent's
+ACL — symlink will still resolve, files may or may not be readable
+depending on existing perms.
+
+This handles the umask question cleanly: ACLs with inherit flags are
+applied at the parent dir, and macOS HFS+/APFS propagates them to all
+children (including new files), so live tailing works for sessions started
+*after* opt-in. Existing files written before opt-in retain their original
+mode; if those happen to be `0600` and not owned by the host user, they
+won't be visible. The first new session after opt-in will be visible.
 
 ### Host-side (in `sv setup`)
 
@@ -108,9 +134,16 @@ never mention it.
 detected and no prior choice is recorded. The prompt:
 
 > Detected agentsview on this machine. Mirror sandvault session data so it
-> appears in agentsview's dashboard, search, and cost tracking? This adds
-> read-only paths to your agentsview config and makes sandbox session
-> directories group-readable to your user. [y/N]
+> appears in agentsview's dashboard, search, and cost tracking?
+>
+> This will:
+>   - add read-only symlinks under /Users/Shared/sv-$USER/sessions/
+>   - apply read-only ACLs to sandbox agent session dirs
+>   - add four scan paths to ~/.agentsview/config.toml (with diff confirmation)
+>   - rewrite your agentsview config without preserving comments
+>
+> Sandvault won't auto-track new agents agentsview adds in future versions
+> (you'd re-run `sv setup --rebuild` to refresh). [y/N]
 
 The choice is persisted in `$SHARED_WORKSPACE/setup/agentsview-export.state`
 (values: `enabled`, `disabled`). Re-running `sv setup --rebuild` re-prompts
@@ -119,9 +152,18 @@ only if the state file is missing.
 **Symlink installer.** On opt-in:
 
 1. `mkdir -p /Users/Shared/sv-$USER/sessions`
-2. For each agent in the path map, ensure the target subdirectory exists
-   inside the sandbox user's home (so the symlink is never dangling), then
-   create the symlink. Both steps idempotent.
+2. For each agent in the path map, create a symlink
+   `/Users/Shared/sv-$USER/sessions/<agent>` →
+   `/Users/sandvault-$USER/<subdir>`. Idempotent (skip if already correct;
+   error if exists and points elsewhere).
+
+The host installer does *not* create the symlink target dirs. The sandbox
+user owns its home and creates those dirs itself via the setup-merge
+script during the next sandbox startup. Until that happens the symlinks
+dangle — verified safe: agentsview's `os.ReadDir` (parser/discovery.go:168)
+returns empty without error on missing dirs, and `Watcher.WatchShallow`
+(sync/watcher.go:90) returns false without crashing. Empty dashboards are
+the user-visible result, which is correct (no sessions to show yet).
 
 **Agentsview config writer.** On opt-in, update
 `$HOME/.agentsview/config.toml`:
@@ -139,16 +181,20 @@ only if the state file is missing.
   - Append the mirror path if not already present.
   - Write back with `0600` perms, preserving the rest of the file unchanged.
 
-The writer is a small, self-contained Python 3 script invoked by `sv` (Python
-3 is part of macOS's command-line tools and already required transitively by
-sandvault's existing dependencies). TOML parsing/serialization uses the
-stdlib `tomllib` (read) and a minimal hand-written serializer for the array
-update — we only ever rewrite four top-level array keys, so we don't need a
-full round-trip writer that preserves comments/formatting. The script reads
-the file, applies the four updates, and writes back. If the file contains
-TOML constructs we can't safely round-trip (rare for a config file), the
-script aborts with a clear message and tells the user the manual edit
-needed.
+The writer is a small Python 3 script invoked by `sv`. Macos 14+ ships
+Python 3.11+ (so `tomllib` for read is available in stdlib). For write,
+sandvault vendors `tomli_w` (single-file, MIT-licensed, ~200 lines, pure
+Python — no install step) at `helpers/tomli_w.py`. The script:
+
+1. Reads `~/.agentsview/config.toml` with `tomllib.load`.
+2. For each of the four agent dir keys: if absent, set to
+   `[default_path, mirror_path]`; if present, append mirror_path if not
+   already in the list.
+3. Serializes the entire merged dict back with `tomli_w.dumps` and writes
+   atomically (write to `.tmp`, `os.replace`).
+4. Round-tripping discards comments and original formatting on the *whole
+   file* — acceptable because the file is config, not a hand-tuned
+   document; documented in the prompt text the user sees.
 
 Diff is shown to the user before writing; user must press `y` to confirm.
 
