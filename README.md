@@ -366,7 +366,8 @@ If you're using `sandvault`, you're probably the type of person who also sets cu
 
 Next time you run sandvault, your files will be copied to the sandvault user home directory, and your zsh configuration files will be sourced:
 
-    .zshenv → .zprofile → .zshrc → .zlogin → .zlogout
+    .zshenv → .zprofile → .zshrc
+    NOTE: .zlogin and .zlogout not supported
 
 > **Note:** Earlier versions of sandvault supported configuration files in `guest/home/user/`, which didn't work for Homebrew installations. Consequently, this is no longer supported, and you'll get an error message asking you to move `guest/home/user` to `/Users/Shared/sv-${USER}/user/`.
 

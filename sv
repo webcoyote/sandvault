@@ -136,7 +136,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.11.0"
+readonly VERSION="1.16.0"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -159,7 +159,8 @@ readonly HOST_USER
 readonly SANDVAULT_USER="sandvault-$HOST_USER"
 readonly SANDVAULT_GROUP="sandvault-$HOST_USER"
 readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
-readonly SANDVAULT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
+readonly SANDVAULT_DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
+readonly SANDVAULT_FILE_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit"
 
 # Create sudoers.d file for passwordless sudo to sandvault user
 readonly SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
@@ -495,10 +496,12 @@ start_chrome() {
         > "$CHROME_LOG_FILE" 2>&1 &
     CHROME_PID=$!
 
-    # Wait for Chrome to report its debugging port (up to 5 seconds)
+    # Wait for Chrome to report its debugging port (up to 15 seconds).
+    # The window is generous because CI runners under load (parallel iOS
+    # simulator boot, Xcode jobs) can take several seconds to start Chrome.
     local port=""
     local i
-    for (( i=0; i<50; i++ )); do
+    for (( i=0; i<150; i++ )); do
         if ! kill -0 "$CHROME_PID" 2>/dev/null; then
             CHROME_PID=""
             abort "Chrome exited unexpectedly. Check $CHROME_LOG_FILE for details."
@@ -513,7 +516,7 @@ start_chrome() {
     if [[ -z "$port" ]]; then
         kill_chrome_pid "$CHROME_PID"
         CHROME_PID=""
-        abort "Chrome did not report a debugging port within 5 seconds. Check $CHROME_LOG_FILE."
+        abort "Chrome did not report a debugging port within 15 seconds. Check $CHROME_LOG_FILE."
     fi
 
     CHROME_PORT="$port"
@@ -616,10 +619,11 @@ start_ios_simulator() {
         > "$IOS_BRIDGE_LOG_FILE" 2>&1 &
     IOS_BRIDGE_PID=$!
 
-    # Wait for the bridge to report its port (up to 5 seconds).
+    # Wait for the bridge to report its port (up to 15 seconds). Generous
+    # because CI runners under load can be slow to start Python processes.
     local port=""
     local i
-    for (( i=0; i<50; i++ )); do
+    for (( i=0; i<150; i++ )); do
         if ! kill -0 "$IOS_BRIDGE_PID" 2>/dev/null; then
             IOS_BRIDGE_PID=""
             stop_ios_simulator
@@ -634,7 +638,7 @@ start_ios_simulator() {
 
     if [[ -z "$port" ]]; then
         stop_ios_simulator
-        abort "iOS bridge did not report a port within 5 seconds. Check $IOS_BRIDGE_LOG_FILE."
+        abort "iOS bridge did not report a port within 15 seconds. Check $IOS_BRIDGE_LOG_FILE."
     fi
 
     IOS_BRIDGE_PORT="$port"
@@ -696,16 +700,37 @@ configure_shared_folder_permssions() {
         sudo /usr/sbin/chown -f -R "$HOST_USER:$SANDVAULT_GROUP" "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE permissions..."
         sudo /bin/chmod 0770 "$SHARED_WORKSPACE"
-        trace "Configuring $SHARED_WORKSPACE: add $SANDVAULT_RIGHTS (recursively)"
-        sudo find "$SHARED_WORKSPACE" -print0 | xargs -0 sudo /bin/chmod -h +a "$SANDVAULT_RIGHTS"
+        # Apply directory ACL (with search/list) to directories only,
+        # and file ACL (without search/list) to files only, so that
+        # files don't inherit the execute bit from the search permission.
+        # Single find pass to avoid walking the tree twice.
+        trace "Configuring $SHARED_WORKSPACE: add directory and file ACLs"
+        sudo find "$SHARED_WORKSPACE" \
+            \( -type d -exec /bin/chmod -h +a "$SANDVAULT_DIR_RIGHTS" {} + \) \
+            -o \
+            \( ! -type d -exec /bin/chmod -h +a "$SANDVAULT_FILE_RIGHTS" {} + \)
     else
         # Make workspace accessible to $HOST_USER only
         trace "Configuring $SHARED_WORKSPACE: restoring owner to $HOST_USER:$(id -gn)"
         sudo /usr/sbin/chown -f -R "$HOST_USER:$(id -gn)" "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE permissions..."
         sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
-        trace "Configuring $SHARED_WORKSPACE: remove $SANDVAULT_RIGHTS (recursively)"
-        sudo find "$SHARED_WORKSPACE" -print0 2>/dev/null | xargs -0 sudo /bin/chmod -h -a "$SANDVAULT_RIGHTS" 2>/dev/null || true
+        # Remove all ACL entries for the sandvault group. Apply the
+        # directory ACE only to directories and the file ACE only to
+        # files, mirroring the `enable=true` branch above. Also remove
+        # the legacy combined ACE (from before the dir/file split),
+        # which was historically applied to every entry. Each -a removal
+        # is a no-op (fails silently) if the ACE doesn't exist. Single
+        # find pass to avoid walking the tree twice.
+        trace "Configuring $SHARED_WORKSPACE: remove $SANDVAULT_GROUP ACLs"
+        local legacy_ace="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
+        sudo find "$SHARED_WORKSPACE" \
+            \( -type d -exec /bin/chmod -h -a "$SANDVAULT_DIR_RIGHTS" {} + \
+                       -exec /bin/chmod -h -a "$legacy_ace" {} + \) \
+            -o \
+            \( ! -type d -exec /bin/chmod -h -a "$SANDVAULT_FILE_RIGHTS" {} + \
+                         -exec /bin/chmod -h -a "$legacy_ace" {} + \) \
+            2>/dev/null || true
     fi
 }
 
@@ -1239,20 +1264,72 @@ fi
 ###############################################################################
 # Create sandvault user and group
 ###############################################################################
+
+# Pick the first free integer ID at or above SV_MIN_ID, scanning the
+# union of existing user UIDs and group GIDs. Avoids three failure
+# modes of the old "max(UniqueID)+1" approach:
+#   1) collisions with reserved/system IDs that sit above the current max
+#   2) cross-collisions where a group GID equals a user UID (or vice versa)
+#   3) gaps left by deleted accounts being reused without coordination
+# SV_MIN_ID defaults to 600 to stay above macOS service accounts (which
+# cluster below 500) and the typical first local user (501).
+SV_MIN_ID="${SV_MIN_ID:-600}"
+next_free_id() {
+    local taken
+    taken=$( {
+        dscl . -list /Users UniqueID
+        dscl . -list /Groups PrimaryGroupID
+    } | awk '{print $2}' | sort -un)
+    awk -v min="$SV_MIN_ID" '
+        BEGIN { next_id = min; printed = 0 }
+        {
+            if ($1 < next_id) next
+            if ($1 == next_id) { next_id++; next }
+            print next_id; printed = 1; exit
+        }
+        END { if (!printed) print next_id }
+    ' <<< "$taken"
+}
+
+# Coarse advisory lock so concurrent `sv build` invocations on the same
+# Mac do not race on ID allocation. mkdir is atomic on POSIX, so the
+# first creator wins. The lock holder writes its PID; if a stale lock
+# is found (PID no longer running) we steal it.
+SV_ID_LOCK_DIR="/tmp/sandvault-id-alloc.lock"
+acquire_id_alloc_lock() {
+    local waited=0
+    while ! mkdir "$SV_ID_LOCK_DIR" 2>/dev/null; do
+        local holder=""
+        [[ -r "$SV_ID_LOCK_DIR/pid" ]] && holder=$(cat "$SV_ID_LOCK_DIR/pid" 2>/dev/null || true)
+        if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+            warn "Removing stale ID-allocation lock from PID $holder"
+            rm -rf "$SV_ID_LOCK_DIR"
+            continue
+        fi
+        if (( waited >= 30 )); then
+            abort "Timed out waiting for ID-allocation lock at $SV_ID_LOCK_DIR (held by PID ${holder:-unknown})"
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    echo "$$" > "$SV_ID_LOCK_DIR/pid"
+    trap 'rm -rf "$SV_ID_LOCK_DIR"' EXIT
+}
+release_id_alloc_lock() {
+    rm -rf "$SV_ID_LOCK_DIR"
+    trap - EXIT
+}
+
 if [[ "$REBUILD" == "true" ]]; then
     debug "Creating $SANDVAULT_USER user and $SANDVAULT_GROUP group..."
+
+    acquire_id_alloc_lock
 
     # Check if group exists, create if needed
     if ! dscl . -read "/Groups/$SANDVAULT_GROUP" &>/dev/null 2>&1; then
         trace "Creating $SANDVAULT_GROUP group..."
-
-        # Find next available UID/GID starting from 501
-        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
-        NEXT_UID=$((NEXT_UID + 1))
-
-        # Create group
         sudo dscl . -create "/Groups/$SANDVAULT_GROUP"
-        GROUP_ID=$NEXT_UID
+        GROUP_ID=$(next_free_id)
     else
         trace "Group $SANDVAULT_GROUP already exists"
         GROUP_ID=$(dscl . -read "/Groups/$SANDVAULT_GROUP" PrimaryGroupID 2>/dev/null | awk '{print $2}')
@@ -1261,35 +1338,27 @@ if [[ "$REBUILD" == "true" ]]; then
     # Ensure group has all required properties (idempotent)
     if [[ -z "${GROUP_ID:-}" ]]; then
         # Group exists but has no PrimaryGroupID, find next available
-        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
-        GROUP_ID=$((NEXT_UID + 1))
+        GROUP_ID=$(next_free_id)
     fi
-    trace "Configuring $SANDVAULT_GROUP group properties..."
+    trace "Configuring $SANDVAULT_GROUP group properties (GID=$GROUP_ID)..."
     sudo dscl . -create "/Groups/$SANDVAULT_GROUP" PrimaryGroupID "$GROUP_ID"
     sudo dscl . -create "/Groups/$SANDVAULT_GROUP" RealName "$SANDVAULT_GROUP Group"
 
     # Check if user exists, create if needed
     if ! dscl . -read "/Users/$SANDVAULT_USER" &>/dev/null 2>&1; then
         trace "Creating $SANDVAULT_USER user..."
-
-        # Find next available UID
-        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
-        NEXT_UID=$((NEXT_UID + 1))
-
-        # Create user
         sudo dscl . -create "/Users/$SANDVAULT_USER"
-        USER_ID=$NEXT_UID
+        USER_ID=$(next_free_id)
     else
         trace "User $SANDVAULT_USER already exists"
         USER_ID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
     fi
 
     # Ensure user has all required properties (idempotent)
-    trace "Configuring $SANDVAULT_USER user properties..."
+    trace "Configuring $SANDVAULT_USER user properties (UID=$USER_ID)..."
     if [[ -z "${USER_ID:-}" ]]; then
         # User exists but has no UniqueID, find next available
-        NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
-        USER_ID=$((NEXT_UID + 1))
+        USER_ID=$(next_free_id)
     fi
     sudo dscl . -create "/Users/$SANDVAULT_USER" UniqueID "$USER_ID"
     sudo dscl . -create "/Users/$SANDVAULT_USER" PrimaryGroupID "$GROUP_ID"
@@ -1338,6 +1407,8 @@ if [[ "$REBUILD" == "true" ]]; then
     # Add host user to the sandvault group
     trace "Adding $HOST_USER to $SANDVAULT_GROUP group..."
     sudo dseditgroup -o edit -a "$HOST_USER" -t user "$SANDVAULT_GROUP"
+
+    release_id_alloc_lock
 fi
 
 
@@ -1731,6 +1802,19 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
     debug "Permissions check complete"
 fi
 
+# Install the Claude Code /sv skill when Claude Code is present. The skill
+# lives under the sandvault namespace (~/.claude/skills/sandvault) so it
+# won't collide with any other skill named "sv". Use /bin/ln explicitly —
+# GNU coreutils `ln` on PATH (e.g. via Homebrew) has incompatible flag
+# handling that has bitten this project before.
+SV_SKILL_SOURCE="$WORKSPACE/skills/sandvault/sv"
+SV_SKILL_DEST="$HOME/.claude/skills/sandvault-sv"
+if [[ ! -L "$SV_SKILL_DEST" ]]; then
+    mkdir -p "$(dirname "$SV_SKILL_DEST")"
+    /bin/ln -sfn "$SV_SKILL_SOURCE" "$SV_SKILL_DEST"
+    debug "Installed /sv skill symlink at $SV_SKILL_DEST"
+fi
+
 if [[ "$COMMAND" == "build" ]]; then
     exit 0
 fi
@@ -1796,7 +1880,12 @@ fi
 # that are shared, e.g. /tmp/claude and /private/tmp/claude, which doesn't work when there
 # are multiple users running the agent on the same computer.
 # Fix: set TMPDIR after the shell has started running.
-ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; exec /bin/zsh --login"
+#
+# Source login files explicitly in a single zsh -c invocation rather than spawning
+# an intermediate "zsh --login". This avoids double-sourcing .zshenv and ensures
+# piped stdin passes through to the final process (an interactive login shell would
+# consume stdin as commands).
+ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; source ~/.zshenv; source ~/.zprofile; source ~/.zshrc"
 
 # Prepare command args as a single string
 COMMAND_ARGS_STR=""
@@ -1808,11 +1897,26 @@ if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
     # COMMAND_ARGS to a command that will be run by the shell.
     #
     # Example: sv shell -- echo foo
-    # Runs:    exec /bin/zsh --login -c 'echo foo'
+    # Runs:    source ~/.zshenv; source ~/.zprofile; source ~/.zshrc; echo foo
     if [[ "$COMMAND" == "" ]]; then
-        ZSH_COMMAND="$ZSH_COMMAND -c '${COMMAND_ARGS_STR}'"
+        ZSH_COMMAND="$ZSH_COMMAND; ${COMMAND_ARGS_STR}"
         COMMAND_ARGS_STR=""
         SHELL_COMMAND_MODE=true
+    fi
+fi
+
+# When COMMAND is set, .zshrc will exec it — no need to append anything.
+# When running a shell command (sv shell -- echo foo), it was already appended above.
+# For interactive shells (sv shell with no args), drop into a real interactive zsh
+# only when stdin is a TTY. When stdin is piped (e.g. `echo cmd | sv s`), exec a
+# non-interactive zsh that reads commands from stdin without printing prompts or
+# triggering interactive-only hooks like direnv.
+# Use -i (not --login) to avoid re-sourcing the login files.
+if [[ -z "$COMMAND" && "$SHELL_COMMAND_MODE" == "false" ]]; then
+    if [[ -t 0 ]]; then
+        ZSH_COMMAND="$ZSH_COMMAND; exec /bin/zsh -i"
+    else
+        ZSH_COMMAND="$ZSH_COMMAND; exec /bin/zsh"
     fi
 fi
 
@@ -1898,7 +2002,7 @@ if [[ "$MODE" == "ssh" ]]; then
     # Without them, the remote shell would word-split the command, causing incorrect execution.
     # Example: "'export TMPDIR=...'" becomes a single arg after local expansion, then the remote
     # shell strips the outer quotes, passing 'export TMPDIR=...' correctly to /bin/zsh -c
-    if ssh \
+    exec ssh \
         -q \
         "$SSH_TTY_OPT" \
         -o StrictHostKeyChecking=no \
@@ -1916,15 +2020,11 @@ if [[ "$MODE" == "ssh" ]]; then
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_VERBOSE=$SV_VERBOSE" \
+            "VERBOSE=${VERBOSE:-}" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
             /bin/zsh -c "$ZSH_COMMAND_SSH"
-    then
-        :
-    else
-        exit $?
-    fi
 else
 
     LAUNCHER=()
@@ -1953,7 +2053,7 @@ else
     # Simple double quotes "$ZSH_COMMAND" are sufficient because sudo passes arguments
     # directly to the command without an intermediate shell parsing layer.
     # This is different from SSH (see above) which requires extra quoting.
-    if "${LAUNCHER[@]+"${LAUNCHER[@]}"}" \
+    exec "${LAUNCHER[@]+"${LAUNCHER[@]}"}" \
         /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
@@ -1965,13 +2065,9 @@ else
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_VERBOSE=$SV_VERBOSE" \
+            "VERBOSE=${VERBOSE:-}" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
             /bin/zsh -c "$ZSH_COMMAND"
-    then
-        :
-    else
-        exit $?
-    fi
 fi

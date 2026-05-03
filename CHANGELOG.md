@@ -2,6 +2,69 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.16.0] - 2026-05-01
+
+### Fixed
+
+- Fix race condition and collisions in UID/GID allocation.
+- Fix TOCTOU vulnerability in shared-folder ACL removal.
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
+## [1.15.0] - 2026-04-29
+
+### Fixed
+
+- Fix stdin processing so piped input works with `sv claude` and `sv claude -- -p` (e.g. `echo "who are you" | sv claude`) ([#150](https://github.com/webcoyote/sandvault/pull/150))
+
+### Removed
+
+- Remove `.zlogin`/`.zlogout` handling in the guest shell ([#150](https://github.com/webcoyote/sandvault/pull/150))
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
+## [1.14.0] - 2026-04-28
+
+### Added
+- New `/sv` Claude Code skill for handing tasks off to sandvault directly from Claude Code
+- Automatically symlink `/sv` skill into `~/.claude/skills/` during `sv build`
+
+### Fixed
+- Fix skill link path and improve terminal compatibility for the `/sv` skill
+
+### Thanks to 2 contributors!
+
+- [@jesserobbins](https://github.com/jesserobbins)
+- [@webcoyote](https://github.com/webcoyote)
+
+## [1.13.0] - 2026-04-26
+
+### Changed
+- Increase Chrome and iOS simulator startup timeouts from 5s to 15s for better reliability under load ([#146](https://github.com/webcoyote/sandvault/pull/146))
+- Pass `VERBOSE` environment variable through to sandboxed processes
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
+## [1.12.0] - 2026-04-25
+
+### Added
+- Per-repo SSH deploy keys for cloned repositories ([#139](https://github.com/webcoyote/sandvault/pull/139)) — thanks @jesserobbins!
+- Standalone `sv-clone` command, replacing the previous `sv --clone` flag ([#133](https://github.com/webcoyote/sandvault/pull/133))
+
+### Fixed
+- File permissions no longer set the execute bit on regular files in the vault ([#141](https://github.com/webcoyote/sandvault/pull/141))
+
+### Thanks to 2 contributors!
+
+- [@jesserobbins](https://github.com/jesserobbins)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.11.0] - 2026-04-20
 
 ### Fixed

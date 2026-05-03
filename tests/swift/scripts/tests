@@ -1,19 +1,23 @@
 #!/bin/bash
-# Test the project
+# Test that `swift run` works inside the sandvault sandbox.
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Re-exec under `sv shell` if not already inside a sandvault session.
+if [[ -z "${SV_SESSION_ID:-}" ]]; then
+    exec "$SCRIPT_DIR/../../../sv" --no-build shell -- "$0" "$@"
+fi
+
 cd "$SCRIPT_DIR/.."
 
 [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
 
-# Disable sandboxing when running inside sandvault to avoid nested sandbox-exec
-ARGS=()
-if [[ -n "${SV_SESSION_ID:-}" ]]; then
-    if [[ "$VERBOSE" -ne 0 ]]; then
-        echo "swift project testing in sandvault sandbox"
-    fi
-    ARGS+=(--disable-sandbox)
+# Inside sandvault, swiftc's own sandbox-exec wrapper can't nest inside the
+# outer sandbox, so disable it.
+ARGS=(--disable-sandbox)
+if [[ "$VERBOSE" -ne 0 ]]; then
+    echo "swift project testing in sandvault sandbox"
 fi
 
 # Bash 3.2-safe: expand array only when set, with no empty arg
