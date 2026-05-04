@@ -779,7 +779,8 @@ agentsview_contamination_check() {
 }
 
 # Create the four mirror symlinks under $SHARED_WORKSPACE/sessions/.
-# Idempotent. Prints errors but doesn't abort on individual failures.
+# Idempotent. Logs and continues on individual failures (warn for tolerated
+# skips like a non-symlink at the path; error for unexpected `ln` failures).
 agentsview_install_symlinks() {
     local agent subdir link target current
     mkdir -p "$SHARED_WORKSPACE/sessions"
@@ -796,7 +797,7 @@ agentsview_install_symlinks() {
             warn "agentsview symlink $link points to $current (expected $target); replacing"
             rm -f "$link"
         elif [[ -e "$link" ]]; then
-            error "agentsview: $link exists and is not a symlink; skipping"
+            warn "agentsview: $link exists and is not a symlink; skipping"
             continue
         fi
         /bin/ln -s "$target" "$link" || error "agentsview: failed to create symlink $link"
