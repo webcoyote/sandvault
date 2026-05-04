@@ -117,12 +117,12 @@ fi
 ###############################################################################
 # Run config merge scripts
 #
-# These scripts are written by sv into $SHARED_WORKSPACE/setup/ and merge
-# required settings into config files (e.g. .gitconfig, .claude.json) without
-# overwriting agent/tool modifications from previous sessions.
+# These scripts are written by sv into $SHARED_WORKSPACE/_sandvault/setup/ and
+# merge required settings into config files (e.g. .gitconfig, .claude.json)
+# without overwriting agent/tool modifications from previous sessions.
 ###############################################################################
-if [[ -n "${SHARED_WORKSPACE:-}" && -d "$SHARED_WORKSPACE/setup" ]]; then
-    for _setup_script in "$SHARED_WORKSPACE/setup/"*; do
+if [[ -n "${SHARED_WORKSPACE:-}" && -d "$SHARED_WORKSPACE/_sandvault/setup" ]]; then
+    for _setup_script in "$SHARED_WORKSPACE/_sandvault/setup/"*; do
         [[ -x "$_setup_script" ]] || continue
         debug "Running setup script: $(basename "$_setup_script")"
         "$_setup_script" >&2

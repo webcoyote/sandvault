@@ -3,14 +3,12 @@
 # host user's agentsview installation. See:
 #   docs/superpowers/specs/2026-05-03-agentsview-export-design.md
 #
-# Subcommands:
-#   setup      (default) Detect agentsview, prompt once, install symlinks,
-#              update host config.toml, write the sandbox-side setup-merge
-#              script that ACLs each agent's session subdir.
-#   uninstall  Remove the setup-merge script, state file, and mirror
-#              symlinks. Does NOT touch ~/.agentsview/config.toml (the user
-#              may have other tools depending on those entries; revert is a
-#              one-line manual edit).
+# Detects agentsview, prompts once on first run, installs mirror symlinks,
+# updates host config.toml, and writes the sandbox-side setup-merge script
+# that ACLs each agent's session subdir. All sandvault-managed artifacts
+# live under $SHARED_WORKSPACE/_sandvault/, so uninstall is handled by
+# `sv uninstall` removes that directory. Host config.toml is left alone
+# (revert is a one-line manual edit).
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
@@ -45,7 +43,8 @@ readonly HOST_USER
 readonly SANDVAULT_USER="sandvault-$HOST_USER"
 readonly SANDVAULT_GROUP="sandvault-$HOST_USER"
 readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
-readonly AGENTSVIEW_STATE_FILE="$SHARED_WORKSPACE/setup/agentsview-export.state"
+readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
+readonly AGENTSVIEW_STATE_FILE="$SV_PRIVATE_DIR/setup/agentsview-export.state"
 readonly AGENTSVIEW_HOST_CONFIG="$HOME/.agentsview/config.toml"
 
 ###############################################################################
@@ -86,15 +85,15 @@ agentsview_contamination_check() {
 # Install
 ###############################################################################
 
-# Create the four mirror symlinks under $SHARED_WORKSPACE/sessions/.
+# Create the four mirror symlinks under $SV_PRIVATE_DIR/sessions/.
 # Idempotent. Logs and continues on individual failures (warn for tolerated
 # skips like a non-symlink at the path; error for unexpected `ln` failures).
 agentsview_install_symlinks() {
     local agent subdir link target current
-    mkdir -p "$SHARED_WORKSPACE/sessions"
+    mkdir -p "$SV_PRIVATE_DIR/sessions"
     for agent in "${AGENTSVIEW_AGENTS[@]}"; do
         subdir="$(agentsview_field SUBDIR "$agent")"
-        link="$SHARED_WORKSPACE/sessions/$agent"
+        link="$SV_PRIVATE_DIR/sessions/$agent"
         target="/Users/$SANDVAULT_USER/$subdir"
         if [[ -L "$link" ]]; then
             current="$(readlink "$link")"
@@ -120,7 +119,7 @@ agentsview_update_config() {
     local agent tomlkey link
     for agent in "${AGENTSVIEW_AGENTS[@]}"; do
         tomlkey="$(agentsview_field TOMLKEY "$agent")"
-        link="$SHARED_WORKSPACE/sessions/$agent"
+        link="$SV_PRIVATE_DIR/sessions/$agent"
         agent_args+=(--agent "$tomlkey=$link")
     done
 
@@ -171,8 +170,8 @@ agentsview_update_config() {
 # files are readable by the host user through the mirror symlinks. No-op
 # unless the host has opted in (state file == enabled).
 write_setup_merge_script() {
-    mkdir -p "$SHARED_WORKSPACE/setup"
-    cat > "$SHARED_WORKSPACE/setup/agentsview-export" << SETUP_EOF
+    mkdir -p "$SV_PRIVATE_DIR/setup"
+    cat > "$SV_PRIVATE_DIR/setup/agentsview-export" << SETUP_EOF
 #!/bin/bash
 set -Eeuo pipefail
 STATE_FILE="$AGENTSVIEW_STATE_FILE"
@@ -186,7 +185,7 @@ for subdir in "$AGENTSVIEW_SUBDIR_claude" "$AGENTSVIEW_SUBDIR_codex" "$AGENTSVIE
     /bin/chmod +a "\$RIGHTS" "\$full" 2>/dev/null || true
 done
 SETUP_EOF
-    chmod +x "$SHARED_WORKSPACE/setup/agentsview-export"
+    chmod +x "$SV_PRIVATE_DIR/setup/agentsview-export"
 }
 
 # Orchestrate the full opt-in flow. Idempotent: skips silently if state
@@ -229,7 +228,7 @@ agentsview_setup() {
     info "appears in agentsview's dashboard, search, and cost tracking?"
     info ""
     info "This will:"
-    info "  - add read-only symlinks under $SHARED_WORKSPACE/sessions/"
+    info "  - add read-only symlinks under $SV_PRIVATE_DIR/sessions/"
     info "  - apply read-only ACLs to sandbox agent session dirs"
     info "  - add four scan paths to $AGENTSVIEW_HOST_CONFIG (with diff confirmation)"
     info "  - rewrite your agentsview config without preserving comments"
@@ -239,7 +238,7 @@ agentsview_setup() {
     printf 'Enable agentsview export? [y/N] '
     local reply
     read -r reply
-    mkdir -p "$SHARED_WORKSPACE/setup"
+    mkdir -p "$SV_PRIVATE_DIR/setup"
     if [[ "$reply" != "y" && "$reply" != "Y" ]]; then
         echo disabled > "$AGENTSVIEW_STATE_FILE"
         info "agentsview: export disabled"
@@ -252,48 +251,26 @@ agentsview_setup() {
 }
 
 ###############################################################################
-# Uninstall
-###############################################################################
-
-# Remove sandvault-managed agentsview artifacts. Tolerates partially-removed
-# state (e.g. invoked from `sv uninstall` while other cleanup is in flight).
-# Leaves ~/.agentsview/config.toml alone; documented manual one-line edit.
-agentsview_uninstall() {
-    rm -f "$SHARED_WORKSPACE/setup/agentsview-export"
-    rm -f "$AGENTSVIEW_STATE_FILE"
-    if [[ -d "$SHARED_WORKSPACE/sessions" ]]; then
-        local _agent
-        for _agent in "${AGENTSVIEW_AGENTS[@]}"; do
-            rm -f "$SHARED_WORKSPACE/sessions/$_agent"
-        done
-        rmdir "$SHARED_WORKSPACE/sessions" 2>/dev/null || true
-    fi
-}
-
-###############################################################################
 # Entry point
 ###############################################################################
 
 print_usage() {
     cat <<EOF
-Usage: sv-agentsview-setup [setup|uninstall|--help]
+Usage: sv-agentsview-setup [--help]
 
-  setup      (default) Detect agentsview, prompt once on first run, install
-             mirror symlinks, update host config.toml, and write the
-             sandbox-side setup-merge script.
-  uninstall  Remove sandvault-managed agentsview artifacts (setup-merge
-             script, state file, mirror symlinks). Does not touch
-             ~/.agentsview/config.toml.
-  --help     Show this message.
+Detect agentsview, prompt once on first run, install mirror symlinks,
+update host config.toml, and write the sandbox-side setup-merge script.
+
+Uninstall is handled by \`sv uninstall\`, which removes $SV_PRIVATE_DIR/.
+Host config.toml is left in place (revert is a one-line manual edit).
 
 State file: $AGENTSVIEW_STATE_FILE
 Host config: $AGENTSVIEW_HOST_CONFIG
 EOF
 }
 
-case "${1:-setup}" in
-    setup)     agentsview_setup ;;
-    uninstall) agentsview_uninstall ;;
+case "${1:-}" in
+    "")        agentsview_setup ;;
     -h|--help) print_usage ;;
-    *)         abort "Unknown subcommand: $1. Try --help." ;;
+    *)         abort "Unknown argument: $1. Try --help." ;;
 esac

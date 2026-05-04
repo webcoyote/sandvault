@@ -143,6 +143,10 @@ readonly HOST_USER
 readonly SANDVAULT_USER="sandvault-$HOST_USER"
 readonly SANDVAULT_GROUP="sandvault-$HOST_USER"
 readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
+# Sandvault-private subdir of $SHARED_WORKSPACE. Holds setup scripts, scratch
+# state, deploy keys, and agentsview symlinks — anything sandvault manages on
+# behalf of the host. Uninstall is `rm -rf` of this directory.
+readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
 readonly SANDVAULT_DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
 readonly SANDVAULT_FILE_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit"
 
@@ -590,11 +594,11 @@ start_ios_simulator() {
     fi
 
     # Launch the HTTP bridge.
-    # Place the scratch directory under $SHARED_WORKSPACE/tmp so that
+    # Place the scratch directory under $SV_PRIVATE_DIR/tmp so that
     # screenshots and other bridge artifacts are accessible to both the
     # host user and the sandboxed user.
-    mkdir -p "$SHARED_WORKSPACE/tmp"
-    IOS_BRIDGE_SCRATCH_DIR="$(mktemp -d "$SHARED_WORKSPACE/tmp/sv-ios-bridge.XXXXXX")"
+    mkdir -p "$SV_PRIVATE_DIR/tmp"
+    IOS_BRIDGE_SCRATCH_DIR="$(mktemp -d "$SV_PRIVATE_DIR/tmp/sv-ios-bridge.XXXXXX")"
     rm -f "$IOS_BRIDGE_LOG_FILE"
     debug "Starting iOS bridge..."
     "$WORKSPACE/helpers/sv-ios-bridge" --udid "$IOS_SIM_UDID" \
@@ -648,7 +652,7 @@ unregister_session() {
     # Per-session cleanup
     [[ "$USE_BROWSER" == "true" ]] && stop_chrome
     [[ "$USE_IOS_SIMULATOR" == "true" ]] && stop_ios_simulator
-    rm -f "$SHARED_WORKSPACE/tmp/sv-session-$SV_SESSION_ID" 2>/dev/null || true
+    rm -f "$SV_PRIVATE_DIR/tmp/sv-session-$SV_SESSION_ID" 2>/dev/null || true
 
     mkdir -p "$SESSION_DIR"
     local prev_count
@@ -760,12 +764,7 @@ uninstall() {
 
     # Remove shared workspace
     # Do not remove $SHARED_WORKSPACE/user
-    rmdir "$SHARED_WORKSPACE/tmp" 2>/dev/null || true
-
-    rm -f "$SHARED_WORKSPACE/setup/gitconfig"
-    rm -f "$SHARED_WORKSPACE/setup/claude-json"
-    "$WORKSPACE/sv-agentsview-setup" uninstall || warn "agentsview uninstall hook failed (continuing)"
-    rmdir "$SHARED_WORKSPACE/setup" 2>/dev/null || true
+    rm -rf "$SV_PRIVATE_DIR"
 
     rm -f "$SHARED_WORKSPACE/SANDVAULT-README.md"
     rmdir "$SHARED_WORKSPACE" 2>/dev/null || true
@@ -1460,10 +1459,10 @@ elif [[ "$REBUILD" == "true" ]]; then
     GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
     GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
 
-    mkdir -p "$SHARED_WORKSPACE/setup"
+    mkdir -p "$SV_PRIVATE_DIR/setup"
 
     # .gitconfig: seed if missing, preserving user overrides
-    cat > "$SHARED_WORKSPACE/setup/gitconfig" << SETUP_EOF
+    cat > "$SV_PRIVATE_DIR/setup/gitconfig" << SETUP_EOF
 #!/bin/bash
 set -Eeuo pipefail
 if [[ ! -f "\$HOME/.gitconfig" ]]; then
@@ -1472,10 +1471,10 @@ if [[ ! -f "\$HOME/.gitconfig" ]]; then
     git config -f "\$HOME/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
 fi
 SETUP_EOF
-    chmod +x "$SHARED_WORKSPACE/setup/gitconfig"
+    chmod +x "$SV_PRIVATE_DIR/setup/gitconfig"
 
     # .claude.json: seed if missing (onboarding flags only matter on first run)
-    cat > "$SHARED_WORKSPACE/setup/claude-json" << 'SETUP_EOF'
+    cat > "$SV_PRIVATE_DIR/setup/claude-json" << 'SETUP_EOF'
 #!/bin/bash
 set -Eeuo pipefail
 if [[ ! -f "$HOME/.claude.json" ]]; then
@@ -1490,12 +1489,7 @@ if [[ ! -f "$HOME/.claude.json" ]]; then
 JSON_EOF
 fi
 SETUP_EOF
-    chmod +x "$SHARED_WORKSPACE/setup/claude-json"
-
-    # Detect agentsview, prompt once on first run, install mirror symlinks +
-    # host config, and write the sandbox-side setup-merge script. Failure of
-    # this optional integration must not abort `sv setup`.
-    "$WORKSPACE/sv-agentsview-setup" setup || warn "agentsview setup failed (continuing)"
+    chmod +x "$SV_PRIVATE_DIR/setup/claude-json"
 fi
 
 
