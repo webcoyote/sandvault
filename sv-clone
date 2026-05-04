@@ -22,19 +22,21 @@ set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
 # Resolve script location
+# perform "readlink -f", which is not supported in macOS system bash
 SOURCE="${BASH_SOURCE[0]}"
 while [[ -L "$SOURCE" ]]; do
     SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
     SOURCE="$(readlink "$SOURCE")"
     [[ "$SOURCE" = /* ]] || SOURCE="$SOURCE_DIR/$SOURCE"
 done
-SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
-WORKSPACE="$SCRIPT_DIR"
+WORKSPACE="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
 
-# If running from a Homebrew Cellar, use the stable opt/ symlink
+# If running from a Homebrew Cellar (e.g. /opt/homebrew/Cellar/sandvault/1.2.3),
+# use the stable opt/ symlink instead so generated scripts don't break on upgrade.
 if [[ "$WORKSPACE" =~ ^(.*)/homebrew/Cellar/([^/]+)/[^/]+$ ]]; then
     WORKSPACE="${BASH_REMATCH[1]}/homebrew/opt/${BASH_REMATCH[2]}"
 fi
+readonly WORKSPACE
 
 SV="$WORKSPACE/sv"
 if [[ ! -x "$SV" ]]; then
@@ -46,26 +48,8 @@ fi
 ###############################################################################
 # Functions
 ###############################################################################
-[[ "${SV_VERBOSE:-0}" =~ ^[0-9]+$ ]] && SV_VERBOSE="${SV_VERBOSE:-0}" || SV_VERBOSE=1
-trace () {
-    [[ "$SV_VERBOSE" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
-}
-debug () {
-    [[ "$SV_VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
-}
-info () {
-    echo >&2 -e "ℹ️  \033[36m$*\033[0m"
-}
-warn () {
-    echo >&2 -e "⚠️  \033[33m$*\033[0m"
-}
-error () {
-    echo >&2 -e "❌ \033[31m$*\033[0m"
-}
-abort () {
-    error "$*"
-    exit 1
-}
+# shellcheck source=helpers/sv-logging.sh
+source "$WORKSPACE/helpers/sv-logging.sh"
 
 
 ###############################################################################
@@ -142,6 +126,7 @@ else
 fi
 readonly HOST_USER
 readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
+readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
 
 if [[ ! -d "$SHARED_WORKSPACE" ]]; then
     abort "Shared workspace not found: $SHARED_WORKSPACE (run 'sv build' first)"
@@ -209,7 +194,7 @@ info "Repository ready at $REPO_DIR"
 # The sandvault user has no credentials. For any GitHub repo (cloned via SSH,
 # HTTPS, or local path), generate a per-repo ED25519 deploy key so the sandbox
 # can push/pull. The origin remote is rewritten to SSH so the deploy key works.
-# Keys are stored in $SHARED_WORKSPACE/.ssh/ — outside the repo working tree,
+# Keys are stored in $SV_PRIVATE_DIR/.ssh/ — outside the repo working tree,
 # accessible to both users via group ACLs.
 
 # Extract owner/repo from origin URL (works for SSH, HTTPS, and local clones
@@ -239,7 +224,7 @@ fi
 
 if [[ -n "$GITHUB_REPO_PATH" ]]; then
     DEPLOY_KEY_NAME="deploy_${REPOSITORY_NAME}"
-    DEPLOY_KEY_DIR="$SHARED_WORKSPACE/.ssh"
+    DEPLOY_KEY_DIR="$SV_PRIVATE_DIR/.ssh"
     DEPLOY_KEY_PRIV="$DEPLOY_KEY_DIR/$DEPLOY_KEY_NAME"
     DEPLOY_KEY_PUB="$DEPLOY_KEY_PRIV.pub"
 

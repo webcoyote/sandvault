@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
+# Resolve script location
 # perform "readlink -f", which is not supported in macOS system bash
 SOURCE="${BASH_SOURCE[0]}"
 while [[ -L "$SOURCE" ]]; do
@@ -23,26 +24,9 @@ readonly WORKSPACE
 ###############################################################################
 # Functions
 ###############################################################################
-[[ "${SV_VERBOSE:-0}" =~ ^[0-9]+$ ]] && SV_VERBOSE="${SV_VERBOSE:-0}" || SV_VERBOSE=1
-trace () {
-    [[ "$SV_VERBOSE" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
-}
-debug () {
-    [[ "$SV_VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
-}
-info () {
-    echo >&2 -e "ℹ️  \033[36m$*\033[0m"
-}
-warn () {
-    echo >&2 -e "⚠️  \033[33m$*\033[0m"
-}
-error () {
-    echo >&2 -e "❌ \033[31m$*\033[0m"
-}
-abort () {
-    error "$*"
-    exit 1
-}
+# shellcheck source=helpers/sv-logging.sh
+source "$WORKSPACE/helpers/sv-logging.sh"
+
 # heredoc MESSAGE << EOF
 #    your favorite text here
 # EOF
@@ -159,8 +143,28 @@ readonly HOST_USER
 readonly SANDVAULT_USER="sandvault-$HOST_USER"
 readonly SANDVAULT_GROUP="sandvault-$HOST_USER"
 readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
-readonly SANDVAULT_DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
-readonly SANDVAULT_FILE_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit"
+# Sandvault-private subdir of $SHARED_WORKSPACE. Holds setup scripts, scratch
+# state, deploy keys, and agentsview symlinks — anything sandvault manages on
+# behalf of the host. Uninstall is `rm -rf` of this directory.
+readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
+# Three ACEs for the dir/file split. The split exists so new files don't
+# inherit `search`/`list` (which on a file means execute) from their parent
+# directory's ACL.
+#
+# Each directory carries two ACEs:
+#   1. SANDVAULT_DIR_RIGHTS — applies to the dir itself and propagates to
+#      new subdirs (directory_inherit only, no file_inherit). Carries
+#      search/list, which subdirs need for traversal.
+#   2. SANDVAULT_FILE_INHERIT_RIGHTS — only_inherit (grants nothing on the
+#      dir itself). file_inherit propagates to new files; directory_inherit
+#      propagates the ACE to new subdirs so deep children also inherit.
+#      Omits search/list, so files don't pick up execute.
+#
+# Each file carries one ACE: SANDVAULT_FILE_RIGHTS (no inherit flags, no
+# execute) — the actual rights for the file.
+readonly SANDVAULT_DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,directory_inherit"
+readonly SANDVAULT_FILE_INHERIT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit,only_inherit"
+readonly SANDVAULT_FILE_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown"
 
 # Create sudoers.d file for passwordless sudo to sandvault user
 readonly SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
@@ -174,6 +178,9 @@ readonly INSTALL_MARKER="$INSTALL_PRODUCT/install"
 # Session tracking for safe multi-instance cleanup
 readonly SESSION_DIR="$HOME/.local/state/sandvault"
 readonly SESSION_FILE="$SESSION_DIR/sandvault.count"
+# One-shot migration markers. Each marker means "this migration already
+# ran on this host"; presence skips the migration on subsequent runs.
+readonly ACL_LEGACY_STRIPPED_MARKER="$SESSION_DIR/acl-legacy-stripped"
 
 # Chrome browser state (per-instance using session ID)
 readonly CHROME_LOG_FILE="$SESSION_DIR/chrome-$SV_SESSION_ID.log"
@@ -606,11 +613,11 @@ start_ios_simulator() {
     fi
 
     # Launch the HTTP bridge.
-    # Place the scratch directory under $SHARED_WORKSPACE/tmp so that
+    # Place the scratch directory under $SV_PRIVATE_DIR/tmp so that
     # screenshots and other bridge artifacts are accessible to both the
     # host user and the sandboxed user.
-    mkdir -p "$SHARED_WORKSPACE/tmp"
-    IOS_BRIDGE_SCRATCH_DIR="$(mktemp -d "$SHARED_WORKSPACE/tmp/sv-ios-bridge.XXXXXX")"
+    mkdir -p "$SV_PRIVATE_DIR/tmp"
+    IOS_BRIDGE_SCRATCH_DIR="$(mktemp -d "$SV_PRIVATE_DIR/tmp/sv-ios-bridge.XXXXXX")"
     rm -f "$IOS_BRIDGE_LOG_FILE"
     debug "Starting iOS bridge..."
     "$WORKSPACE/helpers/sv-ios-bridge" --udid "$IOS_SIM_UDID" \
@@ -664,7 +671,6 @@ unregister_session() {
     # Per-session cleanup
     [[ "$USE_BROWSER" == "true" ]] && stop_chrome
     [[ "$USE_IOS_SIMULATOR" == "true" ]] && stop_ios_simulator
-    rm -f "$SHARED_WORKSPACE/tmp/sv-session-$SV_SESSION_ID" 2>/dev/null || true
 
     mkdir -p "$SESSION_DIR"
     local prev_count
@@ -692,21 +698,40 @@ configure_shared_folder_permssions() {
 
     # Grant write access to shared workspace for sandvault group. We want
     # to modify files and symbolic links, not what symbolic links point to.
-    # Use `find | xargs chmod -h` instead of `chmod -R -h` because the latter
-    # causes: "chmod: the -R and -h options may not be specified together"
+    # Use `find ... -exec chmod -h` instead of `chmod -R -h` because the
+    # latter errors: "chmod: the -R and -h options may not be specified
+    # together".
     if [[ "$enable" == "true" ]]; then
         # Make workspace accessible to $HOST_USER and $SANDVAULT_GROUP only
         trace "Configuring $SHARED_WORKSPACE: set owner to $HOST_USER:$SANDVAULT_GROUP"
         sudo /usr/sbin/chown -f -R "$HOST_USER:$SANDVAULT_GROUP" "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE permissions..."
         sudo /bin/chmod 0770 "$SHARED_WORKSPACE"
-        # Apply directory ACL (with search/list) to directories only,
-        # and file ACL (without search/list) to files only, so that
-        # files don't inherit the execute bit from the search permission.
-        # Single find pass to avoid walking the tree twice.
+
+        # One-shot legacy ACE cleanup. Several historical sv releases
+        # applied ACE shapes that propagated execute (or search, which
+        # means execute on a file) to new files. Rather than enumerate
+        # every shape we've ever shipped, strip all ACLs from the tree —
+        # `sv` is the only thing that manages ACLs under $SHARED_WORKSPACE,
+        # so any ACL here is one we put there. The new dir/file-split
+        # ACEs are re-applied right below.
+        if [[ ! -f "$ACL_LEGACY_STRIPPED_MARKER" ]]; then
+            trace "Configuring $SHARED_WORKSPACE: stripping all ACLs (one-shot)"
+            sudo find "$SHARED_WORKSPACE" -exec /bin/chmod -h -N {} + \
+                2>/dev/null || true
+            mkdir -p "$SESSION_DIR"
+            touch "$ACL_LEGACY_STRIPPED_MARKER"
+        fi
+
+        # Directories get two ACEs (dir-rights + file-inherit ACE so new
+        # files inherit non-execute rights). Files get the bare file ACE.
+        # The split prevents files from inheriting `search`/`list`, which
+        # on a file means execute. Single find pass to avoid walking the
+        # tree twice.
         trace "Configuring $SHARED_WORKSPACE: add directory and file ACLs"
         sudo find "$SHARED_WORKSPACE" \
-            \( -type d -exec /bin/chmod -h +a "$SANDVAULT_DIR_RIGHTS" {} + \) \
+            \( -type d -exec /bin/chmod -h +a "$SANDVAULT_DIR_RIGHTS" {} + \
+                       -exec /bin/chmod -h +a "$SANDVAULT_FILE_INHERIT_RIGHTS" {} + \) \
             -o \
             \( ! -type d -exec /bin/chmod -h +a "$SANDVAULT_FILE_RIGHTS" {} + \)
     else
@@ -715,21 +740,8 @@ configure_shared_folder_permssions() {
         sudo /usr/sbin/chown -f -R "$HOST_USER:$(id -gn)" "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE permissions..."
         sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
-        # Remove all ACL entries for the sandvault group. Apply the
-        # directory ACE only to directories and the file ACE only to
-        # files, mirroring the `enable=true` branch above. Also remove
-        # the legacy combined ACE (from before the dir/file split),
-        # which was historically applied to every entry. Each -a removal
-        # is a no-op (fails silently) if the ACE doesn't exist. Single
-        # find pass to avoid walking the tree twice.
-        trace "Configuring $SHARED_WORKSPACE: remove $SANDVAULT_GROUP ACLs"
-        local legacy_ace="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
-        sudo find "$SHARED_WORKSPACE" \
-            \( -type d -exec /bin/chmod -h -a "$SANDVAULT_DIR_RIGHTS" {} + \
-                       -exec /bin/chmod -h -a "$legacy_ace" {} + \) \
-            -o \
-            \( ! -type d -exec /bin/chmod -h -a "$SANDVAULT_FILE_RIGHTS" {} + \
-                         -exec /bin/chmod -h -a "$legacy_ace" {} + \) \
+        trace "Configuring $SHARED_WORKSPACE: stripping all ACLs"
+        sudo find "$SHARED_WORKSPACE" -exec /bin/chmod -h -N {} + \
             2>/dev/null || true
     fi
 }
@@ -737,9 +749,6 @@ configure_shared_folder_permssions() {
 uninstall() {
     info "Uninstalling..."
     force_cleanup_sandvault_processes force-all
-    rm -rf "$SESSION_DIR"/chrome-data-* "$SESSION_DIR"/chrome-*.log
-    rm -f "$SESSION_DIR"/ios-bridge-*.log
-    rm -f /tmp/sandvault-configure-* 2>/dev/null || true
 
     # Remove the install marker file first; it's a sentinel for "everything is complete".
     # By removing it first we force a rebuild if the user wants to run this again.
@@ -774,13 +783,12 @@ uninstall() {
     # Cleanup SSH
     rm -rf "$SSH_KEYFILE_PRIV" "$SSH_KEYFILE_PUB"
 
+    # Remove sandvault state
+    rm -rf "$SESSION_DIR"
+
     # Remove shared workspace
     # Do not remove $SHARED_WORKSPACE/user
-    rmdir "$SHARED_WORKSPACE/tmp" 2>/dev/null || true
-
-    rm -f "$SHARED_WORKSPACE/setup/gitconfig"
-    rm -f "$SHARED_WORKSPACE/setup/claude-json"
-    rmdir "$SHARED_WORKSPACE/setup" 2>/dev/null || true
+    rm -rf "$SV_PRIVATE_DIR"
 
     rm -f "$SHARED_WORKSPACE/SANDVAULT-README.md"
     rmdir "$SHARED_WORKSPACE" 2>/dev/null || true
@@ -1475,10 +1483,10 @@ elif [[ "$REBUILD" == "true" ]]; then
     GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
     GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
 
-    mkdir -p "$SHARED_WORKSPACE/setup"
+    mkdir -p "$SV_PRIVATE_DIR/setup"
 
     # .gitconfig: seed if missing, preserving user overrides
-    cat > "$SHARED_WORKSPACE/setup/gitconfig" << SETUP_EOF
+    cat > "$SV_PRIVATE_DIR/setup/gitconfig" << SETUP_EOF
 #!/bin/bash
 set -Eeuo pipefail
 if [[ ! -f "\$HOME/.gitconfig" ]]; then
@@ -1487,10 +1495,10 @@ if [[ ! -f "\$HOME/.gitconfig" ]]; then
     git config -f "\$HOME/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
 fi
 SETUP_EOF
-    chmod +x "$SHARED_WORKSPACE/setup/gitconfig"
+    chmod +x "$SV_PRIVATE_DIR/setup/gitconfig"
 
     # .claude.json: seed if missing (onboarding flags only matter on first run)
-    cat > "$SHARED_WORKSPACE/setup/claude-json" << 'SETUP_EOF'
+    cat > "$SV_PRIVATE_DIR/setup/claude-json" << 'SETUP_EOF'
 #!/bin/bash
 set -Eeuo pipefail
 if [[ ! -f "$HOME/.claude.json" ]]; then
@@ -1505,7 +1513,7 @@ if [[ ! -f "$HOME/.claude.json" ]]; then
 JSON_EOF
 fi
 SETUP_EOF
-    chmod +x "$SHARED_WORKSPACE/setup/claude-json"
+    chmod +x "$SV_PRIVATE_DIR/setup/claude-json"
 fi
 
 
@@ -1676,7 +1684,15 @@ fi
 # an intermediate "zsh --login". This avoids double-sourcing .zshenv and ensures
 # piped stdin passes through to the final process (an interactive login shell would
 # consume stdin as commands).
-ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; source ~/.zshenv; source ~/.zprofile; source ~/.zshrc"
+#
+# ~/configure runs once per outer sv invocation (skipped when nested) before
+# .zshenv is sourced, so per-session setup happens exactly once instead of being
+# guarded by a lock file inside .zshenv.
+ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~;"
+if [[ "$NESTED" == "false" ]]; then
+    ZSH_COMMAND="$ZSH_COMMAND ~/configure;"
+fi
+ZSH_COMMAND="$ZSH_COMMAND source ~/.zshenv; source ~/.zprofile; source ~/.zshrc"
 
 # Prepare command args as a single string
 COMMAND_ARGS_STR=""

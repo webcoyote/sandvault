@@ -238,6 +238,18 @@ Explicit command-line arguments are appended after `SANDVAULT_ARGS`, so they are
 ```
 
 
+## `agentsview` Integration
+
+[`agentsview`](https://github.com/badlogic/agentsview) is a dashboard that aggregates session history, search, and cost tracking across AI coding agents (Claude Code, Codex, OpenCode, Gemini). If you have agentsview installed on the host, `sv-agentsview-setup` mirrors sandbox session data so it appears alongside your host-side sessions.
+
+```bash
+# Detect agentsview, prompt to opt in, and configure
+sv-agentsview-setup
+```
+
+Then run `agentsview serve` and you'll see your sandvault AI sessions included in the `agentsview` dashboard.
+
+
 ## Nested sandboxes
 
 In addition to running in a different macOS user account, sandvault also runs applications using macOS `sandbox-exec`, which further limits what resources are accessible.

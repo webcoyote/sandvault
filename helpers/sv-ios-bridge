@@ -560,8 +560,8 @@ def main():
     # sandvault sessions from corrupting each other's iosef state.
     #
     # When launched by `sv`, --scratch-dir points to a directory under
-    # $SHARED_WORKSPACE/tmp/ so that screenshots are accessible to the
-    # sandboxed user.  The caller owns cleanup in that case.
+    # $SHARED_WORKSPACE/_sandvault/tmp/ so that screenshots are accessible to
+    # the sandboxed user.  The caller owns cleanup in that case.
     if args.scratch_dir:
         scratch_dir = args.scratch_dir
         os.makedirs(scratch_dir, exist_ok=True)
