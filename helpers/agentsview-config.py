@@ -58,12 +58,13 @@ def apply_agents(config: dict, agents: list[tuple[str, str]], home: str) -> dict
     """Merge agent mirror paths into config dict. Returns updated dict."""
     result = dict(config)
     for key, mirror_path in agents:
-        default = default_host_path(key, home)
-        existing = list(result.get(key, []))
-        # Append default if absent
-        if default not in existing:
-            existing.append(default)
-        # Append mirror if absent
+        if key in result:
+            # Key present: respect the user's array as-is, only ensure mirror is in it.
+            existing = list(result[key])
+        else:
+            # Key absent: agentsview would use its built-in default. Materialize
+            # that default explicitly so adding the mirror doesn't replace it.
+            existing = [default_host_path(key, home)]
         if mirror_path not in existing:
             existing.append(mirror_path)
         result[key] = existing
@@ -180,8 +181,10 @@ def run_self_test() -> None:
         except Exception:
             fail(name, traceback.format_exc())
 
-        # Test 4: User-added entries are preserved, default+mirror appended if absent
-        name = "user entries preserved"
+        # Test 4: User-customized array (without default) is preserved as-is;
+        # only the mirror is appended. The default is NOT re-injected, because
+        # the user's explicit array represents an intentional customization.
+        name = "user customizations not overridden"
         try:
             key = "claude_project_dirs"
             mirror = "/mnt/mirror/claude_project_dirs"
@@ -193,14 +196,10 @@ def run_self_test() -> None:
             updated = apply_agents(cfg, [(key, mirror)], home)
             val = updated[key]
             expected_default = default_host_path(key, home)
-            if user_entry not in val:
-                fail(name, f"user entry missing: {val}")
-            elif expected_default not in val:
-                fail(name, f"default missing: {val}")
-            elif mirror not in val:
-                fail(name, f"mirror missing: {val}")
-            elif val[0] != user_entry:
-                fail(name, f"user entry not preserved at front: {val}")
+            if val != [user_entry, mirror]:
+                fail(name, f"expected [user, mirror], got: {val}")
+            elif expected_default in val:
+                fail(name, f"default unexpectedly re-injected: {val}")
             else:
                 ok(name)
         except Exception:
