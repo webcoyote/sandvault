@@ -652,7 +652,6 @@ unregister_session() {
     # Per-session cleanup
     [[ "$USE_BROWSER" == "true" ]] && stop_chrome
     [[ "$USE_IOS_SIMULATOR" == "true" ]] && stop_ios_simulator
-    rm -f "$SV_PRIVATE_DIR/tmp/sv-session-$SV_SESSION_ID" 2>/dev/null || true
 
     mkdir -p "$SESSION_DIR"
     local prev_count
@@ -1660,7 +1659,15 @@ fi
 # an intermediate "zsh --login". This avoids double-sourcing .zshenv and ensures
 # piped stdin passes through to the final process (an interactive login shell would
 # consume stdin as commands).
-ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~; source ~/.zshenv; source ~/.zprofile; source ~/.zshrc"
+#
+# ~/configure runs once per outer sv invocation (skipped when nested) before
+# .zshenv is sourced, so per-session setup happens exactly once instead of being
+# guarded by a lock file inside .zshenv.
+ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~;"
+if [[ "$NESTED" == "false" ]]; then
+    ZSH_COMMAND="$ZSH_COMMAND ~/configure;"
+fi
+ZSH_COMMAND="$ZSH_COMMAND source ~/.zshenv; source ~/.zprofile; source ~/.zshrc"
 
 # Prepare command args as a single string
 COMMAND_ARGS_STR=""
