@@ -178,11 +178,17 @@ STATE_FILE="$AGENTSVIEW_STATE_FILE"
 if [[ ! -f "\$STATE_FILE" ]] || [[ "\$(cat "\$STATE_FILE")" != "enabled" ]]; then
     exit 0
 fi
-RIGHTS="group:$SANDVAULT_GROUP allow read,readattr,readextattr,readsecurity,search,list,file_inherit,directory_inherit"
+# Two ACEs per directory so new files don't inherit search/list (which on
+# a file means execute). Dir ACE propagates only to subdirs; the file ACE
+# is only_inherit (no rights on the dir itself) and propagates to new files
+# without execute.
+DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,readattr,readextattr,readsecurity,search,list,directory_inherit"
+FILE_INHERIT_RIGHTS="group:$SANDVAULT_GROUP allow read,readattr,readextattr,readsecurity,file_inherit,directory_inherit,only_inherit"
 for subdir in "$AGENTSVIEW_SUBDIR_claude" "$AGENTSVIEW_SUBDIR_codex" "$AGENTSVIEW_SUBDIR_opencode" "$AGENTSVIEW_SUBDIR_gemini"; do
     full="\$HOME/\$subdir"
     mkdir -p "\$full"
-    /bin/chmod +a "\$RIGHTS" "\$full" 2>/dev/null || true
+    /bin/chmod +a "\$DIR_RIGHTS" "\$full" 2>/dev/null || true
+    /bin/chmod +a "\$FILE_INHERIT_RIGHTS" "\$full" 2>/dev/null || true
 done
 SETUP_EOF
     chmod +x "$SV_PRIVATE_DIR/setup/agentsview-export"

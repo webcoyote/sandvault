@@ -147,8 +147,24 @@ readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
 # state, deploy keys, and agentsview symlinks — anything sandvault manages on
 # behalf of the host. Uninstall is `rm -rf` of this directory.
 readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
-readonly SANDVAULT_DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
-readonly SANDVAULT_FILE_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit"
+# Three ACEs for the dir/file split. The split exists so new files don't
+# inherit `search`/`list` (which on a file means execute) from their parent
+# directory's ACL.
+#
+# Each directory carries two ACEs:
+#   1. SANDVAULT_DIR_RIGHTS — applies to the dir itself and propagates to
+#      new subdirs (directory_inherit only, no file_inherit). Carries
+#      search/list, which subdirs need for traversal.
+#   2. SANDVAULT_FILE_INHERIT_RIGHTS — only_inherit (grants nothing on the
+#      dir itself). file_inherit propagates to new files; directory_inherit
+#      propagates the ACE to new subdirs so deep children also inherit.
+#      Omits search/list, so files don't pick up execute.
+#
+# Each file carries one ACE: SANDVAULT_FILE_RIGHTS (no inherit flags, no
+# execute) — the actual rights for the file.
+readonly SANDVAULT_DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,directory_inherit"
+readonly SANDVAULT_FILE_INHERIT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit,only_inherit"
+readonly SANDVAULT_FILE_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown"
 
 # Create sudoers.d file for passwordless sudo to sandvault user
 readonly SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
@@ -162,6 +178,9 @@ readonly INSTALL_MARKER="$INSTALL_PRODUCT/install"
 # Session tracking for safe multi-instance cleanup
 readonly SESSION_DIR="$HOME/.local/state/sandvault"
 readonly SESSION_FILE="$SESSION_DIR/sandvault.count"
+# One-shot migration markers. Each marker means "this migration already
+# ran on this host"; presence skips the migration on subsequent runs.
+readonly ACL_LEGACY_STRIPPED_MARKER="$SESSION_DIR/acl-legacy-stripped"
 
 # Chrome browser state (per-instance using session ID)
 readonly CHROME_LOG_FILE="$SESSION_DIR/chrome-$SV_SESSION_ID.log"
@@ -679,21 +698,40 @@ configure_shared_folder_permssions() {
 
     # Grant write access to shared workspace for sandvault group. We want
     # to modify files and symbolic links, not what symbolic links point to.
-    # Use `find | xargs chmod -h` instead of `chmod -R -h` because the latter
-    # causes: "chmod: the -R and -h options may not be specified together"
+    # Use `find ... -exec chmod -h` instead of `chmod -R -h` because the
+    # latter errors: "chmod: the -R and -h options may not be specified
+    # together".
     if [[ "$enable" == "true" ]]; then
         # Make workspace accessible to $HOST_USER and $SANDVAULT_GROUP only
         trace "Configuring $SHARED_WORKSPACE: set owner to $HOST_USER:$SANDVAULT_GROUP"
         sudo /usr/sbin/chown -f -R "$HOST_USER:$SANDVAULT_GROUP" "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE permissions..."
         sudo /bin/chmod 0770 "$SHARED_WORKSPACE"
-        # Apply directory ACL (with search/list) to directories only,
-        # and file ACL (without search/list) to files only, so that
-        # files don't inherit the execute bit from the search permission.
-        # Single find pass to avoid walking the tree twice.
+
+        # One-shot legacy ACE cleanup. Several historical sv releases
+        # applied ACE shapes that propagated execute (or search, which
+        # means execute on a file) to new files. Rather than enumerate
+        # every shape we've ever shipped, strip all ACLs from the tree —
+        # `sv` is the only thing that manages ACLs under $SHARED_WORKSPACE,
+        # so any ACL here is one we put there. The new dir/file-split
+        # ACEs are re-applied right below.
+        if [[ ! -f "$ACL_LEGACY_STRIPPED_MARKER" ]]; then
+            trace "Configuring $SHARED_WORKSPACE: stripping all ACLs (one-shot)"
+            sudo find "$SHARED_WORKSPACE" -exec /bin/chmod -h -N {} + \
+                2>/dev/null || true
+            mkdir -p "$SESSION_DIR"
+            touch "$ACL_LEGACY_STRIPPED_MARKER"
+        fi
+
+        # Directories get two ACEs (dir-rights + file-inherit ACE so new
+        # files inherit non-execute rights). Files get the bare file ACE.
+        # The split prevents files from inheriting `search`/`list`, which
+        # on a file means execute. Single find pass to avoid walking the
+        # tree twice.
         trace "Configuring $SHARED_WORKSPACE: add directory and file ACLs"
         sudo find "$SHARED_WORKSPACE" \
-            \( -type d -exec /bin/chmod -h +a "$SANDVAULT_DIR_RIGHTS" {} + \) \
+            \( -type d -exec /bin/chmod -h +a "$SANDVAULT_DIR_RIGHTS" {} + \
+                       -exec /bin/chmod -h +a "$SANDVAULT_FILE_INHERIT_RIGHTS" {} + \) \
             -o \
             \( ! -type d -exec /bin/chmod -h +a "$SANDVAULT_FILE_RIGHTS" {} + \)
     else
@@ -702,21 +740,8 @@ configure_shared_folder_permssions() {
         sudo /usr/sbin/chown -f -R "$HOST_USER:$(id -gn)" "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE permissions..."
         sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
-        # Remove all ACL entries for the sandvault group. Apply the
-        # directory ACE only to directories and the file ACE only to
-        # files, mirroring the `enable=true` branch above. Also remove
-        # the legacy combined ACE (from before the dir/file split),
-        # which was historically applied to every entry. Each -a removal
-        # is a no-op (fails silently) if the ACE doesn't exist. Single
-        # find pass to avoid walking the tree twice.
-        trace "Configuring $SHARED_WORKSPACE: remove $SANDVAULT_GROUP ACLs"
-        local legacy_ace="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,file_inherit,directory_inherit"
-        sudo find "$SHARED_WORKSPACE" \
-            \( -type d -exec /bin/chmod -h -a "$SANDVAULT_DIR_RIGHTS" {} + \
-                       -exec /bin/chmod -h -a "$legacy_ace" {} + \) \
-            -o \
-            \( ! -type d -exec /bin/chmod -h -a "$SANDVAULT_FILE_RIGHTS" {} + \
-                         -exec /bin/chmod -h -a "$legacy_ace" {} + \) \
+        trace "Configuring $SHARED_WORKSPACE: stripping all ACLs"
+        sudo find "$SHARED_WORKSPACE" -exec /bin/chmod -h -N {} + \
             2>/dev/null || true
     fi
 }
@@ -724,9 +749,6 @@ configure_shared_folder_permssions() {
 uninstall() {
     info "Uninstalling..."
     force_cleanup_sandvault_processes force-all
-    rm -rf "$SESSION_DIR"/chrome-data-* "$SESSION_DIR"/chrome-*.log
-    rm -f "$SESSION_DIR"/ios-bridge-*.log
-    rm -f /tmp/sandvault-configure-* 2>/dev/null || true
 
     # Remove the install marker file first; it's a sentinel for "everything is complete".
     # By removing it first we force a rebuild if the user wants to run this again.
@@ -760,6 +782,9 @@ uninstall() {
 
     # Cleanup SSH
     rm -rf "$SSH_KEYFILE_PRIV" "$SSH_KEYFILE_PUB"
+
+    # Remove sandvault state
+    rm -rf "$SESSION_DIR"
 
     # Remove shared workspace
     # Do not remove $SHARED_WORKSPACE/user
