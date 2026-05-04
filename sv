@@ -23,26 +23,9 @@ readonly WORKSPACE
 ###############################################################################
 # Functions
 ###############################################################################
-[[ "${SV_VERBOSE:-0}" =~ ^[0-9]+$ ]] && SV_VERBOSE="${SV_VERBOSE:-0}" || SV_VERBOSE=1
-trace () {
-    [[ "$SV_VERBOSE" -lt 2 ]] || echo >&2 -e "🔬 \033[90m$*\033[0m"
-}
-debug () {
-    [[ "$SV_VERBOSE" -lt 1 ]] || echo >&2 -e "🔍 \033[36m$*\033[0m"
-}
-info () {
-    echo >&2 -e "ℹ️  \033[36m$*\033[0m"
-}
-warn () {
-    echo >&2 -e "⚠️  \033[33m$*\033[0m"
-}
-error () {
-    echo >&2 -e "❌ \033[31m$*\033[0m"
-}
-abort () {
-    error "$*"
-    exit 1
-}
+# shellcheck source=helpers/sv-logging.sh
+source "$WORKSPACE/helpers/sv-logging.sh"
+
 # heredoc MESSAGE << EOF
 #    your favorite text here
 # EOF
@@ -734,182 +717,6 @@ configure_shared_folder_permssions() {
     fi
 }
 
-###############################################################################
-# Agentsview export
-#
-# Mirrors sandbox session data into the host user's agentsview installation.
-# See docs/superpowers/specs/2026-05-03-agentsview-export-design.md.
-###############################################################################
-
-# Source the path map (single source of truth for agent → subdir/key/default)
-# shellcheck source=helpers/agentsview-paths.sh
-source "$WORKSPACE/helpers/agentsview-paths.sh"
-
-readonly AGENTSVIEW_STATE_FILE="$SHARED_WORKSPACE/setup/agentsview-export.state"
-readonly AGENTSVIEW_HOST_CONFIG="$HOME/.agentsview/config.toml"
-
-# Detect host-side agentsview presence (binary on PATH or data dir present).
-agentsview_detect() {
-    command -v agentsview &>/dev/null && return 0
-    [[ -d "$HOME/.agentsview" ]] && return 0
-    return 1
-}
-
-# Pre-flight: verify each (existing) sandbox agent dir is owned by the
-# sandbox user. Returns 0 if all clean, 1 if contamination detected.
-# Prints the offending dir + remediation to stderr on failure.
-agentsview_contamination_check() {
-    local agent subdir full owner
-    local clean=0
-    for agent in "${AGENTSVIEW_AGENTS[@]}"; do
-        subdir="$(agentsview_field SUBDIR "$agent")"
-        full="/Users/$SANDVAULT_USER/$subdir"
-        [[ -e "$full" ]] || continue
-        owner="$(/usr/bin/stat -f "%Su" "$full" 2>/dev/null || echo unknown)"
-        if [[ "$owner" != "$SANDVAULT_USER" ]]; then
-            error "Cannot enable agentsview export: $full is owned by $owner (expected $SANDVAULT_USER)."
-            error "  This usually means an earlier agent run had HOME pointing at the sandbox home."
-            error "  Fix with:"
-            error "    sudo chown -R $SANDVAULT_USER:$SANDVAULT_GROUP $full"
-            error "  then re-run \`sv setup\`."
-            clean=1
-        fi
-    done
-    return "$clean"
-}
-
-# Create the four mirror symlinks under $SHARED_WORKSPACE/sessions/.
-# Idempotent. Logs and continues on individual failures (warn for tolerated
-# skips like a non-symlink at the path; error for unexpected `ln` failures).
-agentsview_install_symlinks() {
-    local agent subdir link target current
-    mkdir -p "$SHARED_WORKSPACE/sessions"
-    for agent in "${AGENTSVIEW_AGENTS[@]}"; do
-        subdir="$(agentsview_field SUBDIR "$agent")"
-        link="$SHARED_WORKSPACE/sessions/$agent"
-        target="/Users/$SANDVAULT_USER/$subdir"
-        if [[ -L "$link" ]]; then
-            current="$(readlink "$link")"
-            if [[ "$current" == "$target" ]]; then
-                trace "agentsview symlink ok: $link"
-                continue
-            fi
-            warn "agentsview symlink $link points to $current (expected $target); replacing"
-            rm -f "$link"
-        elif [[ -e "$link" ]]; then
-            warn "agentsview: $link exists and is not a symlink; skipping"
-            continue
-        fi
-        /bin/ln -s "$target" "$link" || error "agentsview: failed to create symlink $link"
-    done
-}
-
-# Update the host user's agentsview config.toml. Shows a diff and prompts.
-# Returns 0 on success (or no-op), 1 on failure.
-agentsview_update_config() {
-    local script="$WORKSPACE/helpers/agentsview-config.py"
-    local agent_args=()
-    local agent tomlkey link
-    for agent in "${AGENTSVIEW_AGENTS[@]}"; do
-        tomlkey="$(agentsview_field TOMLKEY "$agent")"
-        link="$SHARED_WORKSPACE/sessions/$agent"
-        agent_args+=(--agent "$tomlkey=$link")
-    done
-
-    local diff_out
-    if ! diff_out="$(/usr/bin/python3 "$script" \
-        --config-path "$AGENTSVIEW_HOST_CONFIG" \
-        --home "$HOME" \
-        --diff \
-        "${agent_args[@]}" 2>&1)"; then
-        error "agentsview: failed to compute config diff:"
-        error "$diff_out"
-        return 1
-    fi
-
-    if [[ -z "$diff_out" ]]; then
-        debug "agentsview: $AGENTSVIEW_HOST_CONFIG already up to date"
-        return 0
-    fi
-
-    info ""
-    info "Proposed changes to $AGENTSVIEW_HOST_CONFIG:"
-    info ""
-    printf '%s\n' "$diff_out"
-    info ""
-    info "Note: writing this file does not preserve comments on managed keys."
-    printf 'Apply these changes? [y/N] '
-    local reply
-    read -r reply
-    if [[ "$reply" != "y" && "$reply" != "Y" ]]; then
-        info "agentsview: skipped config update"
-        return 0
-    fi
-
-    if ! /usr/bin/python3 "$script" \
-        --config-path "$AGENTSVIEW_HOST_CONFIG" \
-        --home "$HOME" \
-        --write \
-        "${agent_args[@]}"; then
-        error "agentsview: failed to write $AGENTSVIEW_HOST_CONFIG"
-        return 1
-    fi
-    info "agentsview: updated $AGENTSVIEW_HOST_CONFIG"
-}
-
-# Orchestrate the full opt-in flow. Idempotent: skips silently if state
-# file already records a choice.
-agentsview_setup() {
-    if [[ -f "$AGENTSVIEW_STATE_FILE" ]]; then
-        trace "agentsview: choice already recorded ($(cat "$AGENTSVIEW_STATE_FILE")); skipping prompt"
-        return 0
-    fi
-    if [[ ! -t 0 ]]; then
-        trace "agentsview: non-interactive; skipping prompt"
-        return 0
-    fi
-    if [[ ! -f "$WORKSPACE/helpers/agentsview-config.py" ]]; then
-        trace "agentsview: helpers/agentsview-config.py not installed; skipping"
-        return 0
-    fi
-    if ! agentsview_detect; then
-        trace "agentsview: not detected; skipping"
-        return 0
-    fi
-    if ! agentsview_contamination_check; then
-        # Pre-flight already printed remediation. Don't persist a choice;
-        # user re-runs after fixing.
-        return 0
-    fi
-
-    info ""
-    info "Detected agentsview on this machine. Mirror sandvault session data so it"
-    info "appears in agentsview's dashboard, search, and cost tracking?"
-    info ""
-    info "This will:"
-    info "  - add read-only symlinks under $SHARED_WORKSPACE/sessions/"
-    info "  - apply read-only ACLs to sandbox agent session dirs"
-    info "  - add four scan paths to $AGENTSVIEW_HOST_CONFIG (with diff confirmation)"
-    info "  - rewrite your agentsview config without preserving comments"
-    info ""
-    info "Sandvault won't auto-track new agents agentsview adds in future versions"
-    info "(re-run \`sv setup --rebuild\` after deleting $AGENTSVIEW_STATE_FILE to refresh)."
-    printf 'Enable agentsview export? [y/N] '
-    local reply
-    read -r reply
-    mkdir -p "$SHARED_WORKSPACE/setup"
-    if [[ "$reply" != "y" && "$reply" != "Y" ]]; then
-        echo disabled > "$AGENTSVIEW_STATE_FILE"
-        info "agentsview: export disabled"
-        return 0
-    fi
-
-    echo enabled > "$AGENTSVIEW_STATE_FILE"
-    agentsview_install_symlinks
-    agentsview_update_config
-}
-
-
 uninstall() {
     info "Uninstalling..."
     force_cleanup_sandvault_processes force-all
@@ -956,17 +763,8 @@ uninstall() {
 
     rm -f "$SHARED_WORKSPACE/setup/gitconfig"
     rm -f "$SHARED_WORKSPACE/setup/claude-json"
-    rm -f "$SHARED_WORKSPACE/setup/agentsview-export"
-    rm -f "$AGENTSVIEW_STATE_FILE"
+    "$WORKSPACE/sv-agentsview-setup" uninstall || warn "agentsview uninstall hook failed (continuing)"
     rmdir "$SHARED_WORKSPACE/setup" 2>/dev/null || true
-
-    # Remove agentsview mirror symlinks (host installs in setup; harmless to leave)
-    if [[ -d "$SHARED_WORKSPACE/sessions" ]]; then
-        for _agent in "${AGENTSVIEW_AGENTS[@]}"; do
-            rm -f "$SHARED_WORKSPACE/sessions/$_agent"
-        done
-        rmdir "$SHARED_WORKSPACE/sessions" 2>/dev/null || true
-    fi
 
     rm -f "$SHARED_WORKSPACE/SANDVAULT-README.md"
     rmdir "$SHARED_WORKSPACE" 2>/dev/null || true
@@ -1693,29 +1491,10 @@ fi
 SETUP_EOF
     chmod +x "$SHARED_WORKSPACE/setup/claude-json"
 
-    # agentsview-export: ensure each agent's session subdir exists with an
-    # ACL granting the sandvault group read+inherit, so JSONL files written
-    # by sandbox agents are readable by the host user through the symlinks
-    # under $SHARED_WORKSPACE/sessions/. Acts as a no-op unless the host
-    # has opted in (state file enabled).
-    cat > "$SHARED_WORKSPACE/setup/agentsview-export" << SETUP_EOF
-#!/bin/bash
-set -Eeuo pipefail
-STATE_FILE="$AGENTSVIEW_STATE_FILE"
-if [[ ! -f "\$STATE_FILE" ]] || [[ "\$(cat "\$STATE_FILE")" != "enabled" ]]; then
-    exit 0
-fi
-RIGHTS="group:$SANDVAULT_GROUP allow read,readattr,readextattr,readsecurity,search,list,file_inherit,directory_inherit"
-for subdir in "$AGENTSVIEW_SUBDIR_claude" "$AGENTSVIEW_SUBDIR_codex" "$AGENTSVIEW_SUBDIR_opencode" "$AGENTSVIEW_SUBDIR_gemini"; do
-    full="\$HOME/\$subdir"
-    mkdir -p "\$full"
-    /bin/chmod +a "\$RIGHTS" "\$full" 2>/dev/null || true
-done
-SETUP_EOF
-    chmod +x "$SHARED_WORKSPACE/setup/agentsview-export"
-
-    # Ask the host user about agentsview export (idempotent; prompts only once)
-    agentsview_setup
+    # Detect agentsview, prompt once on first run, install mirror symlinks +
+    # host config, and write the sandbox-side setup-merge script. Failure of
+    # this optional integration must not abort `sv setup`.
+    "$WORKSPACE/sv-agentsview-setup" setup || warn "agentsview setup failed (continuing)"
 fi
 
 
