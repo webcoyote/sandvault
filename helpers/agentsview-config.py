@@ -82,8 +82,6 @@ def do_diff(config_path: str, new_content: str) -> None:
     ))
     if diff:
         sys.stdout.writelines(diff)
-    else:
-        print("(no changes)")
 
 
 def do_write(config_path: str, new_content: str) -> None:
