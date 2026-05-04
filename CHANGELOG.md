@@ -2,6 +2,22 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.17.0] - 2026-05-04
+
+### Added
+- Export agentsview from sandbox sessions using `sv-agentsview-setup` script.
+
+### Changed
+- Consolidate sandvault-managed paths under `_sandvault/`.
+
+### Fixed
+- File ACLs avoid creating files with the `execute` ACL.
+
+### Thanks to 2 contributors!
+
+- [@jesserobbins](https://github.com/jesserobbins) — thanks @jesserobbins!
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.16.0] - 2026-05-01
 
 ### Fixed
