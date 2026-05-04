@@ -827,8 +827,7 @@ run_tests() {
     # Path map sanity: every agent has all four associated keys defined.
     test_agentsview_path_map_complete() {
         # shellcheck source=../helpers/agentsview-paths.sh
-        # shellcheck disable=SC1091
-        . "$AGENTSVIEW_PATHS_SCRIPT"
+        source "$AGENTSVIEW_PATHS_SCRIPT"
         local agent missing=""
         for agent in "${AGENTSVIEW_AGENTS[@]}"; do
             for field in SUBDIR DEFAULT TOMLKEY; do

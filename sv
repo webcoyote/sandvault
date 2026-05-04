@@ -743,14 +743,14 @@ configure_shared_folder_permssions() {
 
 # Source the path map (single source of truth for agent → subdir/key/default)
 # shellcheck source=helpers/agentsview-paths.sh
-. "$WORKSPACE/helpers/agentsview-paths.sh"
+source "$WORKSPACE/helpers/agentsview-paths.sh"
 
 readonly AGENTSVIEW_STATE_FILE="$SHARED_WORKSPACE/setup/agentsview-export.state"
 readonly AGENTSVIEW_HOST_CONFIG="$HOME/.agentsview/config.toml"
 
 # Detect host-side agentsview presence (binary on PATH or data dir present).
 agentsview_detect() {
-    command -v agentsview >/dev/null 2>&1 && return 0
+    command -v agentsview &>/dev/null && return 0
     [[ -d "$HOME/.agentsview" ]] && return 0
     return 1
 }
@@ -799,7 +799,7 @@ agentsview_install_symlinks() {
             error "agentsview: $link exists and is not a symlink; skipping"
             continue
         fi
-        ln -s "$target" "$link" || error "agentsview: failed to create symlink $link"
+        /bin/ln -s "$target" "$link" || error "agentsview: failed to create symlink $link"
     done
 }
 
