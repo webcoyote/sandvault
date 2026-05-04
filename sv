@@ -996,6 +996,21 @@ if [[ "$FIX_PERMISSIONS" == "true" && "$COMMAND" != "build" ]]; then
     abort "--fix-permissions can only be used standalone or with build"
 fi
 
+# Translate tilde in INITIAL_DIR to the sandvault user's HOME so that
+# `sv shell "~/foo" --` lands in /Users/$SANDVAULT_USER/foo instead of
+# silently falling back to $SHARED_WORKSPACE. Quoted "~" survives host
+# shell expansion; unquoted ~ is expanded by the host shell to the host
+# user's HOME before sv sees it and is left unchanged.
+# Compare against literal "~"; SC2088 warns about quoted tildes not expanding,
+# but here we are intentionally matching the literal character that survived
+# the host shell because the user quoted the CLI argument.
+# shellcheck disable=SC2088
+if [[ "$INITIAL_DIR" == "~" ]]; then
+    INITIAL_DIR="/Users/$SANDVAULT_USER"
+elif [[ "${INITIAL_DIR:0:2}" == "~/" ]]; then
+    INITIAL_DIR="/Users/$SANDVAULT_USER/${INITIAL_DIR:2}"
+fi
+
 # Resolve symlinks to get the real path
 INITIAL_DIR="$(cd "${INITIAL_DIR:-"${PWD}"}" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
 readonly INITIAL_DIR
