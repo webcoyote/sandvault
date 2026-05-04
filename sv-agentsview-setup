@@ -14,7 +14,8 @@
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
-# Resolve own directory (symlink-aware), matching the dance in `sv`.
+# Resolve script location
+# perform "readlink -f", which is not supported in macOS system bash
 SOURCE="${BASH_SOURCE[0]}"
 while [[ -L "$SOURCE" ]]; do
     SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
@@ -22,6 +23,12 @@ while [[ -L "$SOURCE" ]]; do
     [[ "$SOURCE" = /* ]] || SOURCE="$SOURCE_DIR/$SOURCE"
 done
 WORKSPACE="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
+
+# If running from a Homebrew Cellar (e.g. /opt/homebrew/Cellar/sandvault/1.2.3),
+# use the stable opt/ symlink instead so generated scripts don't break on upgrade.
+if [[ "$WORKSPACE" =~ ^(.*)/homebrew/Cellar/([^/]+)/[^/]+$ ]]; then
+    WORKSPACE="${BASH_REMATCH[1]}/homebrew/opt/${BASH_REMATCH[2]}"
+fi
 readonly WORKSPACE
 
 source "$WORKSPACE/helpers/sv-logging.sh"
@@ -202,10 +209,15 @@ agentsview_setup() {
         trace "agentsview: helpers/agentsview-config.py not installed; skipping"
         return 0
     fi
+    # SC2310: these functions are designed to return a status (detection /
+    # pre-flight check). Their bodies don't rely on set -e, so the disabled
+    # ERR-on-fail behavior inside the `if !` context is intentional.
+    # shellcheck disable=SC2310
     if ! agentsview_detect; then
         trace "agentsview: not detected; skipping"
         return 0
     fi
+    # shellcheck disable=SC2310
     if ! agentsview_contamination_check; then
         # Pre-flight already printed remediation. Don't persist a choice;
         # user re-runs after fixing.
