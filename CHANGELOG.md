@@ -2,6 +2,15 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.18.0] - 2026-05-04
+
+### Fixed
+- Fix Homebrew path resolution when sandvault is installed under `libexec` instead of `Cellar`
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.17.0] - 2026-05-04
 
 ### Added

@@ -13,10 +13,10 @@ while [[ -L "$SOURCE" ]]; do
 done
 WORKSPACE="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
 
-# If running from a Homebrew Cellar (e.g. /opt/homebrew/Cellar/sandvault/1.2.3),
+# If running from a Homebrew Cellar (e.g. /opt/homebrew/Cellar/sandvault/1.2.3/libexec),
 # use the stable opt/ symlink instead so generated scripts don't break on upgrade.
-if [[ "$WORKSPACE" =~ ^(.*)/homebrew/Cellar/([^/]+)/[^/]+$ ]]; then
-    WORKSPACE="${BASH_REMATCH[1]}/homebrew/opt/${BASH_REMATCH[2]}"
+if [[ "$WORKSPACE" =~ ^(.*)/homebrew/Cellar/([^/]+)/[^/]+(/.+)?$ ]]; then
+    WORKSPACE="${BASH_REMATCH[1]}/homebrew/opt/${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
 fi
 readonly WORKSPACE
 
@@ -120,7 +120,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.17.0"
+readonly VERSION="1.18.0"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
