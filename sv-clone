@@ -31,10 +31,10 @@ while [[ -L "$SOURCE" ]]; do
 done
 WORKSPACE="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
 
-# If running from a Homebrew Cellar (e.g. /opt/homebrew/Cellar/sandvault/1.2.3),
+# If running from a Homebrew Cellar (e.g. /opt/homebrew/Cellar/sandvault/1.2.3/libexec),
 # use the stable opt/ symlink instead so generated scripts don't break on upgrade.
-if [[ "$WORKSPACE" =~ ^(.*)/homebrew/Cellar/([^/]+)/[^/]+$ ]]; then
-    WORKSPACE="${BASH_REMATCH[1]}/homebrew/opt/${BASH_REMATCH[2]}"
+if [[ "$WORKSPACE" =~ ^(.*)/homebrew/Cellar/([^/]+)/[^/]+(/.+)?$ ]]; then
+    WORKSPACE="${BASH_REMATCH[1]}/homebrew/opt/${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
 fi
 readonly WORKSPACE
 
