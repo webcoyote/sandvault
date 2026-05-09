@@ -21,21 +21,32 @@ if ! SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null 
     abort "$SANDVAULT_USER does not exist"
 fi
 
-# Stop host-side Chrome instances (each sandvault session runs its own)
-CHROME_STATE_DIR="$HOME/.local/state/sandvault"
-while IFS= read -r chrome_pid; do
-    [[ -n "$chrome_pid" ]] || continue
-    info "Stopping Chrome (PID $chrome_pid)"
-    kill "$chrome_pid" 2>/dev/null || true
+# Stop host-side browser instances (each sandvault session runs its own).
+# Sandvault supports both Chrome and Lightpanda backends.
+BROWSER_STATE_DIR="$HOME/.local/state/sandvault"
+kill_browser() {
+    local label="$1"
+    local pid="$2"
+    [[ -n "$pid" ]] || return 0
+    info "Stopping $label (PID $pid)"
+    kill "$pid" 2>/dev/null || true
     for (( i=0; i<20; i++ )); do
-        kill -0 "$chrome_pid" 2>/dev/null || break
+        kill -0 "$pid" 2>/dev/null || return 0
         sleep 0.1
     done
-    if kill -0 "$chrome_pid" 2>/dev/null; then
-        kill -9 "$chrome_pid" 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
     fi
-done < <(pgrep -f "user-data-dir=$CHROME_STATE_DIR/chrome-data-" 2>/dev/null || true)
-rm -rf "$CHROME_STATE_DIR"/chrome-data-* "$CHROME_STATE_DIR"/chrome-*.log
+}
+while IFS= read -r pid; do
+    kill_browser Chrome "$pid"
+done < <(pgrep -f "user-data-dir=$BROWSER_STATE_DIR/chrome-data-" 2>/dev/null || true)
+# Lightpanda processes don't carry a sandvault-specific argv marker, so
+# match them via the per-session log path that `sv` redirects them to.
+while IFS= read -r pid; do
+    kill_browser lightpanda "$pid"
+done < <(pgrep -f "lightpanda.*serve" 2>/dev/null || true)
+rm -rf "$BROWSER_STATE_DIR"/chrome-data-* "$BROWSER_STATE_DIR"/chrome-*.log "$BROWSER_STATE_DIR"/lightpanda-*.log
 
 if [[ -z "$(ps -u "$SANDVAULT_USER" -o pid=)" ]] ; then
     info "$SANDVAULT_USER has no processes"
