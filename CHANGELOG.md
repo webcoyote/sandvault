@@ -2,6 +2,21 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.19.0] - 2026-05-09
+
+### Added
+
+- Support for the lightpanda browser ([#161](https://github.com/webcoyote/sandvault/pull/161))
+
+### Fixed
+
+- Translate quoted `~` in `INITIAL_DIR` to the sandvault user's `HOME` ([#159](https://github.com/webcoyote/sandvault/pull/159)) — thanks @vre!
+
+### Thanks to 2 contributors!
+
+- [@vre](https://github.com/vre)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.18.0] - 2026-05-04
 
 ### Fixed
