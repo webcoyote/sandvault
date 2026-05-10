@@ -1,0 +1,8 @@
+{
+  "name": "sandvault-browser-test-chrome",
+  "private": true,
+  "dependencies": {
+    "playwright-core": "^1.59.1",
+    "puppeteer-core": "^24.40.0"
+  }
+}

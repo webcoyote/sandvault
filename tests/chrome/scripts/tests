@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test browser automation via Playwright and Puppeteer
+# Test browser automation via Playwright and Puppeteer (Chrome)
 set -Eeuo pipefail
 trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +14,8 @@ fi
 cd "$SCRIPT_DIR/.."
 
 [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
+pnpm install --prefer-offline --reporter=append-only
 
 node test-playwright.js
 node test-puppeteer.js
