@@ -1,23 +1,13 @@
 #!/usr/bin/env node
-// Test headless Chrome via Puppeteer and CDP
+// Test headless Chrome via Playwright and CDP
 //
-// Usage: sv --browser shell -- node tests/browser/test-puppeteer.js
-//    or: node tests/browser/test-puppeteer.js  (from inside sv --browser shell)
+// Dependencies are installed by the wrapper script before this runs.
 
-// Auto-install dependencies if needed
-const path = require('path');
-const testDir = path.dirname(require.resolve('./package.json'));
-try { require.resolve('puppeteer-core'); } catch {
-    const { execSync } = require('child_process');
-    console.log('Installing dependencies...');
-    execSync('npm install --no-audit --no-fund --no-update-notifier', { cwd: testDir, stdio: 'inherit' });
-}
-
-const puppeteer = require('puppeteer-core');
+const { chromium } = require('playwright-core');
 
 const endpoint = process.env.SV_BROWSER_ENDPOINT;
 if (!endpoint) {
-    console.error('SV_BROWSER_ENDPOINT is not set. Run: sv --browser shell');
+    console.error('SV_BROWSER_ENDPOINT is not set. Run: sv --chrome shell');
     process.exit(1);
 }
 
@@ -25,14 +15,14 @@ const VERBOSE = process.env.VERBOSE;
 const verbose = VERBOSE === undefined ? 0 : /^\d+$/.test(VERBOSE) ? parseInt(VERBOSE, 10) : 1;
 const log = (...args) => { if (verbose) console.log('  ', ...args); };
 
-if (verbose) console.log('test-puppeteer.js');
+if (verbose) console.log('test-playwright.js');
 (async () => {
     log(`Connecting to ${endpoint}...`);
-    const browser = await puppeteer.connect({ browserURL: endpoint });
-    const version = await browser.version();
-    log(`Connected: ${version}`);
+    const browser = await chromium.connectOverCDP(endpoint);
+    log(`Connected: ${browser.browserType().name()} ${browser.version()}`);
 
-    const page = await browser.newPage();
+    const context = await browser.newContext();
+    const page = await context.newPage();
 
     // Test 1: Navigate to a page
     log('Test 1: Navigate to example.com...');
@@ -71,10 +61,10 @@ if (verbose) console.log('test-puppeteer.js');
     }
     log('  PASS');
 
-    await page.close();
-    browser.disconnect();
+    await context.close();
+    browser.close();
 
-    log('All Puppeteer tests passed.\n');
+    log('All Playwright tests passed.\n');
 })().catch(err => {
     console.error(`  FAIL: ${err.message}`);
     process.exit(1);

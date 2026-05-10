@@ -14,19 +14,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Build (bash)
-        run: brew install bash
+      - name: Install bash/pnpm
+        run: brew install bash pnpm
 
-      - name: Build
+      - name: Install sandvault
         run: ./sv -vvv build
 
-      - name: Build (IOS)
+      - name: Install IOS simulator
         run: ./sv -vvv --ios build
 
-      - name: Build (Chrome)
+      - name: Install Chrome browser
         run: ./sv -vvv --chrome build
 
-      - name: Build (Lightpanda)
+      - name: Install Lightpanda browser
         run: ./sv -vvv --lightpanda build
 
       - name: SandVault Tests
