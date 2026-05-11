@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build a sandbox user ("sandvault") for running commands
 set -Eeuo pipefail
-trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
 # Resolve script location
 # perform "readlink -f", which is not supported in macOS system bash

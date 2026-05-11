@@ -19,7 +19,7 @@
 #   sv-clone git@github.com:org/repo.git -- claude
 #   sv-clone ~/projects/myrepo -- -b shell -- echo hello
 set -Eeuo pipefail
-trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
 # Resolve script location
 # perform "readlink -f", which is not supported in macOS system bash
