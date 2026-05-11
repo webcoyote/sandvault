@@ -1529,6 +1529,38 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
 (allow file-read*
     (subpath "/Volumes/Macintosh HD"))
 
+;; Block raw disk and packet-capture devices regardless of the broader
+;; /dev write allow below. Defense in depth: /dev/*disk* is already
+;; root:operator 640, but this removes reliance on POSIX perms alone.
+(deny file-read* file-write*
+    (regex #"^/dev/r?disk")
+    (regex #"^/private/dev/r?disk")
+    (regex #"^/dev/bpf"))
+
+;; Default-deny reads under /Users, then re-allow only the sandvault
+;; user's home and its shared workspace. Catches the host user's home
+;; plus any other accounts on the machine (other users, /Users/Guest,
+;; sibling sv-* workspaces under /Users/Shared) without enumeration.
+;; Last-match-wins, so the re-allows below must follow this deny.
+;;
+;; The literal re-allows on /Users and /Users/Shared grant lookup of
+;; those directory entries themselves so that path resolution into the
+;; allowed subpaths works. Without them, mkdir -p and open() under
+;; the allowed subtrees fail because path traversal touches the denied
+;; parent components.
+(deny file-read*
+    (subpath "/Users"))
+(allow file-read*
+    (literal "/Users")
+    (literal "/Users/Shared")
+    (subpath "$SHARED_WORKSPACE")
+    (subpath "/Users/$SANDVAULT_USER"))
+
+;; System.keychain is world-readable (mode 644) on stock macOS, so this
+;; deny is load-bearing rather than belt-and-suspenders.
+(deny file-read*
+    (subpath "/Library/Keychains"))
+
 ;; Allow writes to sandvault home, shared workspace, temporary directories.
 ;; Allow writes to devices, which are protected by unix permissions
 (allow file-write*
