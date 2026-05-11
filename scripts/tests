@@ -818,6 +818,60 @@ run_tests() {
     queue_test test_stdin_piping
 
     ###############################################################################
+    # Agent Args Tests
+    ###############################################################################
+
+    test_codex_unicode_args() {
+        local stub_dir="$SHARED_WORKSPACE/user/.local/bin"
+        local stub_codex_link="$stub_dir/codex"
+        local stub_codex_target
+        local backup_codex="$RESULTS_DIR/codex-$TEST_ID.backup"
+        local restore_codex=false
+        local output
+        local prompt="Reply with exactly 🍺 and no quotation marks."
+        local status
+
+        mkdir -p "$stub_dir"
+        if [[ -e "$stub_codex_link" || -L "$stub_codex_link" ]]; then
+            mv "$stub_codex_link" "$backup_codex"
+            restore_codex=true
+        fi
+        stub_codex_target=$(mktemp "$stub_dir/codex-test-stub.XXXXXX")
+        cat > "$stub_codex_target" <<'CODEX_TEST_STUB'
+#!/bin/bash
+set -Eeuo pipefail
+printf 'codex-test-stub-argc:%s\n' "$#"
+for arg in "$@"; do
+    printf 'codex-test-stub-arg:<%s>\n' "$arg"
+done
+CODEX_TEST_STUB
+        chmod +x "$stub_codex_target"
+        ln -s "$(basename "$stub_codex_target")" "$stub_codex_link"
+
+        set +e
+        output=$(/usr/bin/script -q /dev/null "${SV_CMD[@]}" --no-build codex -- "🍺" "$prompt" 2>&1)
+        status=$?
+        set -e
+
+        rm -f "$stub_codex_link" "$stub_codex_target"
+        if [[ "$restore_codex" == "true" ]]; then
+            mv "$backup_codex" "$stub_codex_link"
+            sv_cmd s -- /bin/cp -p "$stub_codex_link" "$SANDVAULT_HOME/.local/bin/codex" &>/dev/null || true
+        else
+            sv_cmd s -- /bin/rm -f "$SANDVAULT_HOME/.local/bin/codex" &>/dev/null || true
+        fi
+
+        if [[ "$status" -eq 0 && "$output" == *"codex-test-stub-arg:<🍺>"* && "$output" == *"codex-test-stub-arg:<$prompt>"* ]]; then
+            pass "sv codex -- preserves unicode args"
+        else
+            fail "sv codex -- preserves unicode args" "codex-test-stub-arg:<🍺> and codex-test-stub-arg:<$prompt>" "$status | $output"
+        fi
+    }
+    wait_for_all_running_tests
+    queue_test test_codex_unicode_args
+    wait_for_all_running_tests
+
+    ###############################################################################
     # Agentsview Export Tests
     ###############################################################################
 
