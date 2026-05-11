@@ -1831,49 +1831,26 @@ fi
 # ~/configure runs once per outer sv invocation (skipped when nested) before
 # .zshenv is sourced, so per-session setup happens exactly once instead of being
 # guarded by a lock file inside .zshenv.
-ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~;"
+ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~"
 if [[ "$NESTED" == "false" ]]; then
-    ZSH_COMMAND="$ZSH_COMMAND ~/configure;"
+    ZSH_COMMAND="$ZSH_COMMAND; ~/configure"
 fi
-ZSH_COMMAND="$ZSH_COMMAND source ~/.zshenv; source ~/.zprofile; source ~/.zshrc"
+ZSH_COMMAND="$ZSH_COMMAND; source ~/.zshenv; source ~/.zprofile; source ~/.zshrc"
 
-# Prepare command args as a single string
-COMMAND_ENV="$COMMAND"
-COMMAND_ARGS_STR=""
-SHELL_COMMAND_MODE=false
-if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
-    COMMAND_ARGS_STR="$(quote_zsh_args "${COMMAND_ARGS[@]}")"
-
-    # When the user requests running shell (instead of an AI agent) then convert
-    # COMMAND_ARGS to a command that will be run by the shell.
-    #
-    # Example: sv shell -- echo foo
-    # Runs:    source ~/.zshenv; source ~/.zprofile; source ~/.zshrc; echo foo
-    if [[ "$COMMAND" == "" ]]; then
-        ZSH_COMMAND="$ZSH_COMMAND; ${COMMAND_ARGS_STR}"
-        COMMAND_ARGS_STR=""
-        SHELL_COMMAND_MODE=true
-    fi
-fi
 if [[ "$COMMAND" != "" ]]; then
+    # Agent command (sv claude -- optional arguments here): exec it under zsh
     ZSH_COMMAND="$ZSH_COMMAND; exec $(quote_zsh_args "$COMMAND" "${COMMAND_ARGS[@]+"${COMMAND_ARGS[@]}"}")"
-    COMMAND_ENV=""
-    COMMAND_ARGS_STR=""
-fi
-
-# When COMMAND is set, it was already appended above.
-# When running a shell command (sv shell -- echo foo), it was already appended above.
-# For interactive shells (sv shell with no args), drop into a real interactive zsh
-# only when stdin is a TTY. When stdin is piped (e.g. `echo cmd | sv s`), exec a
-# non-interactive zsh that reads commands from stdin without printing prompts or
-# triggering interactive-only hooks like direnv.
-# Use -i (not --login) to avoid re-sourcing the login files.
-if [[ -z "$COMMAND" && "$SHELL_COMMAND_MODE" == "false" ]]; then
-    if [[ -t 0 ]]; then
-        ZSH_COMMAND="$ZSH_COMMAND; exec /bin/zsh -i"
-    else
-        ZSH_COMMAND="$ZSH_COMMAND; exec /bin/zsh"
-    fi
+elif [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
+    # Shell command with args (sv shell -- echo foo): exec in zsh
+    ZSH_COMMAND="$ZSH_COMMAND; exec $(quote_zsh_args "${COMMAND_ARGS[@]}")"
+elif [[ -t 0 ]]; then
+    # Shell command without args in a tty (sv shell): drop into an interactive shell
+    ZSH_COMMAND="$ZSH_COMMAND; exec /bin/zsh -i"
+else
+    # Shell command without args and stdin is piped (e.g. `echo cmd | sv shell`):
+    # exec a non-interactive zsh that reads commands from stdin without printing
+    # prompts or triggering interactive-only hooks like direnv.
+    ZSH_COMMAND="$ZSH_COMMAND; exec /bin/zsh"
 fi
 
 SANDBOX_EXEC=()
@@ -1915,9 +1892,10 @@ if [[ -n "${COLORTERM:-}" ]]; then
 fi
 
 if [[ "$MODE" == "ssh" ]]; then
-    # Only allocate a TTY for interactive shells.
+    # Only allocate a TTY for interactive shells and agent TUIs;
+    # skip it for `sv shell -- <cmd>` and when stdin isn't a TTY.
     SSH_TTY_OPT="-t"
-    if [[ ! -t 0 || "$SHELL_COMMAND_MODE" == "true" ]]; then
+    if [[ ! -t 0 || ( "$COMMAND" == "" && ${#COMMAND_ARGS[@]} -gt 0 ) ]]; then
         SSH_TTY_OPT="-T"
     fi
 
@@ -1970,8 +1948,6 @@ if [[ "$MODE" == "ssh" ]]; then
             "USER=$SANDVAULT_USER" \
             "SHELL=/bin/zsh" \
             "TERM=${TERM:-}" \
-            "COMMAND=$COMMAND_ENV" \
-            "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
@@ -2015,8 +1991,6 @@ else
             "USER=$SANDVAULT_USER" \
             "SHELL=/bin/zsh" \
             "TERM=${TERM:-}" \
-            "COMMAND=$COMMAND_ENV" \
-            "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
