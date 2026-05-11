@@ -1856,7 +1856,7 @@ if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
     fi
 fi
 if [[ "$COMMAND" != "" ]]; then
-    ZSH_COMMAND="$ZSH_COMMAND; exec $(quote_zsh_args "$COMMAND" "${COMMAND_ARGS[@]}")"
+    ZSH_COMMAND="$ZSH_COMMAND; exec $(quote_zsh_args "$COMMAND" "${COMMAND_ARGS[@]+"${COMMAND_ARGS[@]}"}")"
     COMMAND_ENV=""
     COMMAND_ARGS_STR=""
 fi
