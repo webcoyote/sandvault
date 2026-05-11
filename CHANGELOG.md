@@ -2,6 +2,19 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.20.0] - 2026-05-11
+
+### Changed
+- Harden sandbox-exec profile: block raw disk and packet-capture devices, default-deny reads under `/Users` (re-allowing only sandvault paths), and deny `/Library/Keychains` ([#164](https://github.com/webcoyote/sandvault/pull/164))
+
+### Fixed
+- Preserve unicode characters in agent arguments, fix unbound variable expansion in bash 3.2, and simplify shell-variable expansion ([#167](https://github.com/webcoyote/sandvault/pull/167)) — thanks @MikeMcQuaid!
+- Error trap handler now writes to stderr instead of stdout ([#165](https://github.com/webcoyote/sandvault/pull/165))
+
+### Thanks to 2 contributors!
+- [@MikeMcQuaid](https://github.com/MikeMcQuaid)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.19.0] - 2026-05-09
 
 ### Added
