@@ -32,6 +32,10 @@ source "$WORKSPACE/helpers/sv-logging.sh"
 # EOF
 heredoc(){ IFS=$'\n' read -r -d '' "${1}" || true; }
 
+quote_zsh_args() {
+    /bin/zsh -fc 'for arg; do printf "%s " "${(q)arg}"; done' -- "$@"
+}
+
 git_config_set_if_changed() {
     local file="$1"
     local key="$2"
@@ -389,7 +393,12 @@ install_deps () {
         # Native install is handled inside the sandbox by guest/home/bin/* scripts;
         # ensure node is available for npm-based tools (codex, gemini).
         case "${COMMAND:-}" in
-            codex|gemini)
+            codex)
+                if [[ ! -x "$SHARED_WORKSPACE/user/.local/bin/codex" && ! -x "$SHARED_WORKSPACE/user/bin/codex" ]]; then
+                    ensure_brew_tool "node" "node"
+                fi
+                ;;
+            gemini)
                 ensure_brew_tool "node" "node"
                 ;;
             *)
@@ -403,7 +412,9 @@ install_deps () {
                 ensure_brew_tool "claude-code" "claude"
                 ;;
             codex)
-                ensure_brew_tool "codex" "codex"
+                if [[ ! -x "$SHARED_WORKSPACE/user/.local/bin/codex" && ! -x "$SHARED_WORKSPACE/user/bin/codex" ]]; then
+                    ensure_brew_tool "codex" "codex"
+                fi
                 ;;
             opencode)
                 ensure_brew_tool "anomalyco/tap/opencode" "opencode"
@@ -1827,10 +1838,11 @@ fi
 ZSH_COMMAND="$ZSH_COMMAND source ~/.zshenv; source ~/.zprofile; source ~/.zshrc"
 
 # Prepare command args as a single string
+COMMAND_ENV="$COMMAND"
 COMMAND_ARGS_STR=""
 SHELL_COMMAND_MODE=false
 if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
-    printf -v COMMAND_ARGS_STR '%q ' "${COMMAND_ARGS[@]}"
+    COMMAND_ARGS_STR="$(quote_zsh_args "${COMMAND_ARGS[@]}")"
 
     # When the user requests running shell (instead of an AI agent) then convert
     # COMMAND_ARGS to a command that will be run by the shell.
@@ -1843,8 +1855,13 @@ if [[ ${#COMMAND_ARGS[@]} -gt 0 ]]; then
         SHELL_COMMAND_MODE=true
     fi
 fi
+if [[ "$COMMAND" != "" ]]; then
+    ZSH_COMMAND="$ZSH_COMMAND; exec $(quote_zsh_args "$COMMAND" "${COMMAND_ARGS[@]}")"
+    COMMAND_ENV=""
+    COMMAND_ARGS_STR=""
+fi
 
-# When COMMAND is set, .zshrc will exec it — no need to append anything.
+# When COMMAND is set, it was already appended above.
 # When running a shell command (sv shell -- echo foo), it was already appended above.
 # For interactive shells (sv shell with no args), drop into a real interactive zsh
 # only when stdin is a TTY. When stdin is piped (e.g. `echo cmd | sv s`), exec a
@@ -1953,7 +1970,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "USER=$SANDVAULT_USER" \
             "SHELL=/bin/zsh" \
             "TERM=${TERM:-}" \
-            "COMMAND=$COMMAND" \
+            "COMMAND=$COMMAND_ENV" \
             "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
@@ -1998,7 +2015,7 @@ else
             "USER=$SANDVAULT_USER" \
             "SHELL=/bin/zsh" \
             "TERM=${TERM:-}" \
-            "COMMAND=$COMMAND" \
+            "COMMAND=$COMMAND_ENV" \
             "COMMAND_ARGS=$COMMAND_ARGS_STR" \
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
