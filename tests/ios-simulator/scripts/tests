@@ -6,7 +6,7 @@
 # simulator takes ~30-90 seconds.
 #
 set -Eeuo pipefail
-trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Re-exec under `sv --ios` if the bridge endpoint isn't already wired in.
@@ -22,6 +22,7 @@ EP="$SV_IOS_SIMULATOR_ENDPOINT"
 FAILED=0
 
 log() { if [[ "$VERBOSE" -ne 0 ]]; then echo "   $*"; fi; }
+# shellcheck disable=SC2329  # invoked indirectly from phase_* functions
 fail() { echo "FAIL: $*" >&2; FAILED=$((FAILED + 1)); }
 
 # Run "$@" as a named phase and log its wall-clock duration. Phase output is
@@ -38,6 +39,7 @@ phase() {
     log "[phase] ${name}: $((end - start))s"
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via `phase`
 phase_ready_probe() {
     log "Test 1: /ready"
     if curl -s "$EP/ready" >/dev/null 2>&1; then
@@ -47,6 +49,7 @@ phase_ready_probe() {
     fi
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via `phase`
 phase_wait_for_boot() {
     # Bridge rejects non-/ready endpoints with 503 until the simulator is
     # booted, which takes ~30-90s.
@@ -65,6 +68,7 @@ phase_wait_for_boot() {
     done
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via `phase`
 phase_launch_preferences() {
     # Retry — `simctl bootstatus` returning success doesn't mean SpringBoard is
     # ready to accept launches, especially on CI runners where it can lag
@@ -93,6 +97,7 @@ phase_launch_preferences() {
     fi
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via `phase`
 phase_describe() {
     log "Test 3: describe"
     local response=""
@@ -110,6 +115,7 @@ phase_describe() {
     done
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via `phase`
 phase_view_pixels() {
     log "Test 4: view_pixels"
     local png_path
@@ -122,6 +128,7 @@ phase_view_pixels() {
     fi
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via `phase`
 phase_bad_input() {
     log "Test 5: bad input rejection"
     local http_status
@@ -135,6 +142,7 @@ phase_bad_input() {
     fi
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via `phase`
 phase_ready_json() {
     log "Test 6: ?format=json"
     local response

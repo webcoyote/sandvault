@@ -4,7 +4,7 @@
 # Exits 0 (no-op) if the tag already exists — this is the normal case
 # when a push doesn't change the version.
 set -Eeuo pipefail
-trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
