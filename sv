@@ -1194,6 +1194,19 @@ fi
 
 install_deps
 
+# Warn about the legacy ~/node_modules npm prefix left behind by old
+# native-install wrappers (#169, #171). A directory literally named node_modules
+# at $HOME disables Bun's auto-install for the whole subtree, so this leftover
+# breaks Bun-backed tools until the user removes it. We do not delete it
+# ourselves: we cannot distinguish our old prefix from one the user created.
+# Signature: a `bin/codex` or `bin/gemini` inside it is unambiguous — npm-prefix
+# layout, and not something a user would hand-create.
+SANDVAULT_HOME="/Users/$SANDVAULT_USER"
+LEGACY_NPM_PREFIX="$SANDVAULT_HOME/node_modules"
+if [[ -x "$LEGACY_NPM_PREFIX/bin/codex" || -x "$LEGACY_NPM_PREFIX/bin/gemini" ]]; then
+    warn "Found legacy npm prefix at $LEGACY_NPM_PREFIX, which breaks Bun auto-install. Inside sandvault, run: rm -rf ~/node_modules. Then on the host: sv --rebuild"
+fi
+
 
 ###############################################################################
 # Create sandvault user and group
