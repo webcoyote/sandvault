@@ -255,10 +255,9 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
     # Upload deploy key to GitHub via gh CLI, or show it for manual addition
     if command -v gh &>/dev/null && gh auth status &>/dev/null; then
         if gh repo deploy-key add "$DEPLOY_KEY_PUB" \
-            --allow-write \
             --title "sandvault-deploy-${REPOSITORY_NAME}@${HOSTNAME}" \
             -R "$GITHUB_REPO_PATH" 2>/dev/null; then
-            info "Deploy key added to $GITHUB_REPO_PATH (write access enabled)"
+            info "Deploy key added to $GITHUB_REPO_PATH (read-only)"
         else
             warn "Could not add deploy key via gh CLI (may already exist or check repo permissions)"
             echo ""
@@ -276,7 +275,6 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
         cat "$DEPLOY_KEY_PUB"
         echo "──────────────────────────────────────────────────────────"
         info "https://github.com/$GITHUB_REPO_PATH/settings/keys"
-        info "  (Enable \"Allow write access\" to push)"
         echo ""
     fi
 fi
