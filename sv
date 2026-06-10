@@ -329,7 +329,7 @@ ensure_brew_tool() {
     if command -v "$cli_name" &>/dev/null; then
         return 0
     fi
-    warn "Homebrew installed $tool, but no '$cli_name' CLI was found in PATH. Will use \$HOME/node_modules/bin/$cli_name if present."
+    warn "Homebrew installed $tool, but no '$cli_name' CLI was found in PATH. Will use \$HOME/.local/bin/$cli_name if present."
     return 0
 }
 

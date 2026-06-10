@@ -7,7 +7,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/sv-tool-prompts.sh"
 
 unset GEMINI
 if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
-    NPM_PREFIX="${HOME}/node_modules"
+    # Install under ~/.local (NOT a dir named "node_modules" at $HOME): a
+    # "node_modules" at $HOME trips Bun's ancestor-walk heuristic and disables
+    # Bun auto-install for the whole $HOME subtree (webcoyote/sandvault#169).
+    # ~/.local/bin is already on PATH via .zprofile, matching the other wrappers.
+    NPM_PREFIX="${HOME}/.local"
     NPM_BIN="$NPM_PREFIX/bin"
     if [[ ! -x "$NPM_BIN/gemini" ]]; then
         echo >&2 "Installing Gemini CLI natively with npm..."
