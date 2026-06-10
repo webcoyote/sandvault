@@ -2,6 +2,16 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.21.0] - 2026-06-10
+
+### Changed
+
+- `sv-clone` now uses a read-only token instead of a read-write token, reducing the blast radius of a rogue agent. ([#170](https://github.com/webcoyote/sandvault/pull/170)) — thanks @MikeMcQuaid!
+
+### Thanks to 1 contributor!
+
+- [@MikeMcQuaid](https://github.com/MikeMcQuaid)
+
 ## [1.20.0] - 2026-05-11
 
 ### Changed
