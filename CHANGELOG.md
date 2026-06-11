@@ -2,6 +2,18 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.22.0] - 2026-06-10
+
+### Fixed
+
+- Detect and warn when a legacy `~/node_modules` directory from older native-install wrappers is present, with manual cleanup steps. The stale directory disables Bun auto-install across the sandbox home, and updating wrappers alone doesn't remove it. ([#169](https://github.com/webcoyote/sandvault/pull/169))
+- Switch the `codex` and `gemini` native-install wrappers to use `$HOME/.local` as the npm prefix instead of `$HOME/node_modules`, so installs land in `~/.local/bin` and `~/.local/lib/node_modules` and no longer trip Bun's ancestor-`node_modules` heuristic that silently disabled auto-install across `$HOME`. — thanks @nichenke!
+
+### Thanks to 2 contributors!
+
+- [@nichenke](https://github.com/nichenke)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.21.0] - 2026-06-10
 
 ### Changed
