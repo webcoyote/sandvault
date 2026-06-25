@@ -1475,8 +1475,14 @@ _changed=\$(/usr/bin/rsync \
     "$WORKSPACE/guest/home/." \
     ".")
 if [[ -n "\$_changed" ]]; then
+    # Use chown -h so the chown never follows a symlink. The home directory
+    # is owned and writable by the (untrusted) sandvault user, so between
+    # rsync completing and this chown running it could swap one of the
+    # just-synced paths for a symlink pointing at a root-owned file. Without
+    # -h, root would then chown the symlink target. -h operates on the link
+    # itself, closing that race.
     echo "\$_changed" | tr '\n' '\0' \
-        | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
+        | xargs -0 sudo /usr/sbin/chown -h "$SANDVAULT_USER:$SANDVAULT_GROUP"
 fi
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
