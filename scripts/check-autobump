@@ -1,0 +1,99 @@
+#!/bin/bash
+# Check whether the latest sandvault GitHub release has been bumped in
+# Homebrew/homebrew-core, either as a merged formula update or as an
+# open pull request.
+#
+# Exit codes:
+#   0 - latest release is the current stable in homebrew-core
+#   1 - an open PR for the latest release exists in homebrew-core
+#   2 - neither: bump has not happened yet
+#   3 - precondition failure (missing tooling, API error, etc.)
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+###############################################################################
+# Functions
+###############################################################################
+info () {
+    echo >&2 -e "ℹ️ \033[36m$*\033[0m"
+}
+ok () {
+    echo >&2 -e "✅ \033[32m$*\033[0m"
+}
+warn () {
+    echo >&2 -e "⚠️  \033[33m$*\033[0m"
+}
+error () {
+    echo >&2 -e "❌ \033[31m$*\033[0m"
+}
+abort () {
+    error "$*"
+    exit 3
+}
+
+###############################################################################
+# Preconditions
+###############################################################################
+command -v gh >/dev/null || abort "gh CLI is required (https://cli.github.com/)"
+command -v jq >/dev/null || abort "jq is required"
+
+REPO="webcoyote/sandvault"
+FORMULA="sandvault"
+TAP_REPO="Homebrew/homebrew-core"
+
+###############################################################################
+# Latest GitHub tag (this project tags releases but doesn't publish GitHub
+# Releases, so /releases/latest 404s — use the tag list instead).
+###############################################################################
+info "Fetching latest tag for $REPO"
+LATEST_TAG=$(gh api "repos/$REPO/tags?per_page=1" --jq '.[0].name' 2>/dev/null) \
+    || abort "Could not fetch tags for $REPO"
+[[ -n "$LATEST_TAG" && "$LATEST_TAG" != "null" ]] \
+    || abort "No tags found for $REPO"
+# Strip leading "v" so we compare bare semver against Homebrew's version string.
+LATEST_VERSION="${LATEST_TAG#v}"
+info "Latest tag: $LATEST_TAG (version $LATEST_VERSION)"
+
+###############################################################################
+# Current homebrew-core stable version (via formulae.brew.sh — no tap needed)
+###############################################################################
+info "Fetching current homebrew-core version from formulae.brew.sh"
+CURRENT_VERSION=$(
+    curl -fsSL "https://formulae.brew.sh/api/formula/$FORMULA.json" \
+        | jq -r '.versions.stable'
+) || abort "Could not fetch formula JSON for $FORMULA"
+info "Current homebrew-core stable: $CURRENT_VERSION"
+
+if [[ "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
+    ok "$FORMULA $LATEST_VERSION is live in homebrew-core"
+    exit 0
+fi
+
+###############################################################################
+# Open PR in homebrew-core for the latest version?
+###############################################################################
+info "No version match — checking for an open homebrew-core PR for $LATEST_VERSION"
+# Search is in: a title containing "<formula> <version>" or "<formula>:" with
+# the version, restricted to open PRs in homebrew-core. We then filter
+# client-side because GitHub's search can match adjacent strings loosely.
+QUERY="repo:$TAP_REPO is:pr is:open in:title $FORMULA $LATEST_VERSION"
+MATCHING_PR=$(
+    gh api -X GET search/issues \
+        -f "q=$QUERY" \
+        --jq ".items[] | select(.title | test(\"(?i)^${FORMULA}[: ]\\\\s*${LATEST_VERSION}(\\\\b|_)\")) | {number, title, user: .user.login, html_url}" \
+        | head -n 1
+) || abort "Search API call failed"
+
+if [[ -n "$MATCHING_PR" ]]; then
+    PR_NUMBER=$(jq -r '.number' <<<"$MATCHING_PR")
+    PR_TITLE=$(jq -r '.title' <<<"$MATCHING_PR")
+    PR_USER=$(jq -r '.user' <<<"$MATCHING_PR")
+    PR_URL=$(jq -r '.html_url' <<<"$MATCHING_PR")
+    warn "Open PR found: #$PR_NUMBER \"$PR_TITLE\" by $PR_USER"
+    warn "$PR_URL"
+    exit 1
+fi
+
+error "$FORMULA $LATEST_VERSION has not been bumped and no open PR exists"
+error "homebrew-core stable is still $CURRENT_VERSION"
+exit 2
