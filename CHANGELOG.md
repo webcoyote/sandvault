@@ -2,6 +2,17 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.23.0] - 2026-06-27
+
+### Fixed
+
+- Neutralize guest-controlled git configuration during host-side git operations, closing a sandbox-escape vector ([#177](https://github.com/webcoyote/sandvault/pull/177))
+- Prevent symlink-following during the buildhome ownership change, closing a root privilege-escalation vector ([#176](https://github.com/webcoyote/sandvault/pull/176))
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.22.0] - 2026-06-10
 
 ### Fixed
