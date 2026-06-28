@@ -51,6 +51,24 @@ fi
 # shellcheck source=helpers/sv-logging.sh
 source "$WORKSPACE/helpers/sv-logging.sh"
 
+# Run git against the cloned repo, which lives under the shared workspace and
+# is writable by the (untrusted) sandvault user via group ACLs. Git treats
+# several config keys as commands to run (core.fsmonitor, core.sshCommand,
+# core.pager, core.hooksPath, [filter] drivers, ...), so a guest that poisons
+# $REPO_DIR/.git/config could execute code as the host user the next time we
+# run git here. Override the dangerous keys to inert values on the command
+# line; -c wins over the repo config. The repo is owned by the host user, so
+# git's safe.directory check never fires and otherwise trusts the config.
+git_repo() {
+    git \
+        -c core.fsmonitor= \
+        -c core.sshCommand= \
+        -c core.hooksPath=/dev/null \
+        -c core.pager=cat \
+        -c protocol.ext.allow=never \
+        -C "$REPO_DIR" "$@"
+}
+
 
 ###############################################################################
 # Parse command line
@@ -172,9 +190,14 @@ debug "Destination: $REPO_DIR"
 ###############################################################################
 # Clone or fetch
 ###############################################################################
+REPO_EXISTED=false
 if [[ -d "$REPO_DIR/.git" ]]; then
-    debug "Repository already exists; fetching..."
-    git -C "$REPO_DIR" fetch "${LOCAL_REPOSITORY:-origin}"
+    REPO_EXISTED=true
+    # Defer the fetch until after the deploy key is (re)configured below, so
+    # the fetch uses an sshCommand we control rather than one the guest may
+    # have written into .git/config. git_repo neutralizes core.sshCommand, so
+    # fetching here would break ssh origins anyway.
+    debug "Repository already exists; will fetch after deploy-key setup"
 else
     debug "Cloning into $REPO_DIR..."
     mkdir -p "$(dirname "$REPO_DIR")"
@@ -182,7 +205,7 @@ else
 
     # If cloned from a local path, set origin to the real remote URL
     if [[ -n "$LOCAL_REPOSITORY" ]]; then
-        git -C "$REPO_DIR" remote set-url origin "$REPOSITORY_SOURCE_URL"
+        git_repo remote set-url origin "$REPOSITORY_SOURCE_URL"
     fi
 fi
 info "Repository ready at $REPO_DIR"
@@ -199,7 +222,9 @@ info "Repository ready at $REPO_DIR"
 
 # Extract owner/repo from origin URL (works for SSH, HTTPS, and local clones
 # whose origin points to GitHub)
-ORIGIN_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
+# A missing origin is fine (local clones may have none); tolerate failure.
+# shellcheck disable=SC2310 # set -e suppression is intended: we want the fallback
+ORIGIN_URL="$(git_repo remote get-url origin 2>/dev/null)" || ORIGIN_URL=""
 GITHUB_REPO_PATH=""
 if [[ -n "$ORIGIN_URL" ]]; then
     # Normalize: strip protocol/host prefixes and .git suffix
@@ -244,12 +269,12 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
     # Rewrite origin to SSH so the deploy key is used for push/pull
     DEPLOY_SSH_URL="git@github.com:${GITHUB_REPO_PATH}.git"
     if [[ "$ORIGIN_URL" != "$DEPLOY_SSH_URL" ]]; then
-        git -C "$REPO_DIR" remote set-url origin "$DEPLOY_SSH_URL"
+        git_repo remote set-url origin "$DEPLOY_SSH_URL"
         debug "Rewrote origin to $DEPLOY_SSH_URL"
     fi
 
     # Configure this repo to use its deploy key (persists in .git/config)
-    git -C "$REPO_DIR" config core.sshCommand \
+    git_repo config core.sshCommand \
         "ssh -i '$DEPLOY_KEY_PRIV' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
 
     # Upload deploy key to GitHub via gh CLI, or show it for manual addition
@@ -276,6 +301,23 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
         echo "──────────────────────────────────────────────────────────"
         info "https://github.com/$GITHUB_REPO_PATH/settings/keys"
         echo ""
+    fi
+fi
+
+
+###############################################################################
+# Fetch an already-existing repository (deferred from the clone/fetch step)
+###############################################################################
+# Done here, after deploy-key setup, so the fetch runs with an sshCommand we
+# pass explicitly rather than one a guest may have written into .git/config
+# (git_repo neutralizes core.sshCommand for exactly that reason).
+if [[ "$REPO_EXISTED" == true ]]; then
+    debug "Fetching existing repository..."
+    if [[ -n "${DEPLOY_KEY_PRIV:-}" && -f "$DEPLOY_KEY_PRIV" ]]; then
+        git_repo -c "core.sshCommand=ssh -i '$DEPLOY_KEY_PRIV' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+            fetch "${LOCAL_REPOSITORY:-origin}"
+    else
+        git_repo fetch "${LOCAL_REPOSITORY:-origin}"
     fi
 fi
 
