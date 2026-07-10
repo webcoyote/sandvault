@@ -305,6 +305,17 @@ ensure_brew_tool() {
             abort "$cli_name is quarantined and failed to warm up. Run '$brew_bin --help' once as $HOST_USER and try again."
         fi
     fi
+    if [[ "$NESTED" == "false" && "$cli_name" == "codex" ]]; then
+        local code_mode_host_bin
+        code_mode_host_bin="$(dirname "$brew_bin")/codex-code-mode-host"
+        if [[ -x "$code_mode_host_bin" ]] \
+            && /usr/bin/xattr -p com.apple.quarantine "$code_mode_host_bin" &>/dev/null; then
+            debug "Warming up codex-code-mode-host outside sandvault..."
+            if ! "$code_mode_host_bin" --version &>/dev/null; then
+                abort "codex-code-mode-host is quarantined and failed to warm up. Run '$code_mode_host_bin --version' once as $HOST_USER and try again."
+            fi
+        fi
+    fi
 
     # Fix homebrew symlink permissions only when explicitly requested.
     # sv doesn't own these symlinks (homebrew creates them), so only
@@ -716,11 +727,11 @@ start_ios_simulator() {
         > "$IOS_BRIDGE_LOG_FILE" 2>&1 &
     IOS_BRIDGE_PID=$!
 
-    # Wait for the bridge to report its port (up to 15 seconds). Generous
+    # Wait for the bridge to report its port (up to 60 seconds). Generous
     # because CI runners under load can be slow to start Python processes.
     local port=""
     local i
-    for (( i=0; i<150; i++ )); do
+    for (( i=0; i<600; i++ )); do
         if ! kill -0 "$IOS_BRIDGE_PID" 2>/dev/null; then
             IOS_BRIDGE_PID=""
             stop_ios_simulator
@@ -735,7 +746,7 @@ start_ios_simulator() {
 
     if [[ -z "$port" ]]; then
         stop_ios_simulator
-        abort "iOS bridge did not report a port within 15 seconds. Check $IOS_BRIDGE_LOG_FILE."
+        abort "iOS bridge did not report a port within 60 seconds. Check $IOS_BRIDGE_LOG_FILE."
     fi
 
     IOS_BRIDGE_PORT="$port"
