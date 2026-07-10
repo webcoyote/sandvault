@@ -1647,14 +1647,16 @@ elif [[ "$REBUILD" == "true" ]]; then
 
     mkdir -p "$SV_PRIVATE_DIR/setup"
 
-    # .gitconfig: seed if missing, preserving user overrides
+    # .gitconfig: seed identity if missing, preserving user overrides
     cat > "$SV_PRIVATE_DIR/setup/gitconfig" << SETUP_EOF
 #!/bin/bash
 set -Eeuo pipefail
 if [[ ! -f "\$HOME/.gitconfig" ]]; then
     git config -f "\$HOME/.gitconfig" user.name "$GIT_USER_NAME"
     git config -f "\$HOME/.gitconfig" user.email "$GIT_USER_EMAIL"
-    git config -f "\$HOME/.gitconfig" safe.directory "$SHARED_WORKSPACE/*"
+fi
+if ! git config -f "\$HOME/.gitconfig" --get-all safe.directory 2>/dev/null | /usr/bin/grep -Fx "$SHARED_WORKSPACE/*" &>/dev/null; then
+    git config -f "\$HOME/.gitconfig" --add safe.directory "$SHARED_WORKSPACE/*"
 fi
 SETUP_EOF
     chmod +x "$SV_PRIVATE_DIR/setup/gitconfig"
@@ -1885,6 +1887,13 @@ fi
 # is how nested `sv --browser` / `sv --ios` invocations inherit
 # SV_BROWSER_ENDPOINT / SV_IOS_SIMULATOR_ENDPOINT from the parent session.
 EXTRA_ENV=()
+EXTRA_ENV+=("GIT_CONFIG_COUNT=1")
+EXTRA_ENV+=("GIT_CONFIG_KEY_0=safe.directory")
+if [[ "$MODE" == "ssh" ]]; then
+    EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/\\*")
+else
+    EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/*")
+fi
 if [[ "$NATIVE_INSTALL" == "true" ]]; then
     EXTRA_ENV+=("SV_NATIVE_INSTALL=true")
 fi
