@@ -6,7 +6,13 @@ trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ER
 source "$(dirname "${BASH_SOURCE[0]}")/sv-tool-prompts.sh"
 
 unset CODEX
-if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
+if [[ -n "${SHARED_WORKSPACE:-}" && -x "$SHARED_WORKSPACE/user/.local/bin/codex" ]]; then
+    CODEX="$SHARED_WORKSPACE/user/.local/bin/codex"
+elif [[ -n "${SHARED_WORKSPACE:-}" && -x "$SHARED_WORKSPACE/user/bin/codex" ]]; then
+    CODEX="$SHARED_WORKSPACE/user/bin/codex"
+elif [[ -x "$HOME/.local/bin/codex" ]]; then
+    CODEX="$HOME/.local/bin/codex"
+elif [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
     # Install under ~/.local (NOT a dir named "node_modules" at $HOME): a
     # "node_modules" at $HOME trips Bun's ancestor-walk heuristic and disables
     # Bun auto-install for the whole $HOME subtree (webcoyote/sandvault#169).

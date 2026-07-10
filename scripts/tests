@@ -356,6 +356,20 @@ run_tests() {
     }
     queue_test test_opencode_wrapper_uses_skip_permissions
 
+    test_codex_code_mode_host_warmup_present() {
+        if grep -F -- "codex-code-mode-host" "$SV_BASE" &>/dev/null \
+            && grep -F -- "Warming up codex-code-mode-host" "$SV_BASE" &>/dev/null \
+            && grep -F -- "com.apple.quarantine" "$SV_BASE" &>/dev/null \
+            && ! grep -F -- "xattr -d com.apple.quarantine" "$SV_BASE" &>/dev/null; then
+            pass "codex code-mode host warmup is present"
+        else
+            fail "codex code-mode host warmup is present" \
+                "codex-code-mode-host quarantine warmup without xattr removal" \
+                "$SV_BASE"
+        fi
+    }
+    queue_test test_codex_code_mode_host_warmup_present
+
     # Unknown option
     test_unknown_option() {
         local output
