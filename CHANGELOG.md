@@ -2,6 +2,17 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.24.0] - 2026-07-12
+
+### Fixed
+
+- Trust shared Sandvault repos so Git stays usable in shared-workspace worktrees owned by the host user ([#179](https://github.com/webcoyote/sandvault/pull/179)) — thanks @MikeMcQuaid!
+- Warm up the Codex host helper so it works even when Homebrew leaves it quarantined ([#183](https://github.com/webcoyote/sandvault/pull/183)) - thanks @MikeMcQuaid!
+
+### Thanks to 1 contributor!
+
+- [@MikeMcQuaid](https://github.com/MikeMcQuaid)
+
 ## [1.23.0] - 2026-06-27
 
 ### Fixed
