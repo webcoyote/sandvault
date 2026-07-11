@@ -20,6 +20,7 @@ fi
 HOST_HOME="$(dscl . -read "/Users/$HOST_USER" NFSHomeDirectory | cut -d' ' -f2)"
 SANDVAULT_USER="sandvault-$HOST_USER"
 SANDVAULT_HOME="/Users/$SANDVAULT_USER"
+SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
 
 [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
 
@@ -496,6 +497,21 @@ run_tests() {
 
     queue_test assert_sandbox_path_order "\$USER/bin precedes /opt/homebrew/bin" "$SANDVAULT_HOME/bin" "/opt/homebrew/bin"
 
+    test_git_trusts_shared_workspace_from_env() {
+        local output
+        local status
+        set +e
+        output=$(sv_cmd s -- sh -c 'GIT_CONFIG_GLOBAL=/dev/null git config --get-all safe.directory' 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -eq 0 ]] && printf '%s\n' "$output" | grep -Fx "$SHARED_WORKSPACE/*" &>/dev/null; then
+            pass "git trusts shared workspace from session env"
+        else
+            fail "git trusts shared workspace from session env" "$SHARED_WORKSPACE/*" "$status | $output"
+        fi
+    }
+    queue_test test_git_trusts_shared_workspace_from_env
+
     ###############################################################################
     # Sandbox Escape Tests: Host User Files
     ###############################################################################
@@ -539,7 +555,6 @@ run_tests() {
     ###############################################################################
 
     # Should be able to access shared workspace
-    SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
     queue_test assert_sandbox_pipe_contains "can access shared workspace" "ls $SHARED_WORKSPACE" "SANDVAULT-README"
     queue_test assert_sandbox_exit_code "sv s -- touch SANDVAULT-README.md" 0 touch -c "$SHARED_WORKSPACE/SANDVAULT-README.md"
 
@@ -637,7 +652,7 @@ run_tests() {
         local expected_upstream
 
         src_repository="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null || true)"
-        if [[ -z "$src_repository" || ! -d "$src_repository/.git" ]]; then
+        if [[ -z "$src_repository" ]] || ! git -C "$src_repository" rev-parse --git-dir &>/dev/null; then
             fail "sv-clone clones local repository" "current repository available" "$src_repository"
             return
         fi
