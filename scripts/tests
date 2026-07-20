@@ -681,8 +681,18 @@ case "$1" in
                                 *) shift ;;
                             esac
                         done
-                        title="$(printf '%s' "$jqexpr" | sed -n 's/.*title == "\([^"]*\)".*/\1/p')"
-                        awk -F'\t' -v t="$title" '$1==t{print $2"\t"$3}' "$GH_STUB_STATE" 2>/dev/null
+                        # Emit real GitHub-shaped JSON (id/title/readOnly, the
+                        # exact fields `gh --json` produces) from the state file
+                        # and run the script's own --jq expression against it via
+                        # the real jq. This exercises the field names the script
+                        # actually references, so a regression like .read_only
+                        # vs .readOnly is caught here instead of being masked by
+                        # a stub that reconstructs the output itself.
+                        json="$(awk -F'\t' 'BEGIN{printf "["; sep=""}
+                            {printf "%s{\"id\":%s,\"title\":\"%s\",\"readOnly\":%s}", sep, $2, $1, $3; sep=","}
+                            END{printf "]"}' "$GH_STUB_STATE" 2>/dev/null)"
+                        [[ -z "$json" ]] && json="[]"
+                        printf '%s' "$json" | jq -r "$jqexpr"
                         exit 0
                         ;;
                     add)

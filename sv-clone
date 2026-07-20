@@ -317,7 +317,7 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
         # read-only to write requires delete + re-add.
         EXISTING_KEY_LINE="$(gh repo deploy-key list -R "$GITHUB_REPO_PATH" \
             --json id,title,readOnly \
-            --jq ".[] | select(.title == \"$DEPLOY_KEY_TITLE\") | [.id, .read_only] | @tsv" \
+            --jq ".[] | select(.title == \"$DEPLOY_KEY_TITLE\") | [.id, .readOnly] | @tsv" \
             2>/dev/null)" || EXISTING_KEY_LINE=""
 
         if [[ -n "$EXISTING_KEY_LINE" ]]; then
