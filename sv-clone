@@ -257,7 +257,7 @@ if [[ "$DEPLOY_KEY" == true ]]; then
     # clones whose origin points to GitHub). A missing origin is fine (local
     # clones may have none); tolerate failure.
     # shellcheck disable=SC2310 # set -e suppression is intended: we want the fallback
-    ORIGIN_URL="$(git_repo remote get-url origin 2>/dev/null)" || ORIGIN_URL=""
+    ORIGIN_URL="$(git_repo config remote.origin.url 2>/dev/null)" || ORIGIN_URL=""
     if [[ -n "$ORIGIN_URL" ]]; then
         # Normalize: strip protocol/host prefixes and .git suffix
         GITHUB_REPO_PATH="$ORIGIN_URL"
