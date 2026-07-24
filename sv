@@ -540,7 +540,6 @@ start_chrome() {
     debug "Starting headless Chrome..."
     "$chrome_bin" \
         --headless \
-        --no-sandbox \
         --disable-gpu \
         --remote-debugging-port=0 \
         --remote-debugging-address=127.0.0.1 \
