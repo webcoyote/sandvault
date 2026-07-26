@@ -2,6 +2,31 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.25.0] - 2026-07-26
+
+### Added
+
+- Add `sv-visible-browser` script to launch a visible Chrome browser session ([#187](https://github.com/webcoyote/sandvault/pull/187))
+
+### Changed
+
+- Connect SSH mode to the loopback interface instead of `$HOSTNAME` for more reliable local connections ([#189](https://github.com/webcoyote/sandvault/pull/189))
+- Make deploy keys opt-in via the `-k`/`-w` flags in `sv-clone` ([#186](https://github.com/webcoyote/sandvault/pull/186)) — thanks @jesserobbins!
+
+### Fixed
+
+- Fix deploy-key origin rewrite on machines configured with git `insteadOf` ([#186](https://github.com/webcoyote/sandvault/pull/186))
+- Fix deploy-key read-only detection in `sv-clone` ([#186](https://github.com/webcoyote/sandvault/pull/186))
+
+### Removed
+
+- Remove `--no-sandbox` flag for the Chrome browser so it now runs sandboxed ([#187](https://github.com/webcoyote/sandvault/pull/187))
+
+### Thanks to 2 contributors!
+
+- [@jesserobbins](https://github.com/jesserobbins)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.24.0] - 2026-07-12
 
 ### Fixed
