@@ -85,7 +85,7 @@ configure_ssh_access() {
             -f "$SSH_KEYFILE_PRIV" \
             -N "" \
             -q \
-            -C "${HOST_USER}-to-sandvault@${HOSTNAME}"
+            -C "${HOST_USER}-to-sandvault@${SSH_HOST}"
     fi
 
     # Add HOST_USER SSH public key to SANDVAULT_USER authorized_keys
@@ -145,6 +145,12 @@ else
 fi
 readonly HOST_USER
 readonly SANDVAULT_USER="sandvault-$HOST_USER"
+# The sandvault user is a local account reached via the Mac's own sshd, so SSH
+# connections are loopback. Use the IPv4 loopback literal rather than $HOSTNAME
+# or "localhost": some machines (e.g. company-issued Macs with auto-generated
+# names) have a hostname that does not resolve, and even "localhost" depends on
+# /etc/hosts. A literal address skips name resolution entirely. See issue #188.
+readonly SSH_HOST="127.0.0.1"
 readonly SANDVAULT_GROUP="sandvault-$HOST_USER"
 readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
 # Sandvault-private subdir of $SHARED_WORKSPACE. Holds setup scripts, scratch
@@ -1414,10 +1420,10 @@ fi
 
 # SSH smoke test
 #if [[ "$COMMAND" == "build" || "$REBUILD" == "true" ]]; then
-#    if ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEYFILE_PRIV" "$SANDVAULT_USER@$HOSTNAME" true 2>/dev/null; then
-#        trace "SSH smoke test: $SANDVAULT_USER@$HOSTNAME connected successfully"
+#    if ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEYFILE_PRIV" "$SANDVAULT_USER@$SSH_HOST" true 2>/dev/null; then
+#        trace "SSH smoke test: $SANDVAULT_USER@$SSH_HOST connected successfully"
 #    else
-#        warn "SSH smoke test failed: $SANDVAULT_USER@$HOSTNAME could not connect. SSH mode may not work."
+#        warn "SSH smoke test failed: $SANDVAULT_USER@$SSH_HOST could not connect. SSH mode may not work."
 #    fi
 #fi
 
@@ -1819,7 +1825,7 @@ fi
 TERM_PROGRAM="${TERM_PROGRAM:-e.g. ghostty, kitty, iTerm, WezTerm}"
 heredoc LOCAL_NETWORK_ERROR << EOF
 \n
-ERROR: unable to connect to $HOSTNAME.
+ERROR: unable to connect to the local Virtual Machine over SSH.
 
 Your terminal app ($TERM_PROGRAM)
 has not been granted "Local Network" access rights,
@@ -1958,11 +1964,11 @@ if [[ "$MODE" == "ssh" ]]; then
         -o UserKnownHostsFile=/dev/null \
         -n \
         -i "$SSH_KEYFILE_PRIV" \
-        "$SANDVAULT_USER@$HOSTNAME" \
+        "$SANDVAULT_USER@$SSH_HOST" \
         exit 0 2>&1)
     then
         if echo "$ssh_check_output" | /usr/bin/grep -qiE "permission denied|authentication failed"; then
-            error "SSH authentication failed for $SANDVAULT_USER@$HOSTNAME."
+            error "SSH authentication failed for $SANDVAULT_USER@$SSH_HOST."
             error "Verify your SSH key is installed and authorized on the host."
         else
             # shellcheck disable=SC2154 # LOCAL_NETWORK_ERROR is referenced but not assigned (yes it is)
@@ -1974,7 +1980,7 @@ if [[ "$MODE" == "ssh" ]]; then
         exit 1
     fi
 
-    debug "SSH $SANDVAULT_USER@$HOSTNAME"
+    debug "SSH $SANDVAULT_USER@$SSH_HOST"
 
     # SSH requires TWO layers of shell parsing: local shell → SSH → remote shell → /bin/zsh
     # The extra single quotes protect the command through SSH's remote shell parsing.
@@ -1987,7 +1993,7 @@ if [[ "$MODE" == "ssh" ]]; then
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -i "$SSH_KEYFILE_PRIV" \
-        "$SANDVAULT_USER@$HOSTNAME" \
+        "$SANDVAULT_USER@$SSH_HOST" \
         /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
@@ -2024,7 +2030,7 @@ else
     # Use sudo with -H to set HOME correctly
     # Use env to ensure the environment is cleared, otherwise PATH carries over
     # Use sandbox-exec to restrict access to external drives
-    debug "Shell $SANDVAULT_USER@$HOSTNAME"
+    debug "Shell $SANDVAULT_USER@$SSH_HOST"
 
     # sudo requires only ONE layer of shell parsing: local shell → /bin/zsh
     # Simple double quotes "$ZSH_COMMAND" are sufficient because sudo passes arguments
