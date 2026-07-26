@@ -540,7 +540,6 @@ start_chrome() {
     debug "Starting headless Chrome..."
     "$chrome_bin" \
         --headless \
-        --no-sandbox \
         --disable-gpu \
         --remote-debugging-port=0 \
         --remote-debugging-address=127.0.0.1 \
@@ -623,6 +622,13 @@ start_lightpanda() {
 }
 
 start_browser() {
+    # If an endpoint was supplied in the environment (e.g. a host script that
+    # launched its own headful Chrome), reuse it instead of launching our own.
+    # The endpoint is validated and passed into the sandbox further below.
+    if [[ -n "${SV_BROWSER_ENDPOINT:-}" ]]; then
+        debug "Reusing pre-supplied browser endpoint: $SV_BROWSER_ENDPOINT"
+        return 0
+    fi
     mkdir -p "$SESSION_DIR"
     case "$BROWSER_KIND" in
         chrome)     start_chrome ;;

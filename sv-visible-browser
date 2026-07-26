@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+#
+# sv-headful-chrome — launch a visible Chrome with CDP enabled, then run
+# `sv --browser` against it.
+#
+# Chrome REFUSES to expose the remote-debugging port when --user-data-dir is
+# the default profile ("DevTools remote debugging requires a non-default data
+# directory"). So we use a stable, sv-owned profile directory instead. It is
+# empty the first time; log in to the sites you need once and the session
+# persists across every future run. Your everyday Chrome can stay open — this
+# is a separate profile, so there is no singleton conflict with it.
+#
+# Chrome is launched here (its user-data-dir, singleton lock, and cleanup are
+# its own concern), the CDP endpoint is exported, and `sv` picks it up as a
+# pre-existing browser instead of starting its own headless one.
+#
+# Usage:
+#   ./sv-headful-chrome [sv-args...]
+#
+# Any extra arguments are forwarded to `sv` (always invoked with --browser):
+#   ./sv-headful-chrome --no-build
+#
+set -euo pipefail
+
+# --- config ---------------------------------------------------------------
+# Fixed debug port so the endpoint is predictable. Override with SV_CHROME_PORT.
+readonly PORT="${SV_CHROME_PORT:-9222}"
+
+# Stable sv-owned profile. NOT the default Chrome dir (Chrome blocks CDP on
+# that). Persists across runs so logins/cookies survive. Override with
+# SV_CHROME_PROFILE_DIR.
+readonly PROFILE_DIR="${SV_CHROME_PROFILE_DIR:-$HOME/.sv/chrome-headful}"
+
+readonly LOG_FILE="${TMPDIR:-/tmp}/sv-headful-chrome.log"
+readonly ENDPOINT="http://127.0.0.1:$PORT"
+
+# Chrome / Chromium binary (Chrome preferred).
+CHROME_BIN=""
+if [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+    CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+elif [[ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]]; then
+    CHROME_BIN="/Applications/Chromium.app/Contents/MacOS/Chromium"
+else
+    echo >&2 "Chrome or Chromium not found under /Applications."
+    exit 1
+fi
+
+# --- preflight -------------------------------------------------------------
+# If something is already answering on the port, reuse it rather than launching
+# a second Chrome (which would just fail on the singleton lock for PROFILE_DIR).
+if curl -sf "$ENDPOINT/json/version" >/dev/null 2>&1; then
+    echo "A browser is already listening on $ENDPOINT — reusing it."
+    export SV_BROWSER_ENDPOINT="$ENDPOINT"
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    exec "$SCRIPT_DIR/sv" --browser "$@"
+fi
+
+mkdir -p "$PROFILE_DIR"
+# Clear stale singleton files from a previous launch that did not exit cleanly.
+rm -f "$PROFILE_DIR/SingletonLock" "$PROFILE_DIR/SingletonCookie" "$PROFILE_DIR/SingletonSocket"
+
+# --- launch Chrome ---------------------------------------------------------
+echo "Launching headful Chrome (profile: $PROFILE_DIR, CDP: $ENDPOINT)..."
+"$CHROME_BIN" \
+    --remote-debugging-port="$PORT" \
+    --remote-debugging-address=127.0.0.1 \
+    --user-data-dir="$PROFILE_DIR" \
+    --no-first-run \
+    --no-default-browser-check \
+    >"$LOG_FILE" 2>&1 &
+CHROME_PID=$!
+
+# Make sure Chrome dies when this script exits, so sv sessions don't leak a
+# browser. We started it, so we clean it up.
+cleanup() {
+    kill "$CHROME_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# --- wait for the CDP endpoint to answer -----------------------------------
+echo "Waiting for CDP endpoint..."
+for _ in $(seq 1 150); do
+    if ! kill -0 "$CHROME_PID" 2>/dev/null; then
+        echo >&2 "Chrome exited before opening the debug port. Log:"
+        sed 's/^/  /' "$LOG_FILE" >&2
+        exit 1
+    fi
+    if curl -sf "$ENDPOINT/json/version" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+if ! curl -sf "$ENDPOINT/json/version" >/dev/null 2>&1; then
+    echo >&2 "CDP endpoint $ENDPOINT did not come up within 15s. Log:"
+    sed 's/^/  /' "$LOG_FILE" >&2
+    exit 1
+fi
+
+# --- hand off to sv --------------------------------------------------------
+# Export the endpoint AND pass --browser: sv only wires SV_BROWSER_ENDPOINT
+# into the sandbox when --browser is set (USE_BROWSER=true). With the env var
+# already set, sv skips launching its own headless Chrome and reuses ours.
+export SV_BROWSER_ENDPOINT="$ENDPOINT"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "Starting sv --browser against $ENDPOINT ..."
+"$SCRIPT_DIR/sv" --browser "$@"
