@@ -2,6 +2,16 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.26.0] - 2026-07-30
+
+### Fixed
+
+- Support login keychains on macOS 27 ([#191](https://github.com/webcoyote/sandvault/pull/191)) — thanks @MikeMcQuaid!
+
+### Thanks to 1 contributor!
+
+- [@MikeMcQuaid](https://github.com/MikeMcQuaid)
+
 ## [1.25.0] - 2026-07-26
 
 ### Added
