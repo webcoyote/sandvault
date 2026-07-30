@@ -60,7 +60,7 @@ fi
 
 # Unlock the keychain and disable auto-lock to avoid password dialogs
 debug "Unlocking keychain..."
-security unlock-keychain -p '' "$LOGIN_KEYCHAIN"
+security unlock-keychain -p '' "$LOGIN_KEYCHAIN" &>/dev/null || true
 security set-keychain-settings "$LOGIN_KEYCHAIN"
 
 

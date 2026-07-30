@@ -371,6 +371,45 @@ run_tests() {
     }
     queue_test test_codex_code_mode_host_warmup_present
 
+    test_configure_tolerates_already_unlocked_keychain() {
+        local output status stub_dir test_home
+        test_home="$(mktemp -d)"
+        stub_dir="$(mktemp -d)"
+        mkdir -p "$test_home/Library/Keychains"
+        touch "$test_home/Library/Keychains/login.keychain-db"
+
+        cat > "$stub_dir/security" <<'EOF'
+#!/bin/bash
+if [[ "$1" == "unlock-keychain" ]]; then
+    exit 51
+fi
+exit 0
+EOF
+        cat > "$stub_dir/defaults" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+        chmod +x "$stub_dir/security" "$stub_dir/defaults"
+
+        set +e
+        output=$(HOME="$test_home" \
+            PATH="$stub_dir:/usr/bin:/bin:/usr/sbin:/sbin" \
+            SHARED_WORKSPACE="" \
+            SV_VERBOSE=0 \
+            "$SCRIPT_DIR/../guest/home/configure" 2>&1)
+        status=$?
+        set -e
+        rm -rf "$test_home" "$stub_dir"
+
+        if [[ "$status" -eq 0 ]]; then
+            pass "configure tolerates an already-unlocked keychain"
+        else
+            fail "configure tolerates an already-unlocked keychain" \
+                "exit 0" "$status | $output"
+        fi
+    }
+    queue_test test_configure_tolerates_already_unlocked_keychain
+
     # Unknown option
     test_unknown_option() {
         local output
@@ -1218,21 +1257,33 @@ STUB_EOF
 
     test_codex_unicode_args() {
         local stub_dir="$SHARED_WORKSPACE/user/.local/bin"
-        local stub_codex_link="$stub_dir/codex"
-        local stub_codex_target
-        local backup_codex="$RESULTS_DIR/codex-$TEST_ID.backup"
-        local restore_codex=false
         local output
         local prompt="Reply with exactly 🍺 and no quotation marks."
         local status
 
+        CODEX_TEST_STUB_LINK="$stub_dir/codex"
+        CODEX_TEST_STUB_TARGET=""
+        CODEX_TEST_BACKUP="$RESULTS_DIR/codex-$TEST_ID.backup"
+        cleanup_codex_unicode_args() {
+            if [[ -n "$CODEX_TEST_STUB_TARGET" ]]; then
+                rm -f "$CODEX_TEST_STUB_LINK" "$CODEX_TEST_STUB_TARGET"
+            fi
+            if [[ -e "$CODEX_TEST_BACKUP" || -L "$CODEX_TEST_BACKUP" ]]; then
+                mv "$CODEX_TEST_BACKUP" "$CODEX_TEST_STUB_LINK"
+                sv_cmd s -- /bin/cp -p "$CODEX_TEST_STUB_LINK" "$SANDVAULT_HOME/.local/bin/codex" &>/dev/null || true
+            elif [[ -n "$CODEX_TEST_STUB_TARGET" ]]; then
+                sv_cmd s -- /bin/rm -f "$SANDVAULT_HOME/.local/bin/codex" &>/dev/null || true
+            fi
+        }
+        trap cleanup_codex_unicode_args EXIT
+        trap 'exit 1' HUP INT TERM
+
         mkdir -p "$stub_dir"
-        if [[ -e "$stub_codex_link" || -L "$stub_codex_link" ]]; then
-            mv "$stub_codex_link" "$backup_codex"
-            restore_codex=true
+        if [[ -e "$CODEX_TEST_STUB_LINK" || -L "$CODEX_TEST_STUB_LINK" ]]; then
+            mv "$CODEX_TEST_STUB_LINK" "$CODEX_TEST_BACKUP"
         fi
-        stub_codex_target=$(mktemp "$stub_dir/codex-test-stub.XXXXXX")
-        cat > "$stub_codex_target" <<'CODEX_TEST_STUB'
+        CODEX_TEST_STUB_TARGET=$(mktemp "$stub_dir/codex-test-stub.XXXXXX")
+        cat > "$CODEX_TEST_STUB_TARGET" <<'CODEX_TEST_STUB'
 #!/bin/bash
 set -Eeuo pipefail
 printf 'codex-test-stub-argc:%s\n' "$#"
@@ -1240,21 +1291,17 @@ for arg in "$@"; do
     printf 'codex-test-stub-arg:<%s>\n' "$arg"
 done
 CODEX_TEST_STUB
-        chmod +x "$stub_codex_target"
-        ln -s "$(basename "$stub_codex_target")" "$stub_codex_link"
+        chmod +x "$CODEX_TEST_STUB_TARGET"
+        ln -s "$(basename "$CODEX_TEST_STUB_TARGET")" "$CODEX_TEST_STUB_LINK"
 
         set +e
         output=$(/usr/bin/script -q /dev/null "${SV_CMD[@]}" --no-build codex -- "🍺" "$prompt" 2>&1)
         status=$?
         set -e
 
-        rm -f "$stub_codex_link" "$stub_codex_target"
-        if [[ "$restore_codex" == "true" ]]; then
-            mv "$backup_codex" "$stub_codex_link"
-            sv_cmd s -- /bin/cp -p "$stub_codex_link" "$SANDVAULT_HOME/.local/bin/codex" &>/dev/null || true
-        else
-            sv_cmd s -- /bin/rm -f "$SANDVAULT_HOME/.local/bin/codex" &>/dev/null || true
-        fi
+        trap - HUP INT TERM
+        cleanup_codex_unicode_args
+        trap - EXIT
 
         if [[ "$status" -eq 0 && "$output" == *"codex-test-stub-arg:<🍺>"* && "$output" == *"codex-test-stub-arg:<$prompt>"* ]]; then
             pass "sv codex -- preserves unicode args"
