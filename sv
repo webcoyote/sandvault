@@ -408,14 +408,17 @@ install_lightpanda() {
 install_deps () {
     if [[ "$NATIVE_INSTALL" == "true" ]]; then
         # Native install is handled inside the sandbox by guest/home/bin/* scripts;
-        # ensure node is available for npm-based tools (codex, gemini).
+        # ensure node is available for npm-based tools (codex, gemini, pi).
         case "${COMMAND:-}" in
             codex)
                 if [[ ! -x "$SHARED_WORKSPACE/user/.local/bin/codex" && ! -x "$SHARED_WORKSPACE/user/bin/codex" ]]; then
                     ensure_brew_tool "node" "node"
                 fi
                 ;;
-            gemini)
+            gemini|pi)
+                # Both ship as npm bin shims that need node at exec time even
+                # when already staged, so always ensure node (unlike codex's
+                # self-contained binary, which skips it when present).
                 ensure_brew_tool "node" "node"
                 ;;
             *)
@@ -438,6 +441,9 @@ install_deps () {
                 ;;
             gemini)
                 ensure_brew_tool "gemini-cli" "gemini"
+                ;;
+            pi)
+                ensure_brew_tool "pi-coding-agent" "pi"
                 ;;
             *)
                 # No tool installation needed for other commands
@@ -962,11 +968,12 @@ show_help() {
     echo "  co, codex  [PATH]    Open OpenAI Codex in sandvault"
     echo "  o,  opencode [PATH]  Open OpenCode in sandvault"
     echo "  g,  gemini [PATH]    Open Google Gemini in sandvault"
+    echo "  p,  pi     [PATH]    Open pi in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove sandvault; keep shared files"
     echo ""
-    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, shell)"
+    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, shell)"
     echo ""
     echo "Environment:"
     echo "  SANDVAULT_ARGS       Default arguments (prepended to command line)"
@@ -1092,6 +1099,10 @@ case "${1:-}" in
         ;;
     g|gemini)
         COMMAND=gemini
+        INITIAL_DIR="${2:-}"
+        ;;
+    p|pi)
+        COMMAND=pi
         INITIAL_DIR="${2:-}"
         ;;
     s|shell)
@@ -1760,7 +1771,7 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
     # Fix homebrew symlinks for any installed tools
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in condition
     if brew_shellenv 2>/dev/null; then
-        for tool_cli in claude codex opencode gemini; do
+        for tool_cli in claude codex opencode gemini pi; do
             brew_link="$(brew --prefix)/bin/$tool_cli"
             if [[ -L "$brew_link" ]]; then
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_link")

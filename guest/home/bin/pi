@@ -1,0 +1,70 @@
+#!/bin/bash
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+# shellcheck source=sv-tool-prompts.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sv-tool-prompts.sh"
+
+unset PI
+if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
+    # Install under ~/.local (NOT a dir named "node_modules" at $HOME): a
+    # "node_modules" at $HOME trips Bun's ancestor-walk heuristic and disables
+    # Bun auto-install for the whole $HOME subtree (webcoyote/sandvault#169).
+    # ~/.local/bin is already on PATH via .zprofile, matching the other wrappers.
+    NPM_PREFIX="${HOME}/.local"
+    NPM_BIN="$NPM_PREFIX/bin"
+    if [[ ! -x "$NPM_BIN/pi" ]]; then
+        echo >&2 "Installing pi natively with npm..."
+        npm install --prefix "$NPM_PREFIX" -g @earendil-works/pi-coding-agent
+    fi
+    PI="$NPM_BIN/pi"
+elif command -v brew &>/dev/null ; then
+    HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
+    if [[ -x "$HOMEBREW_PREFIX/bin/pi" ]]; then
+        # Homebrew install
+        PI="$HOMEBREW_PREFIX/bin/pi"
+    fi
+fi
+
+# Fallback: a pre-existing install at a known location. Covers a prior
+# native install at ~/.local/bin/pi and the common Bun-global install at
+# ~/.bun/bin/pi, neither of which the native-install or Homebrew paths above
+# cover. We check explicit paths rather than `command -v pi` because this
+# wrapper itself is installed at ~/bin/pi in the sandbox and $HOME/bin precedes
+# these on PATH, so a generic PATH search would resolve to this wrapper and
+# re-exec it in an infinite loop.
+if [[ -z "${PI:-}" || ! -x "$PI" ]]; then
+    if [[ -x "$HOME/.local/bin/pi" ]]; then
+        PI="$HOME/.local/bin/pi"
+    elif [[ -x "$HOME/.bun/bin/pi" ]]; then
+        PI="$HOME/.bun/bin/pi"
+    fi
+fi
+
+if [[ -z "${PI:-}" || ! -x "$PI" ]]; then
+    # Don't suggest staging under $SHARED_WORKSPACE/user/{bin,.local/bin}:
+    # .zprofile puts both ahead of $HOME/bin, so a pi there shadows this
+    # wrapper instead of being found by it, silently dropping --approve and
+    # the tool prompt. The paths below are inside the sandbox home, which is
+    # separate from your host home -- reach it with `sv shell`.
+    echo >&2 "ERROR: pi is not installed."
+    echo >&2 "       To install pi on the host, run 'brew install pi-coding-agent'."
+    echo >&2 "       To install pi in the sandbox, run 'sv -N pi'."
+    echo >&2 "       To use an install you already have, put it at ~/.local/bin/pi"
+    echo >&2 "       or ~/.bun/bin/pi in the sandbox home. Use 'sv shell' to get there."
+    exit 1
+fi
+
+TOOL_PROMPT=$(sv_tool_prompt)
+EXTRA_ARGS=()
+if [[ -n "$TOOL_PROMPT" ]]; then
+    EXTRA_ARGS+=(--append-system-prompt "$TOOL_PROMPT")
+fi
+
+# Unlike the other agents, pi needs no permission-bypass flag: it runs its
+# read/bash/edit/write tools without prompting. --approve answers a different
+# question -- pi's interactive project-trust prompt -- so project-local
+# extensions, skills, prompt templates, and themes load without stopping for
+# input. That is a real trust decision, and the sandbox is where to make it.
+echo >&2 "$USER: running pi ($PI) --approve (trusts project-local files)"
+exec "$PI" --approve ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"

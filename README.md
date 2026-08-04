@@ -6,7 +6,7 @@ SandVault (`sv`) manages a limited user account to sandbox shell commands and AI
 </br>
 </br>
 
-- **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini
+- **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini, pi
 - **Web and iOS automation** - sandbox access to Chrome / Lightpanda and iOS Simulator
 - **Fast context switching** - No VM overhead; instant user switching
 - **Passwordless** - switch accounts without a prompt (after setup)
@@ -90,6 +90,10 @@ Install via git:
 # shortcut: sv g
   sv gemini
 
+# Run pi in the sandbox
+# shortcut: sv p
+  sv pi
+
 # Run command shell in the sandbox
 # shortcut: sv s
   sv shell
@@ -165,6 +169,7 @@ By default, SandVault installs AI tools via Homebrew on the host side. With `--n
 - **Codex** — installed via `npm install -g @openai/codex`
 - **OpenCode** — installed via `curl -fsSL https://opencode.ai/install | bash`
 - **Gemini** — installed via `npm install -g @google/gemini-cli`
+- **pi** — installed via `npm install -g @earendil-works/pi-coding-agent`
 
 Tools are installed on first run and reused on subsequent runs.
 
@@ -177,6 +182,7 @@ sv -N claude
 sv -N codex
 sv -N opencode
 sv -N gemini
+sv -N pi
 ```
 
 To make native install the default, set `SANDVAULT_ARGS`:
@@ -240,7 +246,7 @@ Explicit command-line arguments are appended after `SANDVAULT_ARGS`, so they are
 
 ## `agentsview` Integration
 
-[`agentsview`](https://github.com/badlogic/agentsview) is a dashboard that aggregates session history, search, and cost tracking across AI coding agents (Claude Code, Codex, OpenCode, Gemini). If you have agentsview installed on the host, `sv-agentsview-setup` mirrors sandbox session data so it appears alongside your host-side sessions.
+[`agentsview`](https://github.com/badlogic/agentsview) is a dashboard that aggregates session history, search, and cost tracking across AI coding agents (Claude Code, Codex, OpenCode, Gemini, pi). If you have agentsview installed on the host, `sv-agentsview-setup` mirrors sandbox session data so it appears alongside your host-side sessions.
 
 ```bash
 # Detect agentsview, prompt to opt in, and configure
@@ -507,6 +513,7 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Runs OpenAI Codex with `--dangerously-bypass-approvals-and-sandbox`
 - Runs OpenCode with `OPENCODE_PERMISSION='{"*":"allow"}'`
 - Runs Google Gemini with `--yolo`
+- Runs pi with `--approve` to trust project-local files (pi needs no permission bypass)
 - Automates Chrome for web testing (via Chrome DevTools Protocol)
 - Automated iOS Simulator for app testing (via `xcrun simctl`, and `iosef`)
 - Maintains a clean separation between trusted and untrusted code

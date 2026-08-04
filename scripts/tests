@@ -344,6 +344,17 @@ run_tests() {
     }
     queue_test test_help_lists_opencode
 
+    test_help_lists_pi() {
+        local output
+        output=$(sv_cmd --help 2>&1)
+        if [[ "$output" == *"p,  pi"* ]]; then
+            pass "--help lists pi"
+        else
+            fail "--help lists pi" "pi command line" "$output"
+        fi
+    }
+    queue_test test_help_lists_pi
+
     test_opencode_wrapper_uses_skip_permissions() {
         if [[ -x "$SCRIPT_DIR/../guest/home/bin/opencode" ]] \
             && grep -F -- "OPENCODE_PERMISSION" \
@@ -409,6 +420,140 @@ EOF
         fi
     }
     queue_test test_configure_tolerates_already_unlocked_keychain
+
+    # Mirror the opencode test for pi: assert the wrapper wires the
+    # project-trust flag (--approve, which skips pi's interactive trust prompt;
+    # pi needs no permission-bypass flag) and the shared tool-prompt injection
+    # (--append-system-prompt).
+    test_pi_wrapper_wires_trust_and_prompt() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/pi"
+        if [[ ! -x "$wrapper" ]]; then
+            fail "pi wrapper wires trust and prompt" "executable wrapper" "$wrapper"
+            return
+        fi
+        # Anchor --approve to the exec line: it appears in two comments and the
+        # startup banner as well, so a whole-file grep stays green after it is
+        # deleted from the exec -- exactly the drift this guards.
+        # --append-system-prompt goes into EXTRA_ARGS rather than onto the exec
+        # line, so match it in comment-stripped code instead.
+        local code
+        code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        if grep -Eq '^exec .*--approve' "$wrapper" \
+            && grep -F -- '--append-system-prompt' <<< "$code" &>/dev/null; then
+            pass "pi wrapper wires trust and prompt"
+        else
+            fail "pi wrapper wires trust and prompt" \
+                "--approve on the exec line and --append-system-prompt in code" \
+                "$wrapper"
+        fi
+    }
+    queue_test test_pi_wrapper_wires_trust_and_prompt
+
+    # Guard the dispatch mapping: a typo in (or removal of) the p|pi) case arm
+    # would pass the wrapper static tests but break 'sv pi'. Assert sv has a
+    # p|pi) arm that sets COMMAND=pi. (A full end-to-end stub test like
+    # test_codex_unicode_args isn't safe for pi: the wrapper's Homebrew branch
+    # takes precedence over the ~/.local/bin/pi fallback, so a host with a
+    # brew pi installed would run the real binary, not the stub.)
+    test_sv_dispatches_pi() {
+        if grep -Eq '^[[:space:]]+p[|]pi\)' "$SV_BASE" \
+            && grep -A2 -E '^[[:space:]]+p[|]pi\)' "$SV_BASE" | grep -q 'COMMAND=pi'; then
+            pass "sv dispatches p|pi -> COMMAND=pi"
+        else
+            fail "sv dispatches p|pi -> COMMAND=pi" \
+                "a p|pi) case arm setting COMMAND=pi" \
+                "missing or broken dispatch arm in $SV_BASE"
+        fi
+    }
+    queue_test test_sv_dispatches_pi
+
+    # pi installs from the homebrew/core "pi-coding-agent" formula, whose name
+    # differs from its "pi" binary. ensure_brew_tool takes both, and passing
+    # only the formula name would look for a "pi-coding-agent" binary that does
+    # not exist, reinstalling on every run.
+    test_sv_installs_pi_via_brew_formula() {
+        if grep -F -- 'ensure_brew_tool "pi-coding-agent" "pi"' "$SV_BASE" &>/dev/null; then
+            pass "sv installs pi via the pi-coding-agent formula"
+        else
+            fail "sv installs pi via the pi-coding-agent formula" \
+                'ensure_brew_tool "pi-coding-agent" "pi"' \
+                "missing or broken install arm in $SV_BASE"
+        fi
+    }
+    queue_test test_sv_installs_pi_via_brew_formula
+
+    # Same error class as the formula name, on the other install path: a typo in
+    # the npm package name surfaces only at runtime under 'sv -N pi', which the
+    # suite never exercises.
+    test_pi_wrapper_native_install_package() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/pi"
+        if grep -F -- 'npm install --prefix "$NPM_PREFIX" -g @earendil-works/pi-coding-agent' \
+            "$wrapper" &>/dev/null; then
+            pass "pi wrapper native-installs @earendil-works/pi-coding-agent"
+        else
+            fail "pi wrapper native-installs @earendil-works/pi-coding-agent" \
+                'npm install --prefix "$NPM_PREFIX" -g @earendil-works/pi-coding-agent' \
+                "$wrapper"
+        fi
+    }
+    queue_test test_pi_wrapper_native_install_package
+
+    # Guard the agentsview wiring (which the round-6 review caught drifting):
+    # pi must be in AGENTSVIEW_AGENTS with the correct session subdir and TOML
+    # key, so the generated setup-merge script and host config both pick it up.
+    test_agentsview_wires_pi() {
+        local paths="$SCRIPT_DIR/../helpers/agentsview-paths.sh"
+        if [[ ! -r "$paths" ]]; then
+            fail "agentsview wires pi" "readable agentsview-paths.sh" "$paths"
+            return
+        fi
+        # shellcheck source=/dev/null
+        source "$paths"
+        local found=false agent
+        for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            [[ "$agent" == "pi" ]] && found=true
+        done
+        local subdir tomlkey
+        subdir="$(agentsview_field SUBDIR pi)"
+        tomlkey="$(agentsview_field TOMLKEY pi)"
+        if [[ "$found" == "true" && "$subdir" == ".pi/agent/sessions" && "$tomlkey" == "pi_dirs" ]]; then
+            pass "agentsview wires pi"
+        else
+            fail "agentsview wires pi" \
+                "pi in AGENTSVIEW_AGENTS, SUBDIR=.pi/agent/sessions, TOMLKEY=pi_dirs" \
+                "found=$found subdir=$subdir tomlkey=$tomlkey"
+        fi
+    }
+    queue_test test_agentsview_wires_pi
+
+    # Regression guard: the pi wrapper must NOT resolve its own binary via a
+    # PATH search (command -v pi / type -P pi). The wrapper is installed at
+    # ~/bin/pi in the sandbox and $HOME/bin precedes ~/.bun/bin on PATH, so a
+    # PATH search resolves to the wrapper itself and re-execs in an infinite
+    # loop. It must use the explicit ~/.bun/bin/pi path instead. Comment lines
+    # are stripped so the explanatory comment (which mentions command -v pi)
+    # does not false-positive.
+    test_pi_wrapper_no_command_v_loop() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/pi"
+        if [[ ! -x "$wrapper" ]]; then
+            fail "pi wrapper has no command -v loop" "executable wrapper" "$wrapper"
+            return
+        fi
+        local code
+        code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        if echo "$code" | grep -E 'command -v pi\b|type -P pi\b|type -aP pi\b' &>/dev/null; then
+            fail "pi wrapper has no command -v loop" \
+                "no PATH-search fallback for pi" \
+                "wrapper resolves pi via command -v/type -P (would self-resolve and loop)"
+        elif ! echo "$code" | grep -F -- '"$HOME/.bun/bin/pi"' &>/dev/null; then
+            fail "pi wrapper has no command -v loop" \
+                "explicit ~/.bun/bin/pi fallback" \
+                "wrapper missing safe fallback path"
+        else
+            pass "pi wrapper has no command -v loop"
+        fi
+    }
+    queue_test test_pi_wrapper_no_command_v_loop
 
     # Unknown option
     test_unknown_option() {
@@ -497,7 +642,7 @@ EOF
         fi
         local failed=false
         local link
-        for link in claude codex opencode gemini; do
+        for link in claude codex opencode gemini pi; do
             if [[ -L "$brew_prefix/bin/$link" ]]; then
                 local link_perms
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_prefix/bin/$link")
@@ -1357,22 +1502,35 @@ CODEX_TEST_STUB
     }
     queue_test test_agentsview_config_writer_self_test
 
-    # End-to-end: --diff against an empty file produces the expected four-key
-    # TOML, and --write produces a file that re-parses cleanly with the same
-    # tool (round-trip stability).
+    # End-to-end: --write produces a file that re-parses cleanly with the same
+    # tool (round-trip stability), and a second --diff is empty. The --agent
+    # list is built from AGENTSVIEW_AGENTS rather than hardcoded, so every
+    # agent -- present and future -- exercises the Python side. That matters
+    # because a key in VALID_KEYS but missing from DEFAULT_SUBPATHS passes
+    # validation and then raises KeyError inside default_host_path on the write
+    # path: a crash mid-`sv-agentsview-setup`, not a clean error.
     test_agentsview_config_writer_round_trip() {
-        local tmpdir cfg home output status
+        local paths="$SCRIPT_DIR/../helpers/agentsview-paths.sh"
+        if [[ ! -r "$paths" ]]; then
+            fail "agentsview config writer round-trip" "readable agentsview-paths.sh" "$paths"
+            return
+        fi
+        # shellcheck source=/dev/null
+        source "$paths"
+        local tmpdir cfg home output status agent tomlkey
         tmpdir=$(mktemp -d)
         cfg="$tmpdir/config.toml"
         home="$tmpdir/home"
         mkdir -p "$home"
+        local agent_args=()
+        for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            tomlkey="$(agentsview_field TOMLKEY "$agent")"
+            agent_args+=(--agent "$tomlkey=$tmpdir/sessions/$agent")
+        done
         set +e
         /usr/bin/python3 "$AGENTSVIEW_CONFIG_SCRIPT" \
             --config-path "$cfg" --home "$home" --write \
-            --agent claude_project_dirs="$tmpdir/sessions/claude" \
-            --agent codex_sessions_dirs="$tmpdir/sessions/codex" \
-            --agent opencode_dirs="$tmpdir/sessions/opencode" \
-            --agent gemini_dirs="$tmpdir/sessions/gemini" \
+            "${agent_args[@]}" \
             > /dev/null 2>&1
         status=$?
         set -e
@@ -1385,20 +1543,149 @@ CODEX_TEST_STUB
         set +e
         output=$(/usr/bin/python3 "$AGENTSVIEW_CONFIG_SCRIPT" \
             --config-path "$cfg" --home "$home" --diff \
-            --agent claude_project_dirs="$tmpdir/sessions/claude" \
-            --agent codex_sessions_dirs="$tmpdir/sessions/codex" \
-            --agent opencode_dirs="$tmpdir/sessions/opencode" \
-            --agent gemini_dirs="$tmpdir/sessions/gemini" 2>&1)
+            "${agent_args[@]}" 2>&1)
         status=$?
         set -e
         rm -rf "$tmpdir"
         if [[ "$status" -eq 0 && -z "$output" ]]; then
             pass "agentsview config writer round-trip is idempotent"
         else
-            fail "agentsview config writer round-trip is idempotent" "empty diff" "exit $status, output: $output"
+            fail "agentsview config writer round-trip is idempotent" \
+                "empty diff" "exit $status, output: $output"
         fi
     }
     queue_test test_agentsview_config_writer_round_trip
+
+    # The setup-merge generator interpolates SUBDIR values into a quoted list
+    # for the sandbox-side ACL loop. Two silent failure modes: a quoting break
+    # makes the generated script a syntax error, and guest/home/configure runs
+    # it under `set -Eeuo pipefail`, so sandbox startup aborts entirely; and an
+    # agent with an empty SUBDIR yields a `""` element whose loop body resolves
+    # to "$HOME/" and applies an inheriting group-read ACL to the whole sandbox
+    # home, every session. Assert the real SUBDIR values assemble into a list
+    # that parses, and that both guards against the empty case are in place.
+    test_agentsview_setup_merge_generation_is_safe() {
+        local paths="$SCRIPT_DIR/../helpers/agentsview-paths.sh"
+        local setup="$SCRIPT_DIR/../sv-agentsview-setup"
+        if [[ ! -r "$paths" || ! -r "$setup" ]]; then
+            fail "agentsview setup-merge generation is safe" "readable sources" "$paths $setup"
+            return
+        fi
+        # shellcheck source=/dev/null
+        source "$paths"
+        local agent _q _subdir subdir_list="" empty_found=false
+        for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            _subdir="$(agentsview_field SUBDIR "$agent")"
+            [[ -n "$_subdir" ]] || empty_found=true
+            printf -v _q '"%s" ' "$_subdir"
+            subdir_list+="$_q"
+        done
+        # The assembled loop must parse as bash with the real values in it.
+        local probe parses=false
+        probe=$(mktemp)
+        printf 'for subdir in %s; do :; done\n' "$subdir_list" > "$probe"
+        bash -n "$probe" 2>/dev/null && parses=true
+        rm -f "$probe"
+        # Generator aborts on an empty SUBDIR; generated script skips one.
+        local gen_guard=false run_guard=false
+        grep -F -- 'has no SUBDIR"' "$setup" &>/dev/null && gen_guard=true
+        grep -F -- '[[ -n "\$subdir" ]] || continue' "$setup" &>/dev/null && run_guard=true
+        if [[ "$empty_found" == "false" && "$parses" == "true" \
+            && "$gen_guard" == "true" && "$run_guard" == "true" ]]; then
+            pass "agentsview setup-merge generation is safe"
+        else
+            fail "agentsview setup-merge generation is safe" \
+                "no empty SUBDIR, list parses, generator aborts and generated script skips on empty" \
+                "empty=$empty_found parses=$parses gen_guard=$gen_guard run_guard=$run_guard"
+        fi
+    }
+    queue_test test_agentsview_setup_merge_generation_is_safe
+
+    # pi keeps auth.json in ~/.pi/agent, a parent of its session dir. mkdir -p
+    # would create that parent at 0755 under the default umask, and pi's
+    # auth-storage only applies 0700 at creation time -- it never chmods a
+    # directory that already exists, so sandvault pre-creating it leaves the
+    # credential directory group-listable for the life of the sandbox home. The
+    # generated script must tighten it to 0700 with a traverse-only ACE, and
+    # must do so *before* the session-dir loop, since mkdir -p on the session
+    # dir would otherwise create the parent first at the default umask.
+    test_agentsview_private_parent_tightened_first() {
+        local paths="$SCRIPT_DIR/../helpers/agentsview-paths.sh"
+        local setup="$SCRIPT_DIR/../sv-agentsview-setup"
+        if [[ ! -r "$paths" || ! -r "$setup" ]]; then
+            fail "agentsview private parent tightened first" "readable sources" "$paths $setup"
+            return
+        fi
+        # shellcheck source=/dev/null
+        source "$paths"
+        local pi_private subdir
+        pi_private="$(agentsview_field PRIVATE pi || true)"
+        subdir="$(agentsview_field SUBDIR pi || true)"
+        # The declared private dir must actually be a parent of the session dir,
+        # or tightening it protects nothing.
+        if [[ -z "$pi_private" || "$subdir" != "$pi_private/"* ]]; then
+            fail "agentsview private parent tightened first" \
+                "AGENTSVIEW_PRIVATE_pi set and a parent of SUBDIR" \
+                "private=$pi_private subdir=$subdir"
+            return
+        fi
+        local priv_line subdir_line
+        priv_line=$(grep -n 'for private in \$private_list' "$setup" | head -1 | cut -d: -f1 || true)
+        subdir_line=$(grep -n 'for subdir in \$subdir_list' "$setup" | head -1 | cut -d: -f1 || true)
+        if [[ -z "$priv_line" || -z "$subdir_line" ]]; then
+            fail "agentsview private parent tightened first" \
+                "both generated loops present" \
+                "private=$priv_line subdir=$subdir_line"
+            return
+        fi
+        if [[ "$priv_line" -lt "$subdir_line" ]] \
+            && grep -F -- 'chmod 700 "\$priv_full"' "$setup" &>/dev/null \
+            && grep -F -- 'SEARCH_ONLY_RIGHTS="group:$SANDVAULT_GROUP allow search,readattr"' "$setup" &>/dev/null; then
+            pass "agentsview private parent tightened first"
+        else
+            fail "agentsview private parent tightened first" \
+                "private loop before subdir loop, chmod 700 + traverse-only ACE" \
+                "private=$priv_line subdir=$subdir_line"
+        fi
+    }
+    queue_test test_agentsview_private_parent_tightened_first
+
+    # AGENTSVIEW_DEFAULT_* (shell) and DEFAULT_SUBPATHS (Python) hold the same
+    # host-side defaults, but only the Python table is consumed when writing
+    # config.toml. They can drift for pi or any future agent with nothing
+    # catching it, so assert they agree.
+    test_agentsview_default_tables_agree() {
+        local paths="$SCRIPT_DIR/../helpers/agentsview-paths.sh"
+        if [[ ! -r "$paths" ]]; then
+            fail "agentsview default tables agree" "readable agentsview-paths.sh" "$paths"
+            return
+        fi
+        # shellcheck source=/dev/null
+        source "$paths"
+        local agent tomlkey shell_default py_default mismatches=""
+        for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            tomlkey="$(agentsview_field TOMLKEY "$agent" || true)"
+            shell_default="$(agentsview_field DEFAULT "$agent" || true)"
+            # `|| true`: a python failure here must surface as a mismatch the
+            # test reports, not a pipefail abort of the whole suite.
+            py_default=$(/usr/bin/python3 -c '
+import runpy, sys
+mod = runpy.run_path(sys.argv[1])
+print(mod["DEFAULT_SUBPATHS"].get(sys.argv[2], "<missing>"))
+' "$AGENTSVIEW_CONFIG_SCRIPT" "$tomlkey" 2>/dev/null || true)
+            if [[ "$shell_default" != "$py_default" ]]; then
+                mismatches+="$agent($tomlkey): shell=$shell_default py=$py_default "
+            fi
+        done
+        if [[ -z "$mismatches" ]]; then
+            pass "agentsview default tables agree"
+        else
+            fail "agentsview default tables agree" \
+                "AGENTSVIEW_DEFAULT_* == DEFAULT_SUBPATHS for every agent" \
+                "$mismatches"
+        fi
+    }
+    queue_test test_agentsview_default_tables_agree
 
     ###############################################################################
     # Summary

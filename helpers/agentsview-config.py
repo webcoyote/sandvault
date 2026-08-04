@@ -28,6 +28,7 @@ VALID_KEYS = {
     "codex_sessions_dirs",
     "opencode_dirs",
     "gemini_dirs",
+    "pi_dirs",
 }
 
 DEFAULT_SUBPATHS = {
@@ -35,6 +36,7 @@ DEFAULT_SUBPATHS = {
     "codex_sessions_dirs": ".codex/sessions",
     "opencode_dirs": ".local/share/opencode",
     "gemini_dirs": ".gemini",
+    "pi_dirs": ".pi/agent/sessions",
 }
 
 
@@ -118,8 +120,8 @@ def run_self_test() -> None:
 
         all_agents = [(k, f"/mnt/mirror/{k}") for k in VALID_KEYS]
 
-        # Test 1: Missing config file -> creates all four keys [default, mirror]
-        name = "missing config -> all four keys"
+        # Test 1: Missing config file -> creates all keys [default, mirror]
+        name = "missing config -> all keys"
         try:
             cfg = read_config(config_path)
             updated = apply_agents(cfg, all_agents, home)
@@ -142,8 +144,8 @@ def run_self_test() -> None:
         except Exception:
             fail(name, traceback.format_exc())
 
-        # Test 2: Existing file with empty dict -> adds all four keys
-        name = "empty file -> all four keys"
+        # Test 2: Existing file with empty dict -> adds all keys
+        name = "empty file -> all keys"
         try:
             os.makedirs(config_dir, exist_ok=True)
             with open(config_path, "w") as f:
