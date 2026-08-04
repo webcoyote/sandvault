@@ -85,7 +85,7 @@ agentsview_contamination_check() {
 # Install
 ###############################################################################
 
-# Create the four mirror symlinks under $SV_PRIVATE_DIR/sessions/.
+# Create one mirror symlink per agent under $SV_PRIVATE_DIR/sessions/.
 # Idempotent. Logs and continues on individual failures (warn for tolerated
 # skips like a non-symlink at the path; error for unexpected `ln` failures).
 agentsview_install_symlinks() {
@@ -165,12 +165,38 @@ agentsview_update_config() {
 }
 
 # Write the sandbox-side setup-merge script that runs as the sandvault user
-# during session startup. Each session it ensures the four agent session
+# during session startup. Each session it ensures each agent's session
 # subdirs exist with an inheriting read ACL for the sandvault group, so JSONL
 # files are readable by the host user through the mirror symlinks. No-op
 # unless the host has opted in (state file == enabled).
 write_setup_merge_script() {
     mkdir -p "$SV_PRIVATE_DIR/setup"
+    # Build the subdir list from AGENTSVIEW_AGENTS (the single source of truth
+    # in helpers/agentsview-paths.sh) so this generated script picks up new
+    # agents automatically instead of drifting like a hardcoded list would.
+    # Only this generated script tracks the list; the host-side symlink and
+    # TOML key are still written once, at opt-in.
+    local agent _q _subdir _private subdir_list="" private_list=""
+    for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+        _subdir="$(agentsview_field SUBDIR "$agent")"
+        # An agent listed in AGENTSVIEW_AGENTS with no SUBDIR would emit an
+        # empty element here, and the generated loop would then resolve
+        # "$HOME/" and apply an inheriting group-read ACL to the entire sandbox
+        # home on every session. Fail loudly instead.
+        [[ -n "$_subdir" ]] || abort "agentsview: agent '$agent' has no SUBDIR"
+        printf -v _q '"%s" ' "$_subdir"
+        subdir_list+="$_q"
+        # Expand a private path into every component under $HOME: ".pi/agent"
+        # gives ".pi" and ".pi/agent". mkdir -p creates each one at 0755, so
+        # tightening only the last would leave the parent group-listable, and
+        # the sandbox home is group-owned by the sandvault group.
+        _private="$(agentsview_field PRIVATE "$agent")"
+        while [[ -n "$_private" && "$_private" != "." && "$_private" != "/" ]]; do
+            printf -v _q '"%s" ' "$_private"
+            private_list="$_q$private_list"
+            _private="$(dirname "$_private")"
+        done
+    done
     cat > "$SV_PRIVATE_DIR/setup/agentsview-export" << SETUP_EOF
 #!/bin/bash
 set -Eeuo pipefail
@@ -184,7 +210,23 @@ fi
 # without execute.
 DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,readattr,readextattr,readsecurity,search,list,directory_inherit"
 FILE_INHERIT_RIGHTS="group:$SANDVAULT_GROUP allow read,readattr,readextattr,readsecurity,file_inherit,directory_inherit,only_inherit"
-for subdir in "$AGENTSVIEW_SUBDIR_claude" "$AGENTSVIEW_SUBDIR_codex" "$AGENTSVIEW_SUBDIR_opencode" "$AGENTSVIEW_SUBDIR_gemini"; do
+# Traverse-only: no list, no inherit. Lets the host reach a session directory
+# through a credential-bearing parent without being able to enumerate it.
+SEARCH_ONLY_RIGHTS="group:$SANDVAULT_GROUP allow search,readattr"
+# Credential-bearing parents, tightened before the session dirs are created
+# below so mkdir -p can't leave one at 0755. Order matters: mkdir -p on the
+# session dir would otherwise create the parent first, at the default umask.
+for private in $private_list; do
+    [[ -n "\$private" ]] || continue
+    priv_full="\$HOME/\$private"
+    mkdir -p "\$priv_full"
+    /bin/chmod 700 "\$priv_full" 2>/dev/null || true
+    /bin/chmod +a "\$SEARCH_ONLY_RIGHTS" "\$priv_full" 2>/dev/null || true
+done
+for subdir in $subdir_list; do
+    # Belt and braces with the generator's own check: never let an empty
+    # element resolve to \$HOME itself and ACL the whole sandbox home.
+    [[ -n "\$subdir" ]] || continue
     full="\$HOME/\$subdir"
     mkdir -p "\$full"
     /bin/chmod +a "\$DIR_RIGHTS" "\$full" 2>/dev/null || true
@@ -204,6 +246,21 @@ agentsview_setup() {
 
     if [[ -f "$AGENTSVIEW_STATE_FILE" ]]; then
         trace "agentsview: choice already recorded ($(cat "$AGENTSVIEW_STATE_FILE")); skipping prompt"
+        # A user who opted in before sandvault knew about an agent has no mirror
+        # symlink for it, and no scan path in config.toml. The generated ACL
+        # script tracks AGENTSVIEW_AGENTS, but these two steps run once, at
+        # opt-in. Report the gap: silence here looks identical to success.
+        if [[ "$(cat "$AGENTSVIEW_STATE_FILE")" == "enabled" ]]; then
+            local agent missing=""
+            for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+                [[ -e "$SV_PRIVATE_DIR/sessions/$agent" ]] || missing+="$agent "
+            done
+            if [[ -n "$missing" ]]; then
+                info "agentsview: these agents have no mirror: ${missing% }"
+                info "agentsview: to add them, delete $AGENTSVIEW_STATE_FILE."
+                info "agentsview: then run \`sv-agentsview-setup\` again."
+            fi
+        fi
         return 0
     fi
     if [[ ! -t 0 ]]; then
@@ -236,11 +293,12 @@ agentsview_setup() {
     info "This will:"
     info "  - add read-only symlinks under $SV_PRIVATE_DIR/sessions/"
     info "  - apply read-only ACLs to sandbox agent session dirs"
-    info "  - add four scan paths to $AGENTSVIEW_HOST_CONFIG (with diff confirmation)"
+    info "  - add a scan path per agent to $AGENTSVIEW_HOST_CONFIG (with diff confirmation)"
     info "  - rewrite your agentsview config without preserving comments"
     info ""
-    info "Sandvault won't auto-track new agents agentsview adds in future versions"
-    info "(re-run \`sv-agentsview-setup\` after deleting $AGENTSVIEW_STATE_FILE to refresh)."
+    info "Sandvault does not track new agents automatically. This applies to agents"
+    info "that agentsview adds, and to agents that sandvault adds in a later version."
+    info "To refresh, delete $AGENTSVIEW_STATE_FILE and run this command again."
     printf 'Enable agentsview export? [y/N] '
     local reply
     read -r reply
