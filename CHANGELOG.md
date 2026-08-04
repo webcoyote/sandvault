@@ -2,6 +2,16 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.27.0] - 2026-08-04
+
+### Added
+
+- `pi` is now a first-class agent: run it with `sv pi` (or `sv p`), alongside the other supported agents. Installs via Homebrew by default, or from npm with `sv -N pi`, and is covered by `--fix-permissions`. Sessions are exported to agentsview, with pi's credential directory kept private. ([#182](https://github.com/webcoyote/sandvault/pull/182)) — thanks @jesserobbins!
+
+### Thanks to 1 contributor!
+
+- [@jesserobbins](https://github.com/jesserobbins)
+
 ## [1.26.0] - 2026-07-30
 
 ### Fixed
