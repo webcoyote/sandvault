@@ -143,22 +143,25 @@ The default mode for sandvault runs commands as a limited user (basically `sudo 
   cat PROMPT.md | sv gemini
 
 
-# Clone local/remote Git repository into /Users/sandvault-$USER/repositories/<git-repository> and open there
+# Clone local/remote Git repository into /Users/Shared/sv-$USER/repos/<git-repository> and open there
 # Usage:
-#   sv <agent|shell> --clone URL_OR_LOCAL_PATH [-- AGENT_OR_SHELL_ARGS]
+#   sv-clone [OPTIONS] URL_OR_LOCAL_PATH [-- SV_ARGS]
 # Examples:
-  sv codex --clone https://github.com/webcoyote/sandvault.git
-  sv codex -c ~/src/my-app
-  sv shell --clone https://github.com/webcoyote/sandvault.git
-  sv shell -c ../my-app
+  sv-clone https://github.com/webcoyote/sandvault.git -- codex
+  sv-clone ~/src/my-app -- codex
+  sv-clone https://github.com/webcoyote/sandvault.git -- shell
+  sv-clone ../my-app -- shell
+```
 
-Use a full or relative path with a directory name for local clones.
+Use a full or relative path with a directory name for local clones. Everything
+after `--` is passed to `sv`, so `sv-clone ~/src/my-app -- claude -- --model opus`
+clones the repository and starts Claude Code there. Run `sv-clone --help` for the
+full list of options, including `-k`/`-w` to provision a per-repository deploy key.
 
 For local Git repositories, sandvault also wires remotes:
 
-- Your local Git repository gets/updates remote `sandvault` -> `/Users/sandvault-$USER/repositories/<git-repository>`
+- Your local Git repository gets/updates remote `sandvault` -> `/Users/Shared/sv-$USER/repos/<git-repository>`
 - This lets you run `git fetch sandvault` from the original local Git repository to pull commits made in the sandvault Git repository.
-```
 
 
 ## Native Install
@@ -212,7 +215,7 @@ sv --verbose --ssh claude
 Shell quoting is supported, so arguments with spaces work:
 
 ```bash
-export SANDVAULT_ARGS='--clone "my project"'
+export SANDVAULT_ARGS='shell "/Users/me/my project"'
 ```
 
 Explicit command-line arguments are appended after `SANDVAULT_ARGS`, so they are processed afterwards.
