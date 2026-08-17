@@ -161,6 +161,36 @@ For local Git repositories, sandvault also wires remotes:
 ```
 
 
+### One worktree per task
+
+By default every session for a given repository shares one working tree, so
+running two tasks against the same repository means they share a checkout. Pass
+`-t`/`--worktree BRANCH` to give each task its own:
+
+```bash
+# Start a session on a new branch, in a worktree of its own
+  sv-clone -t fix-login https://github.com/webcoyote/sandvault.git -- claude
+
+# Branch from something other than the repository's default branch
+  sv-clone -t hotfix --base origin/release/2.0 ~/src/my-app -- claude
+```
+
+In this mode the repository is stored bare at
+`/Users/Shared/sv-$USER/repos/<git-repository>.git` and each worktree is checked
+out beside it at `/Users/Shared/sv-$USER/worktrees/<git-repository>/<branch>`,
+which is where the session starts. Agents read their configuration — memory
+files, settings, hooks — from the directory they start in and the directories
+above it, so a session started in the worktree reads the branch it is actually
+working on. Nothing is ever checked out at the repository path itself.
+
+Re-running with the same branch reuses that worktree, so an interrupted session
+can simply be relaunched. Worktrees are never deleted automatically; remove one
+with `git -C <repository>.git worktree remove <path>` when the task is done.
+
+This mode is opt-in and uses a separate directory, so repositories cloned
+without `-t` are untouched.
+
+
 ## Native Install
 
 By default, SandVault installs AI tools via Homebrew on the host side. With `--native-install` (`-N`), tools are instead installed inside the sandbox using their own installers:
