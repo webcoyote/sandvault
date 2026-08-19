@@ -2,6 +2,18 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.28.0] - 2026-08-19
+
+### Fixed
+
+- Sandvault now uses a dedicated keychain instead of the macOS-managed login keychain, so the security prompt no longer appears when starting an agent after a reboot on macOS 26.6 and later. Existing Claude Code credentials are migrated automatically; when migration isn't possible, the old keychain is preserved and recovery instructions are provided. Keychain setup failures are also no longer fatal, so a keychain problem can't break the rest of the session. ([#208](https://github.com/webcoyote/sandvault/pull/208)) — thanks @MikeMcQuaid! — thanks @remonh87 for the report!
+
+### Thanks to 3 contributors!
+
+- [@MikeMcQuaid](https://github.com/MikeMcQuaid)
+- [@remonh87](https://github.com/remonh87)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.27.0] - 2026-08-04
 
 ### Added
