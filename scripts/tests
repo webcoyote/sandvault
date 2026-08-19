@@ -474,7 +474,8 @@ EOF
             && -f "$test_home/Library/Keychains/login.keychain-db" \
             && -f "$test_home/migrated" \
             && $(grep -Fc "default-keychain -s $test_home/Library/Keychains/sandvault.keychain-db" "$test_home/security.log") -eq 1 \
-            && $(grep -Fc "list-keychains -s $test_home/Library/Keychains/sandvault.keychain-db /Library/Keychains/System.keychain" "$test_home/security.log") -eq 1 ]]; then
+            && $(grep -Fc "list-keychains -s $test_home/Library/Keychains/sandvault.keychain-db" "$test_home/security.log") -eq 1 \
+            && $(grep -Fc "/Library/Keychains/System.keychain" "$test_home/security.log") -eq 0 ]]; then
             pass "configure uses a dedicated keychain"
         else
             fail "configure uses a dedicated keychain" \
@@ -484,6 +485,58 @@ EOF
         rm -rf "$test_home" "$stub_dir"
     }
     queue_test test_configure_uses_dedicated_keychain
+
+    # configure runs under "set -Eeuo pipefail", so an unguarded security
+    # failure would abort the script before the $HOME rsync and the setup
+    # scripts that follow it. A keychain that cannot be made default must
+    # degrade the session, not break it.
+    test_configure_survives_keychain_setup_failure() {
+        local output status stub_dir test_home
+        test_home="$(mktemp -d)"
+        stub_dir="$(mktemp -d)"
+        mkdir -p "$test_home/Library/Keychains"
+
+        cat > "$stub_dir/security" <<'EOF'
+#!/bin/bash
+case "$1" in
+    create-keychain)
+        touch "$4"
+        ;;
+    default-keychain|list-keychains)
+        exit 1
+        ;;
+    find-generic-password)
+        exit 44
+        ;;
+esac
+exit 0
+EOF
+        cat > "$stub_dir/defaults" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+        chmod +x "$stub_dir/security" "$stub_dir/defaults"
+
+        set +e
+        output=$(HOME="$test_home" \
+            PATH="$stub_dir:/usr/bin:/bin:/usr/sbin:/sbin" \
+            SHARED_WORKSPACE="" \
+            SV_VERBOSE=0 \
+            "$SCRIPT_DIR/../guest/home/configure" 2>&1)
+        status=$?
+        set -e
+        rm -rf "$test_home" "$stub_dir"
+
+        if [[ "$status" -eq 0 \
+            && "$output" == *"Could not set default keychain"* \
+            && "$output" == *"Could not set keychain search list"* ]]; then
+            pass "configure survives keychain setup failure"
+        else
+            fail "configure survives keychain setup failure" \
+                "exit 0 with both warnings" "$status | $output"
+        fi
+    }
+    queue_test test_configure_survives_keychain_setup_failure
 
     test_configure_warns_when_keychain_migration_fails() {
         local output status stub_dir test_home

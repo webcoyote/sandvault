@@ -61,8 +61,18 @@ fi
 debug "Unlocking keychain..."
 security unlock-keychain -p '' "$SANDVAULT_KEYCHAIN" &>/dev/null || true
 security set-keychain-settings "$SANDVAULT_KEYCHAIN"
-security default-keychain -s "$SANDVAULT_KEYCHAIN"
-security list-keychains -s "$SANDVAULT_KEYCHAIN" /Library/Keychains/System.keychain
+# Replace the search list with only the sandvault keychain: "-s" overwrites the
+# list rather than appending, so this evicts login.keychain-db and stops lookups
+# from reaching it (which is what triggers the unlock dialog after a reboot).
+# System.keychain is deliberately omitted because the sandbox profile denies
+# reads under /Library/Keychains.
+#
+# Neither call is fatal: a keychain failure should degrade this session, not
+# abort configure before the $HOME rsync and setup scripts below.
+security default-keychain -s "$SANDVAULT_KEYCHAIN" \
+    || warn "Could not set default keychain to $SANDVAULT_KEYCHAIN"
+security list-keychains -s "$SANDVAULT_KEYCHAIN" \
+    || warn "Could not set keychain search list to $SANDVAULT_KEYCHAIN"
 
 LEGACY_LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 CLAUDE_KEYCHAIN_SERVICE="Claude Code-credentials"
@@ -81,7 +91,8 @@ then
             "$LEGACY_LOGIN_KEYCHAIN" 2>/dev/null) \
         && printf '%s\n%s\n' "$CLAUDE_CREDENTIAL" "$CLAUDE_CREDENTIAL" \
             | security add-generic-password -U \
-                -a "$USER" -s "$CLAUDE_KEYCHAIN_SERVICE" -w &>/dev/null
+                -a "$USER" -s "$CLAUDE_KEYCHAIN_SERVICE" -w \
+                "$SANDVAULT_KEYCHAIN" &>/dev/null
     then
         debug "Migrated Claude Code credentials"
     else
