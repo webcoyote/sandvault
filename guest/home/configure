@@ -49,19 +49,59 @@ abort () {
 # TODO: I guess the sv script could call this configure script directly
 # with the password the first time instead of it being called from .zshrc
 ###############################################################################
-# Explicitly specify the path to avoid confusion with the host user;
-# - security dump-keychain                 => host user
-# - security dump-keychain $LOGIN_KEYCHAIN => sandvault user
-LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
-if [[ ! -f "$LOGIN_KEYCHAIN" ]]; then
+# Use a dedicated keychain because macOS changes the login keychain password
+# to the account password after rebooting.
+SANDVAULT_KEYCHAIN="$HOME/Library/Keychains/sandvault.keychain-db"
+if [[ ! -f "$SANDVAULT_KEYCHAIN" ]]; then
     debug "Creating keychain without password..."
-    security create-keychain -p '' "$LOGIN_KEYCHAIN"
+    security create-keychain -p '' "$SANDVAULT_KEYCHAIN"
 fi
 
 # Unlock the keychain and disable auto-lock to avoid password dialogs
 debug "Unlocking keychain..."
-security unlock-keychain -p '' "$LOGIN_KEYCHAIN" &>/dev/null || true
-security set-keychain-settings "$LOGIN_KEYCHAIN"
+security unlock-keychain -p '' "$SANDVAULT_KEYCHAIN" &>/dev/null || true
+security set-keychain-settings "$SANDVAULT_KEYCHAIN"
+# Replace the search list with only the sandvault keychain: "-s" overwrites the
+# list rather than appending, so this evicts login.keychain-db and stops lookups
+# from reaching it (which is what triggers the unlock dialog after a reboot).
+# System.keychain is deliberately omitted because the sandbox profile denies
+# reads under /Library/Keychains.
+#
+# Neither call is fatal: a keychain failure should degrade this session, not
+# abort configure before the $HOME rsync and setup scripts below.
+security default-keychain -s "$SANDVAULT_KEYCHAIN" \
+    || warn "Could not set default keychain to $SANDVAULT_KEYCHAIN"
+security list-keychains -s "$SANDVAULT_KEYCHAIN" \
+    || warn "Could not set keychain search list to $SANDVAULT_KEYCHAIN"
+
+LEGACY_LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+CLAUDE_KEYCHAIN_SERVICE="Claude Code-credentials"
+if [[ -f "$LEGACY_LOGIN_KEYCHAIN" ]] \
+    && ! security find-generic-password \
+        -a "$USER" -s "$CLAUDE_KEYCHAIN_SERVICE" \
+        "$SANDVAULT_KEYCHAIN" &>/dev/null \
+    && security find-generic-password \
+        -a "$USER" -s "$CLAUDE_KEYCHAIN_SERVICE" \
+        "$LEGACY_LOGIN_KEYCHAIN" &>/dev/null
+then
+    debug "Migrating Claude Code credentials..."
+    if security unlock-keychain -p '' "$LEGACY_LOGIN_KEYCHAIN" &>/dev/null \
+        && CLAUDE_CREDENTIAL=$(security find-generic-password \
+            -a "$USER" -s "$CLAUDE_KEYCHAIN_SERVICE" -w \
+            "$LEGACY_LOGIN_KEYCHAIN" 2>/dev/null) \
+        && printf '%s\n%s\n' "$CLAUDE_CREDENTIAL" "$CLAUDE_CREDENTIAL" \
+            | security add-generic-password -U \
+                -a "$USER" -s "$CLAUDE_KEYCHAIN_SERVICE" -w \
+                "$SANDVAULT_KEYCHAIN" &>/dev/null
+    then
+        debug "Migrated Claude Code credentials"
+    else
+        warn "Could not migrate Claude Code credentials from $LEGACY_LOGIN_KEYCHAIN."
+        warn "Run 'sv claude' and sign in again."
+        warn "Keep the legacy keychain until all affected tools have been reauthenticated."
+    fi
+    unset CLAUDE_CREDENTIAL
+fi
 
 
 ###############################################################################

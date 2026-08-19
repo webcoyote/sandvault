@@ -387,7 +387,7 @@ run_tests() {
         test_home="$(mktemp -d)"
         stub_dir="$(mktemp -d)"
         mkdir -p "$test_home/Library/Keychains"
-        touch "$test_home/Library/Keychains/login.keychain-db"
+        touch "$test_home/Library/Keychains/sandvault.keychain-db"
 
         cat > "$stub_dir/security" <<'EOF'
 #!/bin/bash
@@ -420,6 +420,173 @@ EOF
         fi
     }
     queue_test test_configure_tolerates_already_unlocked_keychain
+
+    test_configure_uses_dedicated_keychain() {
+        local output status stub_dir test_home
+        test_home="$(mktemp -d)"
+        stub_dir="$(mktemp -d)"
+        mkdir -p "$test_home/Library/Keychains"
+        touch "$test_home/Library/Keychains/login.keychain-db"
+
+        cat > "$stub_dir/security" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$SECURITY_LOG"
+case "$1" in
+    create-keychain)
+        touch "$4"
+        ;;
+    find-generic-password)
+        if [[ "$*" == *"sandvault.keychain-db"* ]]; then
+            exit 44
+        elif [[ "$*" == *" -w "* ]]; then
+            printf 'migrated credential'
+        fi
+        ;;
+    add-generic-password)
+        IFS= read -r credential
+        IFS= read -r confirmation
+        if [[ "$credential" == "migrated credential" \
+            && "$confirmation" == "$credential" ]]; then
+            touch "$MIGRATION_MARKER"
+        fi
+        ;;
+esac
+EOF
+        cat > "$stub_dir/defaults" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+        chmod +x "$stub_dir/security" "$stub_dir/defaults"
+
+        set +e
+        output=$(HOME="$test_home" \
+            PATH="$stub_dir:/usr/bin:/bin:/usr/sbin:/sbin" \
+            MIGRATION_MARKER="$test_home/migrated" \
+            SECURITY_LOG="$test_home/security.log" \
+            SHARED_WORKSPACE="" \
+            SV_VERBOSE=0 \
+            "$SCRIPT_DIR/../guest/home/configure" 2>&1)
+        status=$?
+        set -e
+
+        if [[ "$status" -eq 0 \
+            && -f "$test_home/Library/Keychains/sandvault.keychain-db" \
+            && -f "$test_home/Library/Keychains/login.keychain-db" \
+            && -f "$test_home/migrated" \
+            && $(grep -Fc "default-keychain -s $test_home/Library/Keychains/sandvault.keychain-db" "$test_home/security.log") -eq 1 \
+            && $(grep -Fc "list-keychains -s $test_home/Library/Keychains/sandvault.keychain-db" "$test_home/security.log") -eq 1 \
+            && $(grep -Fc "/Library/Keychains/System.keychain" "$test_home/security.log") -eq 0 ]]; then
+            pass "configure uses a dedicated keychain"
+        else
+            fail "configure uses a dedicated keychain" \
+                "dedicated default keychain and search list" \
+                "$status | $output | $(cat "$test_home/security.log" 2>/dev/null || true)"
+        fi
+        rm -rf "$test_home" "$stub_dir"
+    }
+    queue_test test_configure_uses_dedicated_keychain
+
+    # configure runs under "set -Eeuo pipefail", so an unguarded security
+    # failure would abort the script before the $HOME rsync and the setup
+    # scripts that follow it. A keychain that cannot be made default must
+    # degrade the session, not break it.
+    test_configure_survives_keychain_setup_failure() {
+        local output status stub_dir test_home
+        test_home="$(mktemp -d)"
+        stub_dir="$(mktemp -d)"
+        mkdir -p "$test_home/Library/Keychains"
+
+        cat > "$stub_dir/security" <<'EOF'
+#!/bin/bash
+case "$1" in
+    create-keychain)
+        touch "$4"
+        ;;
+    default-keychain|list-keychains)
+        exit 1
+        ;;
+    find-generic-password)
+        exit 44
+        ;;
+esac
+exit 0
+EOF
+        cat > "$stub_dir/defaults" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+        chmod +x "$stub_dir/security" "$stub_dir/defaults"
+
+        set +e
+        output=$(HOME="$test_home" \
+            PATH="$stub_dir:/usr/bin:/bin:/usr/sbin:/sbin" \
+            SHARED_WORKSPACE="" \
+            SV_VERBOSE=0 \
+            "$SCRIPT_DIR/../guest/home/configure" 2>&1)
+        status=$?
+        set -e
+        rm -rf "$test_home" "$stub_dir"
+
+        if [[ "$status" -eq 0 \
+            && "$output" == *"Could not set default keychain"* \
+            && "$output" == *"Could not set keychain search list"* ]]; then
+            pass "configure survives keychain setup failure"
+        else
+            fail "configure survives keychain setup failure" \
+                "exit 0 with both warnings" "$status | $output"
+        fi
+    }
+    queue_test test_configure_survives_keychain_setup_failure
+
+    test_configure_warns_when_keychain_migration_fails() {
+        local output status stub_dir test_home
+        test_home="$(mktemp -d)"
+        stub_dir="$(mktemp -d)"
+        mkdir -p "$test_home/Library/Keychains"
+        touch "$test_home/Library/Keychains/login.keychain-db"
+
+        cat > "$stub_dir/security" <<'EOF'
+#!/bin/bash
+case "$1" in
+    create-keychain)
+        touch "$4"
+        ;;
+    find-generic-password)
+        [[ "$*" != *"sandvault.keychain-db"* ]] || exit 44
+        ;;
+    unlock-keychain)
+        [[ "$*" != *"login.keychain-db"* ]] || exit 51
+        ;;
+esac
+exit 0
+EOF
+        cat > "$stub_dir/defaults" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+        chmod +x "$stub_dir/security" "$stub_dir/defaults"
+
+        set +e
+        output=$(HOME="$test_home" \
+            PATH="$stub_dir:/usr/bin:/bin:/usr/sbin:/sbin" \
+            SHARED_WORKSPACE="" \
+            SV_VERBOSE=0 \
+            "$SCRIPT_DIR/../guest/home/configure" 2>&1)
+        status=$?
+        set -e
+        rm -rf "$test_home" "$stub_dir"
+
+        if [[ "$status" -eq 0 \
+            && "$output" == *"Could not migrate Claude Code credentials"* \
+            && "$output" == *"Run 'sv claude' and sign in again"* \
+            && "$output" == *"Keep the legacy keychain until all affected tools have been reauthenticated"* ]]; then
+            pass "configure warns when keychain migration fails"
+        else
+            fail "configure warns when keychain migration fails" \
+                "manual reauthentication and preservation steps" "$status | $output"
+        fi
+    }
+    queue_test test_configure_warns_when_keychain_migration_fails
 
     # Mirror the opencode test for pi: assert the wrapper wires the
     # project-trust flag (--approve, which skips pi's interactive trust prompt;
