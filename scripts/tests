@@ -2021,12 +2021,20 @@ print(mod["DEFAULT_SUBPATHS"].get(sys.argv[2], "<missing>"))
         grep -q '^claude_project_dirs = "/some/scalar/path"$' "$cfg" \
             || results+="scalar-rewritten "
 
+        # error: malformed TOML -> 3, not 1 (so a non-interactive run never
+        # mistakes a parse failure for a pending change and swallows it).
+        printf 'bad = = = invalid toml\n' > "$cfg"
+        set +e; /usr/bin/python3 "$AGENTSVIEW_CONFIG_SCRIPT" \
+            --config-path "$cfg" --home "$home" --check \
+            --agent claude_project_dirs="$mirror" >/dev/null 2>&1; st=$?; set -e
+        [[ "$st" -eq 3 ]] || results+="malformed:$st "
+
         rm -rf "$tmpdir"
         if [[ -z "$results" ]]; then
             pass "agentsview-config.py --check exits 0/1/3 correctly"
         else
             fail "agentsview-config.py --check exits 0/1/3 correctly" \
-                "clean=0 pending=1 scalar=3 untouched" "$results"
+                "clean=0 pending=1 scalar=3 malformed=3 untouched" "$results"
         fi
     }
     queue_test test_agentsview_config_check_mode
@@ -2062,6 +2070,32 @@ print(mod["DEFAULT_SUBPATHS"].get(sys.argv[2], "<missing>"))
         fi
     }
     queue_test test_agentsview_resync_wiring
+
+    # The standalone integration test sources the real sv-agentsview-setup
+    # functions and drives the real python writer through the re-sync +
+    # decline flow end to end (no-op, check->write->check idempotence, decline
+    # de-dup + skip, scalar clean error, partial-decline filter). It isolates
+    # itself with a throwaway USER/HOME under /Users/Shared and cleans up, so it
+    # is safe to run from inside the suite. Wire it in so the real resync path
+    # is covered in CI, not just the structural greps above.
+    test_agentsview_resync_integration() {
+        local t="$SCRIPT_DIR/test-agentsview-resync.sh"
+        if [[ ! -x "$t" ]]; then
+            fail "agentsview resync integration" "executable $t" "$t"
+            return
+        fi
+        local out status
+        set +e
+        out=$("$t" 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -eq 0 ]]; then
+            pass "agentsview resync integration"
+        else
+            fail "agentsview resync integration" "exit 0" "exit $status: $out"
+        fi
+    }
+    queue_test test_agentsview_resync_integration
 
     ###############################################################################
     # Summary

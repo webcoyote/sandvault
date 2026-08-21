@@ -156,7 +156,6 @@ agentsview_resync_config() {
     local declined agent tomlkey link
     declined="$(agentsview_declined_keys)"
     local agent_args=()
-    local pending_keys=()
     for agent in "${AGENTSVIEW_AGENTS[@]}"; do
         tomlkey="$(agentsview_field TOMLKEY "$agent")"
         if printf '%s\n' "$declined" | grep -Fxq -- "$tomlkey"; then
@@ -165,43 +164,67 @@ agentsview_resync_config() {
         fi
         link="$SV_PRIVATE_DIR/sessions/$agent"
         agent_args+=(--agent "$tomlkey=$link")
-        pending_keys+=("$tomlkey")
     done
 
-    if [[ ${#pending_keys[@]} -eq 0 ]]; then
+    if [[ ${#agent_args[@]} -eq 0 ]]; then
         debug "agentsview: every agent declined; nothing to resync"
         return 0
     fi
 
-    # --check compares parsed values: 0 = clean, 1 = a mirror path is missing,
-    # 3 = config error (e.g. a scalar where an array belongs).
-    local check_out check_status
-    set +e
-    check_out="$(/usr/bin/python3 "$script" \
+    # --check compares parsed values: 0 = clean, 1 = a mirror path is missing
+    # (it prints the missing keys, one per line), 3 = config error. Run it in a
+    # conditional context (`if !`) so the expected exit 1 does not trip the
+    # script's ERR trap (set +e wouldn't suppress the trap, only errexit), and
+    # does not leak errexit state into the caller.
+    local check_out missing_keys=()
+    if ! check_out="$(/usr/bin/python3 "$script" \
         --config-path "$AGENTSVIEW_HOST_CONFIG" \
         --home "$HOME" \
         --check \
-        "${agent_args[@]}" 2>&1)"
-    check_status=$?
-    set -e
-    if [[ "$check_status" -eq 3 ]]; then
-        error "agentsview: cannot update $AGENTSVIEW_HOST_CONFIG:"
-        error "$check_out"
-        return 1
-    fi
-    if [[ "$check_status" -ne 1 ]]; then
-        if [[ "$check_status" -ne 0 ]]; then
-            error "agentsview: --check failed (exit $check_status): $check_out"
+        "${agent_args[@]}" 2>&1)"; then
+        # Non-zero. exit 1 = pending (check_out lists the missing keys);
+        # anything else (3 = config error, or an uncaught failure now mapped to
+        # 3 inside the script) is a hard error, not a pending change.
+        if [[ "$?" -ne 1 ]]; then
+            error "agentsview: cannot update $AGENTSVIEW_HOST_CONFIG:"
+            error "$check_out"
             return 1
         fi
+    else
+        # exit 0: nothing missing.
         debug "agentsview: $AGENTSVIEW_HOST_CONFIG already up to date"
         return 0
     fi
 
+    # check_out holds exactly the missing keys (one per line). Record only
+    # those on decline, not every non-declined agent -- declining a single new
+    # agent must not pollute the decline list with agents that were already
+    # present.
+    local key
+    while IFS= read -r key; do
+        [[ -n "$key" ]] && missing_keys+=("$key")
+    done <<< "$check_out"
+    if [[ ${#missing_keys[@]} -eq 0 ]]; then
+        debug "agentsview: $AGENTSVIEW_HOST_CONFIG already up to date"
+        return 0
+    fi
+
+    # Build --agent args for only the missing keys, so the diff and write are
+    # scoped to what's actually changing.
+    local missing_args=() mk
+    for mk in "${missing_keys[@]}"; do
+        for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            if [[ "$(agentsview_field TOMLKEY "$agent")" == "$mk" ]]; then
+                missing_args+=(--agent "$mk=$SV_PRIVATE_DIR/sessions/$agent")
+                break
+            fi
+        done
+    done
+
     # Pending changes. Non-interactive: don't write, don't hang on read, and
     # don't record a decline (the user never saw the prompt).
     if [[ ! -t 0 ]]; then
-        trace "agentsview: config changes pending but non-interactive; skipping"
+        trace "agentsview: config changes pending (${missing_keys[*]}) but non-interactive; skipping"
         return 0
     fi
 
@@ -210,7 +233,7 @@ agentsview_resync_config() {
         --config-path "$AGENTSVIEW_HOST_CONFIG" \
         --home "$HOME" \
         --diff \
-        "${agent_args[@]}" 2>&1)"; then
+        "${missing_args[@]}" 2>&1)"; then
         error "agentsview: failed to compute config diff:"
         error "$diff_out"
         return 1
@@ -229,8 +252,8 @@ agentsview_resync_config() {
     local reply
     read -r reply
     if [[ "$reply" != "y" && "$reply" != "Y" ]]; then
-        info "agentsview: declined; recording ${pending_keys[*]} as permanently skipped"
-        agentsview_record_decline "${pending_keys[@]}"
+        info "agentsview: declined; recording ${missing_keys[*]} as permanently skipped"
+        agentsview_record_decline "${missing_keys[@]}"
         return 0
     fi
 
@@ -238,7 +261,7 @@ agentsview_resync_config() {
         --config-path "$AGENTSVIEW_HOST_CONFIG" \
         --home "$HOME" \
         --write \
-        "${agent_args[@]}"; then
+        "${missing_args[@]}"; then
         error "agentsview: failed to write $AGENTSVIEW_HOST_CONFIG"
         return 1
     fi

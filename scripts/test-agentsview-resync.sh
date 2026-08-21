@@ -144,5 +144,45 @@ st=$(status_of /usr/bin/python3 "$PY" --config-path "$CFG" --home "$HOME" --chec
 pass "resync: declined pi is filtered out (no false pending)"
 set +e
 
+###############################################################################
+# Test 6: decline records ONLY the actually-missing key, not every
+# non-declined agent. 4 agents present + pi missing; assert --check reports
+# only pi_dirs, and recording exactly that set leaves the others out. The
+# decline-at-prompt path itself is tty-only (the ! -t 0 guard skips
+# non-interactive), so this tests the logic resync uses on decline: parse
+# --check's missing-key output and record only those.
+###############################################################################
+cat > "$CFG" <<EOF
+claude_project_dirs = ["$HOME/.claude/projects", "$SV_PRIVATE_DIR/sessions/claude"]
+codex_sessions_dirs = ["$HOME/.codex/sessions", "$SV_PRIVATE_DIR/sessions/codex"]
+opencode_dirs = ["$HOME/.local/share/opencode", "$SV_PRIVATE_DIR/sessions/opencode"]
+gemini_dirs = ["$HOME/.gemini", "$SV_PRIVATE_DIR/sessions/gemini"]
+pi_dirs = ["$HOME/.pi/agent/sessions"]
+EOF
+rm -f "$DECLINED"
+missing_out=$(/usr/bin/python3 "$PY" --config-path "$CFG" --home "$HOME" --check \
+    --agent claude_project_dirs="$SV_PRIVATE_DIR/sessions/claude" \
+    --agent codex_sessions_dirs="$SV_PRIVATE_DIR/sessions/codex" \
+    --agent opencode_dirs="$SV_PRIVATE_DIR/sessions/opencode" \
+    --agent gemini_dirs="$SV_PRIVATE_DIR/sessions/gemini" \
+    --agent pi_dirs="$SV_PRIVATE_DIR/sessions/pi" 2>/dev/null || true)
+trimmed=$(printf '%s\n' "$missing_out" | sed '/^$/d')
+[[ "$trimmed" == "pi_dirs" ]] \
+    || fail "--check should report only pi_dirs missing, got: '$trimmed'"
+while IFS= read -r mk; do
+    [[ -n "$mk" ]] && agentsview_record_decline "$mk"
+done <<< "$missing_out"
+count=$(agentsview_declined_keys | grep -c .)
+[[ "$count" -eq 1 ]] || fail "decline list should have 1 key (pi_dirs), got $count"
+agentsview_declined_keys | grep -Fxq -- pi_dirs \
+    || fail "decline list should contain pi_dirs"
+for other in claude_project_dirs codex_sessions_dirs opencode_dirs gemini_dirs; do
+    if agentsview_declined_keys | grep -Fxq -- "$other"; then
+        fail "decline list should NOT contain $other (M1 over-record regression)"
+    fi
+done
+pass "resync: decline records only the missing key (not all agents)"
+set +e
+
 echo
 echo "All integration tests passed."
