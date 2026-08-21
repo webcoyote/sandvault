@@ -265,6 +265,8 @@ Explicit command-line arguments are appended after `SANDVAULT_ARGS`, so they are
 sv-agentsview-setup
 ```
 
+You're prompted once, on first run. After that, `sv-agentsview-setup` re-syncs on every run: it installs the mirror symlinks and adds any scan paths that are missing to `~/.agentsview/config.toml`. New agents sandvault adds in a later version show up automatically the next time you run it. When it adds a new scan path it shows a diff and asks for confirmation; decline and that agent is skipped permanently (remove its key from `~sandvault/setup/agentsview-declined.keys` to re-enable).
+
 Then run `agentsview serve` and you'll see your sandvault AI sessions included in the `agentsview` dashboard.
 
 
