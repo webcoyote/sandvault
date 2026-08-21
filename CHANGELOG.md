@@ -6,7 +6,7 @@ All notable user-facing changes to SandVault are documented in this file.
 
 ### Fixed
 
-- `sv-agentsview-setup` now re-syncs the agentsview export on every run instead of prompting once and never again. Agents added after you opted in (like `pi`, and any future agent) now get their mirror symlink and scan path automatically on the next run, instead of staying invisible until you deleted the state file and re-ran the whole opt-in. When a new scan path is needed it still shows a diff and asks for confirmation; declining skips that agent permanently, and a hand-edited `config.toml` no longer re-prompts forever because the diff is now compared on parsed values, not rendered text. A scalar value for a managed key (e.g. `claude_project_dirs = "/path"`) is now rejected with a clear error instead of being silently character-split into single characters. ([#194](https://github.com/webcoyote/sandvault/issues/194))
+- `sv-agentsview-setup` re-syncs the agentsview export on every run. Before, it prompted once and never again. Agents added after you opted in (for example `pi`) now get their mirror symlink and scan path on the next run. Before, they stayed invisible until you deleted the state file and ran the opt-in again. A new scan path still shows a diff and asks for confirmation. If you decline, that agent is skipped permanently. A hand-edited `config.toml` no longer re-prompts on every run, because the diff is compared on parsed values, not rendered text. A scalar value for a managed key (for example `claude_project_dirs = "/path"`) is now rejected with a clear error. Before, the value was character-split into single characters. ([#194](https://github.com/webcoyote/sandvault/issues/194))
 
 ## [1.28.0] - 2026-08-19
 
