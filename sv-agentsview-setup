@@ -156,7 +156,12 @@ agentsview_record_decline() {
 # doesn't re-prompt forever. On decline, records the pending keys permanently
 # so the next run skips them. Returns 0 on success/no-op, 1 on failure.
 agentsview_resync_config() {
-    local script="$WORKSPACE/helpers/agentsview-config.py"
+    # $AGENTSVIEW_CONFIG_SCRIPT overrides the helper path (defaults to the
+    # installed script). The override is a test seam -- it lets the integration
+    # suite point resync at a stub to exercise error paths the real writer
+    # cannot produce -- and is safe because this is an unprivileged,
+    # user-invoked setup script.
+    local script="${AGENTSVIEW_CONFIG_SCRIPT:-$WORKSPACE/helpers/agentsview-config.py}"
     if [[ ! -f "$script" ]]; then
         trace "agentsview: helpers/agentsview-config.py not installed; skipping config resync"
         return 0
@@ -196,7 +201,7 @@ agentsview_resync_config() {
     # set -E propagates it into the subshell where it fires independently of
     # the outer conditional context.
     local check_out check_err check_status missing_keys=()
-    check_err=$(mktemp) || { error "agentsview: cannot create temp file for config check"; return 1; }
+    check_err=$( trap - ERR; mktemp ) || { error "agentsview: cannot create temp file for config check"; return 1; }
     check_out="$( trap - ERR; /usr/bin/python3 "$script" \
         --config-path "$AGENTSVIEW_HOST_CONFIG" \
         --home "$HOME" \
@@ -205,6 +210,9 @@ agentsview_resync_config() {
     # exit 0 = nothing missing; exit 1 = pending (stdout lists the missing
     # keys); anything else (3 = config error, or an uncaught failure now
     # mapped to 3 inside the script) is a hard error, not a pending change.
+    # check_err is freed only once we no longer need the stderr text: the
+    # pending branch may still need it for the empty-keys protocol-violation
+    # error below, so it is NOT rm'd in the case 1) arm.
     case "$check_status" in
         0)
             rm -f "$check_err"
@@ -212,8 +220,8 @@ agentsview_resync_config() {
             return 0
             ;;
         1)
-            rm -f "$check_err"
-            ;;  # pending -- fall through
+            ;;  # pending -- fall through (check_err kept for the empty-keys
+              #      error if --check produced no keys)
         *)
             error "agentsview: cannot update $AGENTSVIEW_HOST_CONFIG:"
             error "$(cat "$check_err" 2>/dev/null)"
@@ -233,13 +241,15 @@ agentsview_resync_config() {
     if [[ ${#missing_keys[@]} -eq 0 ]]; then
         # We only reach here on check_status==1 (the 0 case returned above). An
         # exit 1 with no keys is a protocol violation -- e.g. an import-time
-        # error in the vendored tomli shim exiting 1 with empty stdout -- not a
-        # clean config. Don't silently treat it as up to date (the message
-        # would be byte-identical to the genuine clean case and hide the
-        # failure).
+        # error in the vendored tomli shim exiting 1 with empty stdout and a
+        # traceback on stderr -- not a clean config. Surface the stderr so the
+        # user can diagnose it; do not silently treat it as up to date.
         error "agentsview: --check reported pending but listed no keys; cannot update $AGENTSVIEW_HOST_CONFIG"
+        error "$(cat "$check_err" 2>/dev/null)"
+        rm -f "$check_err"
         return 1
     fi
+    rm -f "$check_err"
 
     # Build --agent args for only the missing keys, so the diff and write are
     # scoped to what's actually changing.
@@ -264,7 +274,7 @@ agentsview_resync_config() {
     # stderr (errors) separately so a stderr line is never rendered as if it
     # were part of the proposed config diff above the prompt.
     local diff_out diff_err
-    diff_err=$(mktemp) || { error "agentsview: cannot create temp file for config diff"; return 1; }
+    diff_err=$( trap - ERR; mktemp ) || { error "agentsview: cannot create temp file for config diff"; return 1; }
     if ! diff_out="$( trap - ERR; /usr/bin/python3 "$script" \
         --config-path "$AGENTSVIEW_HOST_CONFIG" \
         --home "$HOME" \
