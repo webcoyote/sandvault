@@ -208,9 +208,9 @@ pi_dirs = ["$HOME/.pi/agent/sessions"]
 EOF
 rm -f "$DECLINED"
 before=$(cat "$CFG")
-log=$(SV_VERBOSE=2 agentsview_resync_config </dev/null 2>&1) || st=$?
-[[ "${st:-0}" -eq 0 ]] \
-    || fail "pending+non-interactive should skip (exit 0), got exit ${st:-0}"
+st=0; log=$(SV_VERBOSE=2 agentsview_resync_config </dev/null 2>&1) || st=$?
+[[ "$st" -eq 0 ]] \
+    || fail "pending+non-interactive should skip (exit 0), got exit $st"
 # The skip guard's trace must name pi_dirs -- proves --check reported it
 # missing AND the pending branch ran (not all-up-to-date, not missing-script).
 [[ "$log" == *"config changes pending"*"pi_dirs"*"non-interactive; skipping"* ]] \
@@ -221,6 +221,37 @@ log=$(SV_VERBOSE=2 agentsview_resync_config </dev/null 2>&1) || st=$?
 [[ ! -e "$DECLINED" ]] \
     || fail "pending+non-interactive should not record a decline (file exists)"
 pass "resync: pending+non-interactive reaches skip guard (observed via trace)"
+set +e
+
+###############################################################################
+# Test 8: --check exit 1 with empty stdout (a protocol violation, e.g. an
+# import-time error in the vendored shim) is a hard error that surfaces the
+# stderr diagnostic -- not silent success, and not a generic message that
+# hides the cause. Uses the AGENTSVIEW_CONFIG_SCRIPT seam to point resync at a
+# stub that exits 1 with empty stdout and a known stderr line.
+###############################################################################
+cat > "$CFG" <<EOF
+claude_project_dirs = ["$HOME/.claude/projects", "$SV_PRIVATE_DIR/sessions/claude"]
+EOF
+rm -f "$DECLINED"
+stub="$TMP_HOME/stub.py"
+cat > "$stub" <<'PY'
+import sys
+sys.stderr.write("boom: import-time traceback marker\n")
+sys.exit(1)  # exit 1, no stdout keys
+PY
+before=$(cat "$CFG")
+st=0; out=$(AGENTSVIEW_CONFIG_SCRIPT="$stub" agentsview_resync_config </dev/null 2>&1) || st=$?
+[[ "$st" -eq 1 ]] \
+    || fail "empty-keys protocol violation should return 1, got $st"
+[[ "$out" == *"reported pending but listed no keys"* ]] \
+    || fail "empty-keys error message missing; got: $out"
+[[ "$out" == *"boom: import-time traceback marker"* ]] \
+    || fail "empty-keys error should surface the stderr diagnostic; got: $out"
+# And it did not silently write or decline.
+[[ "$(cat "$CFG")" == "$before" ]] || fail "empty-keys error should not write"
+[[ ! -e "$DECLINED" ]] || fail "empty-keys error should not record a decline"
+pass "resync: empty-keys protocol violation errors with the stderr diagnostic"
 set +e
 
 echo
