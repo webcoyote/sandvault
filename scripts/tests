@@ -1854,6 +1854,89 @@ print(mod["DEFAULT_SUBPATHS"].get(sys.argv[2], "<missing>"))
     }
     queue_test test_agentsview_default_tables_agree
 
+    # The config writer's --check mode compares parsed values, not rendered
+    # text, so a hand-edited config.toml (comments, formatting drift) doesn't
+    # produce a perpetual non-empty diff that would re-prompt on every run.
+    # Exit 0 = clean, 1 = a mirror path is missing, 3 = config error (e.g. a
+    # scalar where an array belongs, which list() would char-split).
+    test_agentsview_config_check_mode() {
+        local tmpdir cfg home st out
+        tmpdir=$(mktemp -d)
+        cfg="$tmpdir/config.toml"
+        home="$tmpdir/home"
+        mkdir -p "$home/.claude/projects"
+        local mirror="$tmpdir/sessions/claude"
+        local default="$home/.claude/projects"
+        local results=""
+
+        # clean: mirror already present -> 0
+        printf 'claude_project_dirs = ["%s", "%s"]\n' "$default" "$mirror" > "$cfg"
+        set +e; /usr/bin/python3 "$AGENTSVIEW_CONFIG_SCRIPT" \
+            --config-path "$cfg" --home "$home" --check \
+            --agent claude_project_dirs="$mirror" >/dev/null 2>&1; st=$?; set -e
+        [[ "$st" -eq 0 ]] || results+="clean:$st "
+
+        # pending: mirror missing -> 1
+        printf 'claude_project_dirs = ["%s"]\n' "$default" > "$cfg"
+        set +e; /usr/bin/python3 "$AGENTSVIEW_CONFIG_SCRIPT" \
+            --config-path "$cfg" --home "$home" --check \
+            --agent claude_project_dirs="$mirror" >/dev/null 2>&1; st=$?; set -e
+        [[ "$st" -eq 1 ]] || results+="pending:$st "
+
+        # error: scalar value -> 3 (not char-split on write)
+        printf 'claude_project_dirs = "/some/scalar/path"\n' > "$cfg"
+        set +e; out=$(/usr/bin/python3 "$AGENTSVIEW_CONFIG_SCRIPT" \
+            --config-path "$cfg" --home "$home" --check \
+            --agent claude_project_dirs="$mirror" 2>&1); st=$?; set -e
+        [[ "$st" -eq 3 ]] || results+="scalar:$st "
+        # Clean error message, not a silent char-split.
+        [[ "$out" == *"must be an array of paths"* ]] || results+="scalar-msg "
+        # And the scalar file must be left untouched (no char-split rewrite).
+        grep -q '^claude_project_dirs = "/some/scalar/path"$' "$cfg" \
+            || results+="scalar-rewritten "
+
+        rm -rf "$tmpdir"
+        if [[ -z "$results" ]]; then
+            pass "agentsview-config.py --check exits 0/1/3 correctly"
+        else
+            fail "agentsview-config.py --check exits 0/1/3 correctly" \
+                "clean=0 pending=1 scalar=3 untouched" "$results"
+        fi
+    }
+    queue_test test_agentsview_config_check_mode
+
+    # Structural: sv-agentsview-setup re-syncs on every run (not prompt-once),
+    # and the per-key decline list is the permanent-skip mechanism. Assert the
+    # new wiring is present and the old prompt-once flow is gone, the way the
+    # other setup-merge structural tests do.
+    test_agentsview_resync_wiring() {
+        local setup="$SCRIPT_DIR/../sv-agentsview-setup"
+        if [[ ! -r "$setup" ]]; then
+            fail "agentsview resync wiring" "readable sv-agentsview-setup" "$setup"
+            return
+        fi
+        local missing=""
+        grep -Fq -- 'agentsview_resync_config()' "$setup" || missing+="resync-fn "
+        grep -Fq -- 'agentsview_first_run_prompt()' "$setup" || missing+="first-run-fn "
+        grep -Fq -- 'agentsview_record_decline()' "$setup" || missing+="record-decline-fn "
+        grep -Fq -- 'AGENTSVIEW_DECLINED_FILE' "$setup" || missing+="declined-var "
+        grep -Fq -- '--check' "$setup" || missing+="check-arg "
+        # old prompt-once flow must be gone
+        if grep -Fq -- 'agentsview_update_config()' "$setup"; then
+            missing+="old-update-fn-present "
+        fi
+        # re-sync must run when enabled (not only at opt-in)
+        grep -Fq -- 'agentsview_install_symlinks' "$setup" || missing+="install-symlinks "
+        if [[ -z "$missing" ]]; then
+            pass "agentsview resync wiring present, prompt-once gone"
+        else
+            fail "agentsview resync wiring present, prompt-once gone" \
+                "resync fn + first-run + decline + --check, no old update" \
+                "$missing"
+        fi
+    }
+    queue_test test_agentsview_resync_wiring
+
     ###############################################################################
     # Summary
     ###############################################################################
