@@ -186,21 +186,18 @@ set +e
 
 ###############################################################################
 # Test 7: agentsview_resync_config with a missing mirror, non-interactive,
-# reaches the non-interactive skip guard and returns 0 -- NOT the error path.
-# This is the regression codex caught in iter 2: an `if ! cmd` / `if cmd; fi`
-# capture bug treated the expected pending exit 1 as a hard error (return 1),
-# so resync never reached the prompt. Non-interactive is the only way to
-# exercise the post-check path without a tty (interactive prompt needs a
-# real tty).
+# reaches the non-interactive skip guard -- NOT some other exit-0 path.
+# This is the regression codex caught in iter 2 (capture bug returned 1) and
+# the one codex+claude-code re-raised in iter 3: "exit 0 + no-write +
+# no-decline" is true for every exit-0 path (all-up-to-date, all-declined,
+# missing-script, skip-guard), so it doesn't prove the pending branch ran.
 #
-# exit 0 alone is not enough -- four paths return 0 (all-up-to-date,
-# all-declined, missing-script, non-interactive skip). Distinguish the pending
-# path by setting up a genuinely-missing mirror and asserting the two
-# behaviors the skip guard promises for it: do NOT write the config (the
-# missing mirror is still missing) and do NOT record a decline (no declined
-# file). The all-up-to-date path would have no missing mirror; a bug that
-# writes anyway fails the no-write check; a bug that records anyway fails the
-# no-decline check.
+# Observe the branch directly: run with SV_VERBOSE=2 (enables `trace`) and
+# capture stderr, then assert the skip guard's trace message names the
+# missing key. Only the pending-skip path emits "config changes pending ... 
+# non-interactive; skipping" with the key in it. A bug where --check reports
+# clean (no keys) reaches a different branch; a missing script returns early
+# with a different trace; the all-up-to-date path has no missing mirror.
 ###############################################################################
 cat > "$CFG" <<EOF
 claude_project_dirs = ["$HOME/.claude/projects", "$SV_PRIVATE_DIR/sessions/claude"]
@@ -210,18 +207,20 @@ gemini_dirs = ["$HOME/.gemini", "$SV_PRIVATE_DIR/sessions/gemini"]
 pi_dirs = ["$HOME/.pi/agent/sessions"]
 EOF
 rm -f "$DECLINED"
-# Snapshot the config so we can prove it was not rewritten.
 before=$(cat "$CFG")
-st=0; agentsview_resync_config </dev/null || st=$?
-[[ "$st" -eq 0 ]] \
-    || fail "pending+non-interactive should skip (exit 0), got exit $st (pending treated as hard error)"
-# Pending path reached: config untouched (no write) ...
+log=$(SV_VERBOSE=2 agentsview_resync_config </dev/null 2>&1) || st=$?
+[[ "${st:-0}" -eq 0 ]] \
+    || fail "pending+non-interactive should skip (exit 0), got exit ${st:-0}"
+# The skip guard's trace must name pi_dirs -- proves --check reported it
+# missing AND the pending branch ran (not all-up-to-date, not missing-script).
+[[ "$log" == *"config changes pending"*"pi_dirs"*"non-interactive; skipping"* ]] \
+    || fail "pending-skip trace not found; got: $log"
+# ... and it did not write or decline.
 [[ "$(cat "$CFG")" == "$before" ]] \
     || fail "pending+non-interactive should not write the config"
-# ... and no decline recorded.
 [[ ! -e "$DECLINED" ]] \
     || fail "pending+non-interactive should not record a decline (file exists)"
-pass "resync: pending+non-interactive reaches skip guard (no write, no decline, exit 0)"
+pass "resync: pending+non-interactive reaches skip guard (observed via trace)"
 set +e
 
 echo
