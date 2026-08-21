@@ -196,7 +196,7 @@ agentsview_resync_config() {
     # set -E propagates it into the subshell where it fires independently of
     # the outer conditional context.
     local check_out check_err check_status missing_keys=()
-    check_err=$(mktemp)
+    check_err=$(mktemp) || { error "agentsview: cannot create temp file for config check"; return 1; }
     check_out="$( trap - ERR; /usr/bin/python3 "$script" \
         --config-path "$AGENTSVIEW_HOST_CONFIG" \
         --home "$HOME" \
@@ -231,8 +231,14 @@ agentsview_resync_config() {
         [[ -n "$key" ]] && missing_keys+=("$key")
     done <<< "$check_out"
     if [[ ${#missing_keys[@]} -eq 0 ]]; then
-        debug "agentsview: $AGENTSVIEW_HOST_CONFIG already up to date"
-        return 0
+        # We only reach here on check_status==1 (the 0 case returned above). An
+        # exit 1 with no keys is a protocol violation -- e.g. an import-time
+        # error in the vendored tomli shim exiting 1 with empty stdout -- not a
+        # clean config. Don't silently treat it as up to date (the message
+        # would be byte-identical to the genuine clean case and hide the
+        # failure).
+        error "agentsview: --check reported pending but listed no keys; cannot update $AGENTSVIEW_HOST_CONFIG"
+        return 1
     fi
 
     # Build --agent args for only the missing keys, so the diff and write are
@@ -254,16 +260,22 @@ agentsview_resync_config() {
         return 0
     fi
 
-    local diff_out
+    # Show the diff for only the missing keys. Capture stdout (the diff) and
+    # stderr (errors) separately so a stderr line is never rendered as if it
+    # were part of the proposed config diff above the prompt.
+    local diff_out diff_err
+    diff_err=$(mktemp) || { error "agentsview: cannot create temp file for config diff"; return 1; }
     if ! diff_out="$( trap - ERR; /usr/bin/python3 "$script" \
         --config-path "$AGENTSVIEW_HOST_CONFIG" \
         --home "$HOME" \
         --diff \
-        "${missing_args[@]}" 2>&1)"; then
+        "${missing_args[@]}" 2>"$diff_err" )"; then
         error "agentsview: failed to compute config diff:"
-        error "$diff_out"
+        error "$(cat "$diff_err" 2>/dev/null)"
+        rm -f "$diff_err"
         return 1
     fi
+    rm -f "$diff_err"
 
     info ""
     info "Sandvault added new agents since you last synced. Proposed changes to"
