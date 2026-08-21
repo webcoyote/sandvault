@@ -17,11 +17,17 @@ from tomli_w import dumps
 try:
     import tomllib  # Python 3.11+
 except ModuleNotFoundError:
-    from tomli import load as _tomli_load, loads as _tomli_loads
+    from tomli import load as _tomli_load, loads as _tomli_loads, \
+        TOMLDecodeError as _tomli_TOMLDecodeError
 
     class tomllib:
         load = staticmethod(_tomli_load)
         loads = staticmethod(_tomli_loads)
+        # Expose TOMLDecodeError so read_config can catch it on Python < 3.11.
+        # Without this the `except tomllib.TOMLDecodeError` below raises
+        # AttributeError, the process exits 1, and the shell mistakes a parse
+        # failure for a pending change and silently swallows it.
+        TOMLDecodeError = _tomli_TOMLDecodeError
 
 VALID_KEYS = {
     "claude_project_dirs",
@@ -321,8 +327,10 @@ def run_self_test() -> None:
             fail(name, traceback.format_exc())
 
         # Test 9: --check semantics when a mirror path is missing. updated !=
-        # config -> exit 1. A missing mirror is the only condition that should
-        # produce a prompt; comment/formatting drift must not.
+        # config -> exit 1, and the missing key is printed so the caller can
+        # record only that key on decline (not every non-declined agent). A
+        # missing mirror is the only condition that should produce a prompt;
+        # comment/formatting drift must not.
         name = "check: pending changes detected (mirror missing)"
         try:
             key = "claude_project_dirs"
@@ -330,11 +338,32 @@ def run_self_test() -> None:
             existing_default = default_host_path(key, home)
             cfg = {key: [existing_default]}  # mirror absent
             updated = apply_agents(cfg, [(key, mirror)], home)
-            if updated != cfg:
+            missing = [k for k, _ in [(key, mirror)] if updated.get(k) != cfg.get(k)]
+            if updated != cfg and missing == [key]:
                 ok(name)
             else:
-                fail(name, "apply_agents(config) != config",
-                     "equal (missing mirror not detected)")
+                fail(name, "updated != config and missing == [key]",
+                     f"updated==config? {updated == cfg}; missing={missing}")
+        except Exception:
+            fail(name, traceback.format_exc())
+
+        # Test 10: a malformed config.toml exits 3, not 1, so the shell never
+        # mistakes a parse failure for a pending change (which on a
+        # non-interactive run would be silently swallowed). On Python < 3.11
+        # this also exercises the tomllib shim exposing TOMLDecodeError.
+        name = "malformed config exits 3 (not 1)"
+        try:
+            with open(config_path, "w") as f:
+                f.write("this is = not = valid toml\n")
+            try:
+                read_config(config_path)
+            except SystemExit as e:
+                if e.code == 3:
+                    ok(name)
+                else:
+                    fail(name, "exit 3", f"exit {e.code}")
+            else:
+                fail(name, "SystemExit(3)", "no exit (parse error swallowed)")
         except Exception:
             fail(name, traceback.format_exc())
 
@@ -342,7 +371,7 @@ def run_self_test() -> None:
         for msg in failures:
             print(msg, file=sys.stderr)
         sys.exit(1)
-    print("All 9 self-tests passed.")
+    print("All 10 self-tests passed.")
 
 
 def main() -> None:
@@ -402,6 +431,13 @@ def main() -> None:
     except ConfigError as e:
         print(f"error: {args.config_path}: {e}", file=sys.stderr)
         sys.exit(3)
+    except Exception as e:
+        # Any other failure (PermissionError, OSError, ...) is an error, not
+        # a pending change. read_config already maps a parse failure to exit 3
+        # itself; this catches everything else so the shell can treat exit 1
+        # from --check as "pending" and only "pending".
+        print(f"error: {args.config_path}: {e}", file=sys.stderr)
+        sys.exit(3)
 
     if args.check:
         # Compare parsed values, not rendered text. The writer round-trips
@@ -410,9 +446,14 @@ def main() -> None:
         # which would re-prompt on every run even when every mirror path is
         # already present. Comparing the merged dict to the original is immune
         # to that: exit 0 when the merge is a no-op, 1 when a mirror path is
-        # still missing. (ConfigError is raised inside apply_agents above, so a
-        # scalar managed key exits 3 here before this branch.)
-        sys.exit(0 if updated == config else 1)
+        # still missing. Print the missing keys (one per line) so the caller
+        # can record only those on decline, and 3 on a config error (raised
+        # inside apply_agents above) before this branch.
+        missing = [k for k, _ in agents if updated.get(k) != config.get(k)]
+        if missing:
+            sys.stdout.write("\n".join(missing) + "\n")
+            sys.exit(1)
+        sys.exit(0)
 
     new_content = dumps(updated)
 
