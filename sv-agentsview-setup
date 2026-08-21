@@ -175,26 +175,36 @@ agentsview_resync_config() {
     # (it prints the missing keys, one per line), 3 = config error. Run it in a
     # conditional context (`if !`) so the expected exit 1 does not trip the
     # script's ERR trap (set +e wouldn't suppress the trap, only errexit), and
-    # does not leak errexit state into the caller.
-    local check_out missing_keys=()
-    if ! check_out="$(/usr/bin/python3 "$script" \
+    # does not leak errexit state into the caller. Use the `cmd && st=0 || st=$?`
+    # idiom: it runs in a conditional context (so the ERR trap is suppressed
+    # for the command and errexit does not abort), and the `||` branch sees
+    # the command's original exit status. (`if ! cmd` would invert $? to 0;
+    # `if cmd; then...fi` with no else resets $? to 0 after the fi.)
+    local check_out check_status missing_keys=()
+    # Clear the inherited ERR trap inside the subshell (set -E propagates it
+    # into $(...), where it fires independently of the outer conditional
+    # context and prints a misleading "exitcode 1" on the expected pending).
+    check_out="$( trap - ERR; /usr/bin/python3 "$script" \
         --config-path "$AGENTSVIEW_HOST_CONFIG" \
         --home "$HOME" \
         --check \
-        "${agent_args[@]}" 2>&1)"; then
-        # Non-zero. exit 1 = pending (check_out lists the missing keys);
-        # anything else (3 = config error, or an uncaught failure now mapped to
-        # 3 inside the script) is a hard error, not a pending change.
-        if [[ "$?" -ne 1 ]]; then
+        "${agent_args[@]}" 2>&1)" && check_status=0 || check_status=$?
+    # exit 0 = nothing missing; exit 1 = pending (check_out lists the missing
+       # keys); anything else (3 = config error, or an uncaught failure now
+    # mapped to 3 inside the script) is a hard error, not a pending change.
+    case "$check_status" in
+        0)
+            debug "agentsview: $AGENTSVIEW_HOST_CONFIG already up to date"
+            return 0
+            ;;
+        1)
+            ;;  # pending -- fall through
+        *)
             error "agentsview: cannot update $AGENTSVIEW_HOST_CONFIG:"
             error "$check_out"
             return 1
-        fi
-    else
-        # exit 0: nothing missing.
-        debug "agentsview: $AGENTSVIEW_HOST_CONFIG already up to date"
-        return 0
-    fi
+            ;;
+    esac
 
     # check_out holds exactly the missing keys (one per line). Record only
     # those on decline, not every non-declined agent -- declining a single new

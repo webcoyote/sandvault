@@ -184,5 +184,28 @@ done
 pass "resync: decline records only the missing key (not all agents)"
 set +e
 
+###############################################################################
+# Test 7: agentsview_resync_config with a missing mirror, non-interactive,
+# reaches the non-interactive skip guard and returns 0 -- NOT the error path.
+# This is the regression codex caught in iter 2: an `if ! cmd` / `if cmd; fi`
+# capture bug treated the expected pending exit 1 as a hard error (return 1),
+# so resync never reached the prompt. Non-interactive is the only way to
+# exercise the post-check path without a tty (interactive prompt needs a
+# real tty); pending -> skip-guard -> return 0 is the observable contract.
+###############################################################################
+cat > "$CFG" <<EOF
+claude_project_dirs = ["$HOME/.claude/projects", "$SV_PRIVATE_DIR/sessions/claude"]
+codex_sessions_dirs = ["$HOME/.codex/sessions", "$SV_PRIVATE_DIR/sessions/codex"]
+opencode_dirs = ["$HOME/.local/share/opencode", "$SV_PRIVATE_DIR/sessions/opencode"]
+gemini_dirs = ["$HOME/.gemini", "$SV_PRIVATE_DIR/sessions/gemini"]
+pi_dirs = ["$HOME/.pi/agent/sessions"]
+EOF
+rm -f "$DECLINED"
+st=0; agentsview_resync_config </dev/null || st=$?
+[[ "$st" -eq 0 ]] \
+    || fail "pending+non-interactive should skip (exit 0), got exit $st (pending treated as hard error)"
+pass "resync: pending+non-interactive reaches skip guard (exit 0)"
+set +e
+
 echo
 echo "All integration tests passed."
