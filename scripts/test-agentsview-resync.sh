@@ -241,7 +241,7 @@ sys.stderr.write("boom: import-time traceback marker\n")
 sys.exit(1)  # exit 1, no stdout keys
 PY
 before=$(cat "$CFG")
-st=0; out=$(AGENTSVIEW_CONFIG_SCRIPT="$stub" agentsview_resync_config </dev/null 2>&1) || st=$?
+st=0; out=$( trap - ERR; AGENTSVIEW_CONFIG_SCRIPT="$stub" agentsview_resync_config </dev/null 2>&1 ) || st=$?
 [[ "$st" -eq 1 ]] \
     || fail "empty-keys protocol violation should return 1, got $st"
 [[ "$out" == *"reported pending but listed no keys"* ]] \
@@ -252,6 +252,34 @@ st=0; out=$(AGENTSVIEW_CONFIG_SCRIPT="$stub" agentsview_resync_config </dev/null
 [[ "$(cat "$CFG")" == "$before" ]] || fail "empty-keys error should not write"
 [[ ! -e "$DECLINED" ]] || fail "empty-keys error should not record a decline"
 pass "resync: empty-keys protocol violation errors with the stderr diagnostic"
+set +e
+
+###############################################################################
+# Test 9: the empty-keys error when --check violates protocol with NO stderr
+# (a bare sys.exit(1), empty stdout, empty stderr). Must still error (return
+# 1) but must NOT emit a bare noisy diagnostic line -- only the message.
+###############################################################################
+cat > "$CFG" <<EOF
+claude_project_dirs = ["$HOME/.claude/projects", "$SV_PRIVATE_DIR/sessions/claude"]
+EOF
+rm -f "$DECLINED"
+stub2="$TMP_HOME/stub2.py"
+cat > "$stub2" <<'PY'
+import sys
+sys.exit(1)  # exit 1, no stdout, no stderr
+PY
+before=$(cat "$CFG")
+st=0; out=$( trap - ERR; AGENTSVIEW_CONFIG_SCRIPT="$stub2" agentsview_resync_config </dev/null 2>&1 ) || st=$?
+[[ "$st" -eq 1 ]] \
+    || fail "empty-keys (no stderr) should return 1, got $st"
+[[ "$out" == *"reported pending but listed no keys"* ]] \
+    || fail "empty-keys error message missing; got: $out"
+# No bare diagnostic line: the only error line is the message itself.
+err_lines=$(printf '%s\n' "$out" | grep -c '❌')
+[[ "$err_lines" -eq 1 ]] \
+    || fail "empty-keys (no stderr) should emit exactly one error line, got $err_lines: $out"
+[[ "$(cat "$CFG")" == "$before" ]] || fail "empty-keys error should not write"
+pass "resync: empty-keys with no stderr errors without a bare diagnostic line"
 set +e
 
 echo
