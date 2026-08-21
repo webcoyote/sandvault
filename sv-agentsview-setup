@@ -227,7 +227,7 @@ agentsview_resync_config() {
             ;;  # pending -- fall through (check_err kept for the empty-keys
               #      error if --check produced no keys)
         *)
-            error "agentsview: cannot update $AGENTSVIEW_HOST_CONFIG:"
+            error "agentsview: cannot update $AGENTSVIEW_HOST_CONFIG"
             [[ -n "$check_err_text" ]] && error "$check_err_text"
             rm -f "$check_err"
             return 1
@@ -284,8 +284,10 @@ agentsview_resync_config() {
         --home "$HOME" \
         --diff \
         "${missing_args[@]}" 2>"$diff_err" )"; then
-        error "agentsview: failed to compute config diff:"
-        error "$(cat "$diff_err" 2>/dev/null)"
+        local diff_err_text
+        diff_err_text=$( trap - ERR; cat "$diff_err" 2>/dev/null ) || true
+        error "agentsview: failed to compute config diff"
+        [[ -n "$diff_err_text" ]] && error "$diff_err_text"
         rm -f "$diff_err"
         return 1
     fi

@@ -282,5 +282,28 @@ err_lines=$(printf '%s\n' "$out" | grep -c '❌')
 pass "resync: empty-keys with no stderr errors without a bare diagnostic line"
 set +e
 
+###############################################################################
+# Test 10: the AGENTSVIEW_CONFIG_SCRIPT seam — when the override points at a
+# nonexistent path, resync skips (return 0) and the skip trace names the
+# *overridden* path, not the installed default (which exists in this tree, so
+# the old hardcoded message would name a present, irrelevant file).
+###############################################################################
+cat > "$CFG" <<EOF
+claude_project_dirs = ["$HOME/.claude/projects", "$SV_PRIVATE_DIR/sessions/claude"]
+EOF
+rm -f "$DECLINED"
+fake="$TMP_HOME/does-not-exist.py"
+st=0; log=$(SV_VERBOSE=2 AGENTSVIEW_CONFIG_SCRIPT="$fake" agentsview_resync_config </dev/null 2>&1) || st=$?
+[[ "$st" -eq 0 ]] \
+    || fail "missing override script should skip (exit 0), got $st"
+[[ "$log" == *"$fake not installed; skipping config resync"* ]] \
+    || fail "skip trace should name the overridden path '$fake'; got: $log"
+# And it must NOT name the default path (which exists here) -- the bug was that
+# it silently named a present, irrelevant file.
+[[ "$log" != *"helpers/agentsview-config.py not installed"* ]] \
+    || fail "skip trace should not name the default path; got: $log"
+pass "resync: not-installed trace names the overridden script path"
+set +e
+
 echo
 echo "All integration tests passed."
