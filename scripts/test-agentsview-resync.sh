@@ -191,7 +191,16 @@ set +e
 # capture bug treated the expected pending exit 1 as a hard error (return 1),
 # so resync never reached the prompt. Non-interactive is the only way to
 # exercise the post-check path without a tty (interactive prompt needs a
-# real tty); pending -> skip-guard -> return 0 is the observable contract.
+# real tty).
+#
+# exit 0 alone is not enough -- four paths return 0 (all-up-to-date,
+# all-declined, missing-script, non-interactive skip). Distinguish the pending
+# path by setting up a genuinely-missing mirror and asserting the two
+# behaviors the skip guard promises for it: do NOT write the config (the
+# missing mirror is still missing) and do NOT record a decline (no declined
+# file). The all-up-to-date path would have no missing mirror; a bug that
+# writes anyway fails the no-write check; a bug that records anyway fails the
+# no-decline check.
 ###############################################################################
 cat > "$CFG" <<EOF
 claude_project_dirs = ["$HOME/.claude/projects", "$SV_PRIVATE_DIR/sessions/claude"]
@@ -201,10 +210,18 @@ gemini_dirs = ["$HOME/.gemini", "$SV_PRIVATE_DIR/sessions/gemini"]
 pi_dirs = ["$HOME/.pi/agent/sessions"]
 EOF
 rm -f "$DECLINED"
+# Snapshot the config so we can prove it was not rewritten.
+before=$(cat "$CFG")
 st=0; agentsview_resync_config </dev/null || st=$?
 [[ "$st" -eq 0 ]] \
     || fail "pending+non-interactive should skip (exit 0), got exit $st (pending treated as hard error)"
-pass "resync: pending+non-interactive reaches skip guard (exit 0)"
+# Pending path reached: config untouched (no write) ...
+[[ "$(cat "$CFG")" == "$before" ]] \
+    || fail "pending+non-interactive should not write the config"
+# ... and no decline recorded.
+[[ ! -e "$DECLINED" ]] \
+    || fail "pending+non-interactive should not record a decline (file exists)"
+pass "resync: pending+non-interactive reaches skip guard (no write, no decline, exit 0)"
 set +e
 
 echo
