@@ -163,7 +163,7 @@ agentsview_resync_config() {
     # user-invoked setup script.
     local script="${AGENTSVIEW_CONFIG_SCRIPT:-$WORKSPACE/helpers/agentsview-config.py}"
     if [[ ! -f "$script" ]]; then
-        trace "agentsview: helpers/agentsview-config.py not installed; skipping config resync"
+        trace "agentsview: $script not installed; skipping config resync"
         return 0
     fi
 
@@ -207,6 +207,10 @@ agentsview_resync_config() {
         --home "$HOME" \
         --check \
         "${agent_args[@]}" 2>"$check_err" )" && check_status=0 || check_status=$?
+    # Read the stderr once, trap cleared so a failing cat does not leak the
+    # inherited ERR trap into the diagnostic.
+    local check_err_text
+    check_err_text=$( trap - ERR; cat "$check_err" 2>/dev/null ) || true
     # exit 0 = nothing missing; exit 1 = pending (stdout lists the missing
     # keys); anything else (3 = config error, or an uncaught failure now
     # mapped to 3 inside the script) is a hard error, not a pending change.
@@ -224,7 +228,7 @@ agentsview_resync_config() {
               #      error if --check produced no keys)
         *)
             error "agentsview: cannot update $AGENTSVIEW_HOST_CONFIG:"
-            error "$(cat "$check_err" 2>/dev/null)"
+            [[ -n "$check_err_text" ]] && error "$check_err_text"
             rm -f "$check_err"
             return 1
             ;;
@@ -242,10 +246,10 @@ agentsview_resync_config() {
         # We only reach here on check_status==1 (the 0 case returned above). An
         # exit 1 with no keys is a protocol violation -- e.g. an import-time
         # error in the vendored tomli shim exiting 1 with empty stdout and a
-        # traceback on stderr -- not a clean config. Surface the stderr so the
-        # user can diagnose it; do not silently treat it as up to date.
+        # traceback on stderr -- not a clean config. Surface the stderr (if any)
+        # so the user can diagnose it; do not silently treat it as up to date.
         error "agentsview: --check reported pending but listed no keys; cannot update $AGENTSVIEW_HOST_CONFIG"
-        error "$(cat "$check_err" 2>/dev/null)"
+        [[ -n "$check_err_text" ]] && error "$check_err_text"
         rm -f "$check_err"
         return 1
     fi
