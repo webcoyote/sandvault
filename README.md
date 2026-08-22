@@ -114,6 +114,15 @@ The default mode for sandvault runs commands as a limited user (basically `sudo 
   sv --ssh gemini
 ```
 
+To let other keys SSH into the sandvault user, drop each public key into its own file in `~/.config/codeofhonor/sandvault/authorized_keys.d/`, then run any `sv` command to apply it:
+
+```bash
+cp ~/.ssh/id_ed25519_laptop.pub ~/.config/codeofhonor/sandvault/authorized_keys.d/laptop
+sv build
+```
+
+Those files are the source of truth: sandvault regenerates the sandvault user's `authorized_keys` from them plus its own key on every run, so deleting a file revokes that key on the next run. Files that are not SSH public keys are ignored with a warning, and a private key left there stops the build rather than being copied into the sandbox.
+
 
 ## Advanced Commands
 

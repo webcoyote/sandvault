@@ -783,6 +783,132 @@ EOF
     }
     queue_test test_fix_permissions_rejects_non_build
 
+    # Extra public keys dropped into AUTHORIZED_KEYS_DIR are written into the
+    # generated authorized_keys, and removing one revokes it. Run
+    # configure_ssh_access in isolation so the test never touches the real
+    # sandvault install.
+    test_authorized_keys_dir() {
+        local workdir keys_dir generated expected got output
+        workdir="$(mktemp -d)"
+        keys_dir="$workdir/authorized_keys.d"
+        generated="$workdir/guest/home/.ssh/authorized_keys"
+        mkdir -p "$keys_dir"
+        ssh-keygen -t ed25519 -f "$workdir/id" -N "" -q -C "sandvault"
+        ssh-keygen -t ed25519 -f "$workdir/extra" -N "" -q -C "extra@laptop"
+        # No trailing newline: the generated file must still split the keys.
+        printf '%s' "$(cat "$workdir/extra.pub")" > "$keys_dir/extra"
+
+        {
+            echo '#!/bin/bash'
+            echo 'set -Eeuo pipefail'
+            echo 'trace() { :; }'
+            echo 'warn() { echo >&2 "$*"; }'
+            echo 'abort() { echo >&2 "$*"; exit 1; }'
+            sed -n '/^configure_ssh_access() {$/,/^}$/p' "$SV_BASE"
+            echo 'configure_ssh_access'
+        } > "$workdir/run"
+        chmod +x "$workdir/run"
+
+        run_configure_ssh_access() {
+            NO_BUILD=false \
+                WORKSPACE="$workdir" \
+                AUTHORIZED_KEYS_DIR="$keys_dir" \
+                SSH_KEYFILE_PRIV="$workdir/id" \
+                SSH_KEYFILE_PUB="$workdir/id.pub" \
+                SANDVAULT_USER="sandvault-test" \
+                "$workdir/run"
+        }
+
+        set +e
+        output="$(run_configure_ssh_access 2>&1)"
+        set -e
+        got="$output$(cat "$generated" 2>/dev/null)"
+        expected="$(cat "$workdir/extra.pub" "$workdir/id.pub")"
+        if [[ "$got" != "$expected" ]]; then
+            fail "authorized_keys.d keys are installed and revoked" "$expected" "$got"
+            rm -rf "$workdir"
+            return
+        fi
+
+        rm -f "$keys_dir/extra"
+        set +e
+        output="$(run_configure_ssh_access 2>&1)"
+        set -e
+        got="$output$(cat "$generated" 2>/dev/null)"
+        expected="$(cat "$workdir/id.pub")"
+        if [[ "$got" == "$expected" ]]; then
+            pass "authorized_keys.d keys are installed and revoked"
+        else
+            fail "authorized_keys.d keys are installed and revoked" "$expected" "$got"
+        fi
+        rm -rf "$workdir"
+    }
+    queue_test test_authorized_keys_dir
+
+    # A file that is not a public key is skipped with a warning; a private key
+    # aborts, because copying one in would hand it to the sandvault user.
+    test_authorized_keys_dir_rejects_non_public_keys() {
+        local workdir keys_dir generated expected got output status
+        workdir="$(mktemp -d)"
+        keys_dir="$workdir/authorized_keys.d"
+        generated="$workdir/guest/home/.ssh/authorized_keys"
+        mkdir -p "$keys_dir"
+        ssh-keygen -t ed25519 -f "$workdir/id" -N "" -q -C "sandvault"
+        printf 'notes about my keys\n' > "$keys_dir/README"
+
+        {
+            echo '#!/bin/bash'
+            echo 'set -Eeuo pipefail'
+            echo 'trace() { :; }'
+            echo 'warn() { echo >&2 "$*"; }'
+            echo 'abort() { echo >&2 "$*"; exit 1; }'
+            sed -n '/^configure_ssh_access() {$/,/^}$/p' "$SV_BASE"
+            echo 'configure_ssh_access'
+        } > "$workdir/run"
+        chmod +x "$workdir/run"
+
+        run_configure_ssh_access() {
+            NO_BUILD=false \
+                WORKSPACE="$workdir" \
+                AUTHORIZED_KEYS_DIR="$keys_dir" \
+                SSH_KEYFILE_PRIV="$workdir/id" \
+                SSH_KEYFILE_PUB="$workdir/id.pub" \
+                SANDVAULT_USER="sandvault-test" \
+                "$workdir/run"
+        }
+
+        set +e
+        output="$(run_configure_ssh_access 2>&1)"
+        set -e
+        expected="Ignoring $keys_dir/README: not an SSH public key"
+        if [[ "$output" != "$expected" ]]; then
+            fail "authorized_keys.d rejects non-public-key files" "$expected" "$output"
+            rm -rf "$workdir"
+            return
+        fi
+        got="$(cat "$generated" 2>/dev/null)"
+        expected="$(cat "$workdir/id.pub")"
+        if [[ "$got" != "$expected" ]]; then
+            fail "authorized_keys.d rejects non-public-key files" "$expected" "$got"
+            rm -rf "$workdir"
+            return
+        fi
+
+        cp "$workdir/id" "$keys_dir/oops"
+        set +e
+        output="$(run_configure_ssh_access 2>&1)"
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 && "$output" == *"is a private key"* ]]; then
+            pass "authorized_keys.d rejects non-public-key files"
+        else
+            fail "authorized_keys.d rejects non-public-key files" \
+                "non-zero exit with private key message" "$status | $output"
+        fi
+        rm -rf "$workdir"
+    }
+    queue_test test_authorized_keys_dir_rejects_non_public_keys
+
     # Test that /var/sandvault/ is world-traversable
     test_var_sandvault_traversable() {
         local perms

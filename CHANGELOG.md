@@ -2,6 +2,12 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Extra SSH public keys can now reach the sandvault user: drop one key per file into `~/.config/codeofhonor/sandvault/authorized_keys.d/` and run `sv build`. The sandvault user's `authorized_keys` is regenerated from that directory on every run, so deleting a file revokes the key. Files that are not public keys are ignored with a warning, and a private key left there stops the build instead of being copied into the sandbox.
+
 ## [1.28.0] - 2026-08-19
 
 ### Fixed
