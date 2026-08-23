@@ -2,6 +2,27 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.29.0] - 2026-08-23
+
+### Added
+
+- `sv-agentsview-setup` now re-syncs on every run once enabled, so an agent added after you opt in gets its mirror symlink and config scan path automatically instead of staying invisible in agentsview until you reset the opt-in state. ([#225](https://github.com/webcoyote/sandvault/pull/225)) — thanks @jesserobbins!
+- Extra SSH keys can be placed in an `authorized_keys.d` directory, letting other machines reach the sandvault user without hand-editing a generated file that upgrades overwrite. `authorized_keys` is regenerated in full each run, so deleting a file revokes that key, and private keys are rejected outright. ([#224](https://github.com/webcoyote/sandvault/pull/224)) — thanks @MikeMcQuaid!
+
+### Fixed
+
+- Declining a newly detected agent is now remembered permanently instead of re-prompting on every run. Remove the entry from the decline list to re-enable it. ([#225](https://github.com/webcoyote/sandvault/pull/225)) — thanks @jesserobbins!
+- A hand-written scalar value for a managed key in `config.toml` is no longer silently split into individual characters and rewritten; the setup now fails with a clear error instead. ([#225](https://github.com/webcoyote/sandvault/pull/225)) — thanks @jesserobbins!
+- A hand-edited `config.toml` no longer triggers a confirmation prompt on every run. Comment and formatting differences introduced by the config writer are ignored, and only genuinely missing scan paths prompt. ([#225](https://github.com/webcoyote/sandvault/pull/225)) — thanks @jesserobbins!
+- Configuration errors during agentsview setup are now surfaced rather than being swallowed, and error messages name the script that failed. ([#225](https://github.com/webcoyote/sandvault/pull/225)) — thanks @jesserobbins!
+
+### Thanks to 4 contributors!
+
+- [@gamepoet](https://github.com/gamepoet)
+- [@jesserobbins](https://github.com/jesserobbins)
+- [@MikeMcQuaid](https://github.com/MikeMcQuaid)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [Unreleased]
 
 ### Added
