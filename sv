@@ -70,8 +70,7 @@ git_config_require_value() {
 
 configure_ssh_access() {
     local guest_authorized_keys
-    local ssh_public_key
-    local ssh_key_count
+    local key_file
     local tmp_authorized_keys
 
     if [[ ! -f "$SSH_KEYFILE_PRIV" || ! -f "$SSH_KEYFILE_PUB" ]]; then
@@ -88,24 +87,45 @@ configure_ssh_access() {
             -C "${HOST_USER}-to-sandvault@${SSH_HOST}"
     fi
 
-    # Add HOST_USER SSH public key to SANDVAULT_USER authorized_keys
+    # Generate SANDVAULT_USER authorized_keys: every file in AUTHORIZED_KEYS_DIR
+    # followed by the HOST_USER SSH public key. The file is written in full each
+    # run, so deleting a file from AUTHORIZED_KEYS_DIR revokes that key.
     guest_authorized_keys="$WORKSPACE/guest/home/.ssh/authorized_keys"
-    ssh_public_key="$(<"$SSH_KEYFILE_PUB")"
-    ssh_key_count="$(grep -Fxc "$ssh_public_key" "$guest_authorized_keys" 2>/dev/null || true)"
-    if [[ "$ssh_key_count" -ne 1 ]]; then
-        if [[ "$NO_BUILD" == "true" ]]; then
-            abort "$SANDVAULT_USER authorized_keys would change but --no-build flag is set"
+    mkdir -p "$AUTHORIZED_KEYS_DIR"
+    tmp_authorized_keys="$(mktemp)"
+    for key_file in "$AUTHORIZED_KEYS_DIR"/*; do
+        [[ -f "$key_file" ]] || continue
+        # "ssh-keygen -l" reports the public half of a private key too, so check
+        # for that separately: copying one into the guest would hand the
+        # untrusted sandvault user a private key.
+        if grep -q "PRIVATE KEY" "$key_file"; then
+            rm -f "$tmp_authorized_keys"
+            abort "$key_file is a private key: $AUTHORIZED_KEYS_DIR holds public keys only"
         fi
-        trace "Configuring remote SSH access"
-        mkdir -p "$(dirname "$guest_authorized_keys")"
-        /bin/chmod 0700 "$(dirname "$guest_authorized_keys")"
-        touch "$guest_authorized_keys"
-        tmp_authorized_keys="$(mktemp)"
-        grep -Fvx "$ssh_public_key" "$guest_authorized_keys" > "$tmp_authorized_keys" || true
-        printf '%s\n' "$ssh_public_key" >> "$tmp_authorized_keys"
-        /bin/chmod 0600 "$tmp_authorized_keys"
-        mv -f "$tmp_authorized_keys" "$guest_authorized_keys"
+        if ! ssh-keygen -l -f "$key_file" &>/dev/null; then
+            warn "Ignoring $key_file: not an SSH public key"
+            continue
+        fi
+        # "awk 1" copies the file, supplying the trailing newline it may lack so
+        # that two keys never end up concatenated onto the same line.
+        awk 1 "$key_file" >> "$tmp_authorized_keys"
+    done
+    awk 1 "$SSH_KEYFILE_PUB" >> "$tmp_authorized_keys"
+
+    if cmp -s "$tmp_authorized_keys" "$guest_authorized_keys"; then
+        rm -f "$tmp_authorized_keys"
+        return 0
     fi
+    if [[ "$NO_BUILD" == "true" ]]; then
+        rm -f "$tmp_authorized_keys"
+        abort "$SANDVAULT_USER authorized_keys would change but --no-build flag is set"
+    fi
+
+    trace "Configuring remote SSH access"
+    mkdir -p "$(dirname "$guest_authorized_keys")"
+    /bin/chmod 0700 "$(dirname "$guest_authorized_keys")"
+    /bin/chmod 0600 "$tmp_authorized_keys"
+    mv -f "$tmp_authorized_keys" "$guest_authorized_keys"
 }
 
 
@@ -211,6 +231,11 @@ IOS_SIM_UDID=""
 readonly SSH_DIR="$HOME/.ssh"
 readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
 readonly SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
+
+# Additional public keys allowed to SSH into the sandvault user, one key per
+# file. Kept in the host user's config directory so it survives upgrades and so
+# the (untrusted) sandvault user cannot grant itself extra access.
+readonly AUTHORIZED_KEYS_DIR="$INSTALL_PRODUCT/authorized_keys.d"
 
 # Sandbox profile to restrict /Volumes access (external drives)
 # Stored in /var/sandvault/ so sandvault user cannot modify it
