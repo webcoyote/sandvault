@@ -258,14 +258,16 @@ Explicit command-line arguments are appended after `SANDVAULT_ARGS`, so they are
 
 ## `agentsview` Integration
 
-[`agentsview`](https://github.com/badlogic/agentsview) is a dashboard that aggregates session history, search, and cost tracking across AI coding agents (Claude Code, Codex, OpenCode, Gemini, pi). If you have agentsview installed on the host, `sv-agentsview-setup` mirrors sandbox session data so it appears alongside your host-side sessions.
+[`agentsview`](https://github.com/badlogic/agentsview) is a dashboard for AI coding agents (Claude Code, Codex, OpenCode, Gemini, pi). It shows session history, search, and cost tracking. If you have agentsview installed on the host, `sv-agentsview-setup` mirrors sandbox session data so that it appears next to your host-side sessions.
 
 ```bash
 # Detect agentsview, prompt to opt in, and configure
 sv-agentsview-setup
 ```
 
-Then run `agentsview serve` and you'll see your sandvault AI sessions included in the `agentsview` dashboard.
+You are prompted once, on the first run. After that, `sv-agentsview-setup` re-syncs on every run. It installs the mirror symlinks and adds the missing scan paths to `~/.agentsview/config.toml`. New agents that sandvault adds in a later release appear the next time you run the command. When a new scan path is added, the command shows a diff and asks for confirmation. If you decline, that agent is skipped permanently. Remove its key from `/Users/Shared/sv-$USER/_sandvault/setup/agentsview-declined.keys` to enable it again.
+
+Then run `agentsview serve`. You will see your sandvault AI sessions in the `agentsview` dashboard.
 
 
 ## Nested sandboxes

@@ -46,6 +46,11 @@ readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
 readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
 readonly AGENTSVIEW_STATE_FILE="$SV_PRIVATE_DIR/setup/agentsview-export.state"
 readonly AGENTSVIEW_HOST_CONFIG="$HOME/.agentsview/config.toml"
+# Per-key permanent decline list (one agentsview TOML key per line). An agent
+# whose key is listed here is never re-prompted for a config scan path; the
+# symlink and ACL are still installed, since they're harmless without the scan
+# path. Remove the line to re-enable an agent. Written on first decline.
+readonly AGENTSVIEW_DECLINED_FILE="$SV_PRIVATE_DIR/setup/agentsview-declined.keys"
 
 ###############################################################################
 # Detection / pre-flight
@@ -111,45 +116,198 @@ agentsview_install_symlinks() {
     done
 }
 
-# Update the host user's agentsview config.toml. Shows a diff and prompts.
-# Returns 0 on success (or no-op), 1 on failure.
-agentsview_update_config() {
-    local script="$WORKSPACE/helpers/agentsview-config.py"
+# Print permanently-declined TOML keys, one per line (blank/comment lines
+# stripped). Empty output if the file is missing.
+agentsview_declined_keys() {
+    [[ -f "$AGENTSVIEW_DECLINED_FILE" ]] || return 0
+    grep -v '^[[:space:]]*$' "$AGENTSVIEW_DECLINED_FILE" 2>/dev/null \
+        | grep -v '^[[:space:]]*#' 2>/dev/null || true
+}
+
+# Record TOML keys (args) as permanently declined, de-duplicated against the
+# existing list. Idempotent. Only records keys that map to a known agent
+# (a belt-and-braces guard so a stray stderr line captured into the
+# missing-keys stream can never be written to this user-facing file).
+agentsview_record_decline() {
+    mkdir -p "$SV_PRIVATE_DIR/setup"
+    local existing key known agent
+    existing="$(agentsview_declined_keys)"
+    for key in "$@"; do
+        [[ -n "$key" ]] || continue
+        known=0
+        for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            if [[ "$(agentsview_field TOMLKEY "$agent")" == "$key" ]]; then
+                known=1
+                break
+            fi
+        done
+        [[ "$known" -eq 1 ]] || continue
+        if printf '%s\n' "$existing" | grep -Fxq -- "$key"; then
+            continue
+        fi
+        printf '%s\n' "$key" >> "$AGENTSVIEW_DECLINED_FILE"
+    done
+}
+
+# Re-sync the host agentsview config: for every managed agent the user has
+# not permanently declined, add the mirror scan path if it's missing. Prompts
+# only when a mirror path is actually absent -- compared on parsed values,
+# not rendered text, so comment/formatting drift on a hand-edited config.toml
+# doesn't re-prompt forever. On decline, records the pending keys permanently
+# so the next run skips them. Returns 0 on success/no-op, 1 on failure.
+agentsview_resync_config() {
+    # $AGENTSVIEW_CONFIG_SCRIPT overrides the helper path (defaults to the
+    # installed script). The override is a test seam -- it lets the integration
+    # suite point resync at a stub to exercise error paths the real writer
+    # cannot produce -- and is safe because this is an unprivileged,
+    # user-invoked setup script.
+    local script="${AGENTSVIEW_CONFIG_SCRIPT:-$WORKSPACE/helpers/agentsview-config.py}"
+    if [[ ! -f "$script" ]]; then
+        trace "agentsview: $script not installed; skipping config resync"
+        return 0
+    fi
+
+    # Filter out permanently-declined agents.
+    local declined agent tomlkey link
+    declined="$(agentsview_declined_keys)"
     local agent_args=()
-    local agent tomlkey link
     for agent in "${AGENTSVIEW_AGENTS[@]}"; do
         tomlkey="$(agentsview_field TOMLKEY "$agent")"
+        if printf '%s\n' "$declined" | grep -Fxq -- "$tomlkey"; then
+            trace "agentsview: $agent ($tomlkey) permanently declined; skipping"
+            continue
+        fi
         link="$SV_PRIVATE_DIR/sessions/$agent"
         agent_args+=(--agent "$tomlkey=$link")
     done
 
-    local diff_out
-    if ! diff_out="$(/usr/bin/python3 "$script" \
-        --config-path "$AGENTSVIEW_HOST_CONFIG" \
-        --home "$HOME" \
-        --diff \
-        "${agent_args[@]}" 2>&1)"; then
-        error "agentsview: failed to compute config diff:"
-        error "$diff_out"
-        return 1
-    fi
-
-    if [[ -z "$diff_out" ]]; then
-        debug "agentsview: $AGENTSVIEW_HOST_CONFIG already up to date"
+    if [[ ${#agent_args[@]} -eq 0 ]]; then
+        debug "agentsview: every agent declined; nothing to resync"
         return 0
     fi
 
+    # --check compares parsed values: 0 = clean, 1 = a mirror path is missing
+    # (it prints the missing keys to stdout, one per line), 3 = config error
+    # (message on stderr). Capture stdout and stderr separately: stdout is
+    # parsed line-by-line as TOML keys, so any stderr line (a warning, or an
+    # unexpected message) must not become a pseudo-key and must not be written
+    # to the user-facing decline file.
+    #
+    # Use the `cmd && st=0 || st=$?` idiom: it runs in a conditional context
+    # (ERR trap suppressed for the command, errexit does not abort) and the
+    # `||` branch sees the command's original exit status. (`if ! cmd` would
+    # invert $? to 0; `if cmd; then...fi` with no else resets $? to 0 after
+    # the fi.) Clear the inherited ERR trap inside the $(...) subshell too --
+    # set -E propagates it into the subshell where it fires independently of
+    # the outer conditional context.
+    local check_out check_err check_status missing_keys=()
+    check_err=$( trap - ERR; mktemp ) || { error "agentsview: cannot create temp file for config check"; return 1; }
+    check_out="$( trap - ERR; /usr/bin/python3 "$script" \
+        --config-path "$AGENTSVIEW_HOST_CONFIG" \
+        --home "$HOME" \
+        --check \
+        "${agent_args[@]}" 2>"$check_err" )" && check_status=0 || check_status=$?
+    # Read the stderr once, trap cleared so a failing cat does not leak the
+    # inherited ERR trap into the diagnostic.
+    local check_err_text
+    check_err_text=$( trap - ERR; cat "$check_err" 2>/dev/null ) || true
+    # exit 0 = nothing missing; exit 1 = pending (stdout lists the missing
+    # keys); anything else (3 = config error, or an uncaught failure now
+    # mapped to 3 inside the script) is a hard error, not a pending change.
+    # check_err is freed only once we no longer need the stderr text: the
+    # pending branch may still need it for the empty-keys protocol-violation
+    # error below, so it is NOT rm'd in the case 1) arm.
+    case "$check_status" in
+        0)
+            rm -f "$check_err"
+            debug "agentsview: $AGENTSVIEW_HOST_CONFIG already up to date"
+            return 0
+            ;;
+        1)
+            ;;  # pending -- fall through (check_err kept for the empty-keys
+              #      error if --check produced no keys)
+        *)
+            error "agentsview: cannot update $AGENTSVIEW_HOST_CONFIG"
+            [[ -n "$check_err_text" ]] && error "$check_err_text"
+            rm -f "$check_err"
+            return 1
+            ;;
+    esac
+
+    # check_out holds exactly the missing keys (one per line). Record only
+    # those on decline, not every non-declined agent -- declining a single new
+    # agent must not pollute the decline list with agents that were already
+    # present.
+    local key
+    while IFS= read -r key; do
+        [[ -n "$key" ]] && missing_keys+=("$key")
+    done <<< "$check_out"
+    if [[ ${#missing_keys[@]} -eq 0 ]]; then
+        # We only reach here on check_status==1 (the 0 case returned above). An
+        # exit 1 with no keys is a protocol violation -- e.g. an import-time
+        # error in the vendored tomli shim exiting 1 with empty stdout and a
+        # traceback on stderr -- not a clean config. Surface the stderr (if any)
+        # so the user can diagnose it; do not silently treat it as up to date.
+        error "agentsview: --check reported pending but listed no keys; cannot update $AGENTSVIEW_HOST_CONFIG"
+        [[ -n "$check_err_text" ]] && error "$check_err_text"
+        rm -f "$check_err"
+        return 1
+    fi
+    rm -f "$check_err"
+
+    # Build --agent args for only the missing keys, so the diff and write are
+    # scoped to what's actually changing.
+    local missing_args=() mk
+    for mk in "${missing_keys[@]}"; do
+        for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            if [[ "$(agentsview_field TOMLKEY "$agent")" == "$mk" ]]; then
+                missing_args+=(--agent "$mk=$SV_PRIVATE_DIR/sessions/$agent")
+                break
+            fi
+        done
+    done
+
+    # Pending changes. Non-interactive: don't write, don't hang on read, and
+    # don't record a decline (the user never saw the prompt).
+    if [[ ! -t 0 ]]; then
+        trace "agentsview: config changes pending (${missing_keys[*]}) but non-interactive; skipping"
+        return 0
+    fi
+
+    # Show the diff for only the missing keys. Capture stdout (the diff) and
+    # stderr (errors) separately so a stderr line is never rendered as if it
+    # were part of the proposed config diff above the prompt.
+    local diff_out diff_err
+    diff_err=$( trap - ERR; mktemp ) || { error "agentsview: cannot create temp file for config diff"; return 1; }
+    if ! diff_out="$( trap - ERR; /usr/bin/python3 "$script" \
+        --config-path "$AGENTSVIEW_HOST_CONFIG" \
+        --home "$HOME" \
+        --diff \
+        "${missing_args[@]}" 2>"$diff_err" )"; then
+        local diff_err_text
+        diff_err_text=$( trap - ERR; cat "$diff_err" 2>/dev/null ) || true
+        error "agentsview: failed to compute config diff"
+        [[ -n "$diff_err_text" ]] && error "$diff_err_text"
+        rm -f "$diff_err"
+        return 1
+    fi
+    rm -f "$diff_err"
+
     info ""
-    info "Proposed changes to $AGENTSVIEW_HOST_CONFIG:"
+    info "Sandvault added new agents since you last synced. Proposed changes to"
+    info "$AGENTSVIEW_HOST_CONFIG:"
     info ""
     printf '%s\n' "$diff_out"
     info ""
     info "Note: writing this file does not preserve comments on managed keys."
+    info "Decline now to skip these agents permanently (remove the key from"
+    info "$AGENTSVIEW_DECLINED_FILE to re-enable)."
     printf 'Apply these changes? [y/N] '
     local reply
     read -r reply
     if [[ "$reply" != "y" && "$reply" != "Y" ]]; then
-        info "agentsview: skipped config update"
+        info "agentsview: declined; recording ${missing_keys[*]} as permanently skipped"
+        agentsview_record_decline "${missing_keys[@]}"
         return 0
     fi
 
@@ -157,7 +315,7 @@ agentsview_update_config() {
         --config-path "$AGENTSVIEW_HOST_CONFIG" \
         --home "$HOME" \
         --write \
-        "${agent_args[@]}"; then
+        "${missing_args[@]}"; then
         error "agentsview: failed to write $AGENTSVIEW_HOST_CONFIG"
         return 1
     fi
@@ -174,8 +332,9 @@ write_setup_merge_script() {
     # Build the subdir list from AGENTSVIEW_AGENTS (the single source of truth
     # in helpers/agentsview-paths.sh) so this generated script picks up new
     # agents automatically instead of drifting like a hardcoded list would.
-    # Only this generated script tracks the list; the host-side symlink and
-    # TOML key are still written once, at opt-in.
+    # The host-side symlink and TOML scan path are re-synced on every run by
+    # agentsview_resync_config / agentsview_install_symlinks, so a new agent
+    # is wired end to end the first time it has a session.
     local agent _q _subdir _private subdir_list="" private_list=""
     for agent in "${AGENTSVIEW_AGENTS[@]}"; do
         _subdir="$(agentsview_field SUBDIR "$agent")"
@@ -236,40 +395,17 @@ SETUP_EOF
     chmod +x "$SV_PRIVATE_DIR/setup/agentsview-export"
 }
 
-# Orchestrate the full opt-in flow. Idempotent: skips silently if state
-# file already records a choice.
-agentsview_setup() {
-    # Always write the setup-merge script (it's a no-op until opt-in records
-    # `enabled`). This way, opt-in via `sv-agentsview-setup` after the
-    # initial `sv setup --rebuild` still wires up the sandbox-side ACL hook.
-    write_setup_merge_script
-
-    if [[ -f "$AGENTSVIEW_STATE_FILE" ]]; then
-        trace "agentsview: choice already recorded ($(cat "$AGENTSVIEW_STATE_FILE")); skipping prompt"
-        # A user who opted in before sandvault knew about an agent has no mirror
-        # symlink for it, and no scan path in config.toml. The generated ACL
-        # script tracks AGENTSVIEW_AGENTS, but these two steps run once, at
-        # opt-in. Report the gap: silence here looks identical to success.
-        if [[ "$(cat "$AGENTSVIEW_STATE_FILE")" == "enabled" ]]; then
-            local agent missing=""
-            for agent in "${AGENTSVIEW_AGENTS[@]}"; do
-                [[ -e "$SV_PRIVATE_DIR/sessions/$agent" ]] || missing+="$agent "
-            done
-            if [[ -n "$missing" ]]; then
-                info "agentsview: these agents have no mirror: ${missing% }"
-                info "agentsview: to add them, delete $AGENTSVIEW_STATE_FILE."
-                info "agentsview: then run \`sv-agentsview-setup\` again."
-            fi
-        fi
-        return 0
-    fi
+# First-run opt-in prompt. Shown only when no choice is recorded yet. Returns 0
+# to continue (opted in), 1 to stop (declined / not detected / non-interactive).
+# Persists `enabled`/`disabled` to the state file.
+agentsview_first_run_prompt() {
     if [[ ! -t 0 ]]; then
         trace "agentsview: non-interactive; skipping prompt"
-        return 0
+        return 1
     fi
     if [[ ! -f "$WORKSPACE/helpers/agentsview-config.py" ]]; then
         trace "agentsview: helpers/agentsview-config.py not installed; skipping"
-        return 0
+        return 1
     fi
     # SC2310: these functions are designed to return a status (detection /
     # pre-flight check). Their bodies don't rely on set -e, so the disabled
@@ -277,13 +413,13 @@ agentsview_setup() {
     # shellcheck disable=SC2310
     if ! agentsview_detect; then
         trace "agentsview: not detected; skipping"
-        return 0
+        return 1
     fi
     # shellcheck disable=SC2310
     if ! agentsview_contamination_check; then
         # Pre-flight already printed remediation. Don't persist a choice;
         # user re-runs after fixing.
-        return 0
+        return 1
     fi
 
     info ""
@@ -296,9 +432,8 @@ agentsview_setup() {
     info "  - add a scan path per agent to $AGENTSVIEW_HOST_CONFIG (with diff confirmation)"
     info "  - rewrite your agentsview config without preserving comments"
     info ""
-    info "Sandvault does not track new agents automatically. This applies to agents"
-    info "that agentsview adds, and to agents that sandvault adds in a later version."
-    info "To refresh, delete $AGENTSVIEW_STATE_FILE and run this command again."
+    info "New agents sandvault adds later are synced automatically on the next run."
+    info "Decline a sync prompt to skip that agent permanently."
     printf 'Enable agentsview export? [y/N] '
     local reply
     read -r reply
@@ -306,12 +441,39 @@ agentsview_setup() {
     if [[ "$reply" != "y" && "$reply" != "Y" ]]; then
         echo disabled > "$AGENTSVIEW_STATE_FILE"
         info "agentsview: export disabled"
-        return 0
+        return 1
     fi
 
     echo enabled > "$AGENTSVIEW_STATE_FILE"
+    return 0
+}
+
+# Orchestrate the agentsview export. Prompts once on first run, then re-syncs
+# on every invocation once enabled -- so agents added after opt-in get their
+# mirror symlink and scan path without re-running the whole opt-in. Returns 0
+# on success/no-op, non-zero on failure (errors already printed).
+agentsview_setup() {
+    # Always write the setup-merge script (it's a no-op until opt-in records
+    # `enabled`). This way, opt-in via `sv-agentsview-setup` after the
+    # initial `sv setup --rebuild` still wires up the sandbox-side ACL hook,
+    # and new agents land in the generated ACL loop automatically.
+    write_setup_merge_script
+
+    # First-run opt-in: prompt only when no choice is recorded yet.
+    if [[ ! -f "$AGENTSVIEW_STATE_FILE" ]]; then
+        agentsview_first_run_prompt || return 0
+    fi
+
+    # Re-sync runs on every invocation once enabled. This closes the gap for
+    # agents added after opt-in: the symlink and the config scan path used to
+    # be written once, at opt-in, so a new agent stayed invisible until the
+    # user deleted the state file and re-ran the whole prompt. Now the symlink
+    # is refreshed every run, and the scan path is added (with a prompt) the
+    # first time it's missing.
+    [[ "$(cat "$AGENTSVIEW_STATE_FILE")" == "enabled" ]] || return 0
+
     agentsview_install_symlinks
-    agentsview_update_config
+    agentsview_resync_config
 }
 
 ###############################################################################
@@ -322,14 +484,20 @@ print_usage() {
     cat <<EOF
 Usage: sv-agentsview-setup [--help]
 
-Detect agentsview, prompt once on first run, install mirror symlinks,
-update host config.toml, and write the sandbox-side setup-merge script.
+Detect agentsview, prompt once on first run, then re-sync on every run:
+install mirror symlinks, add missing scan paths to host config.toml, and
+write the sandbox-side setup-merge script.
+
+New agents sandvault adds after opt-in are synced automatically. Decline a
+sync prompt to skip that agent permanently; remove its key from the
+declined-keys file to re-enable it.
 
 Uninstall is handled by \`sv uninstall\`, which removes $SV_PRIVATE_DIR/.
 Host config.toml is left in place (revert is a one-line manual edit).
 
-State file: $AGENTSVIEW_STATE_FILE
-Host config: $AGENTSVIEW_HOST_CONFIG
+State file:       $AGENTSVIEW_STATE_FILE
+Declined keys:    $AGENTSVIEW_DECLINED_FILE
+Host config:      $AGENTSVIEW_HOST_CONFIG
 EOF
 }
 
