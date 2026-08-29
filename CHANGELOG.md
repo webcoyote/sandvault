@@ -2,6 +2,20 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.30.0] - 2026-08-29
+
+### Changed
+
+- LightPanda now runs inside the sandbox rather than on the host, so browser automation is subject to the same isolation as the rest of the sandboxed environment ([#230](https://github.com/webcoyote/sandvault/pull/230))
+
+### Fixed
+
+- iOS device commands no longer hang indefinitely: `iosef` calls now time out, and device description polling is bounded by wall-clock time ([#231](https://github.com/webcoyote/sandvault/pull/231))
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.29.0] - 2026-08-23
 
 ### Added
