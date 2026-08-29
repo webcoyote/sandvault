@@ -39,6 +39,15 @@ from urllib.parse import parse_qs, urlparse
 # because cold runtimes routinely take longer than this.
 SUBPROCESS_TIMEOUT_SEC = 120
 
+# iosef UI-automation calls (describe/tap/type/swipe/view) get a tighter budget
+# than the 120s default. These are interactive queries against an already-booted
+# simulator: they normally return in under a second, and when they don't it is
+# because iosef is wedged attaching to the device rather than making progress.
+# At the 120s default a single hung call outlives its caller's whole retry loop,
+# so the retry never happens and the failure looks like an empty response. A
+# short budget converts that hang into a fast, visible, retryable error.
+IOSEF_TIMEOUT_SEC = 20
+
 # `simctl bootstatus -b` blocks server-side until the simulator finishes
 # booting. Cold first-boot of a freshly installed iOS runtime can exceed the
 # normal 120s budget, so give it its own (much larger) timeout. If even this
@@ -283,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
         except RuntimeError as e:
             self._send_error(500, str(e))
             return
-        rc, stdout, stderr = run_argv(argv)
+        rc, stdout, stderr = run_argv(argv, timeout=IOSEF_TIMEOUT_SEC)
         self._send_shell_result(rc, stdout, stderr)
 
     def _simctl(self, *args):
@@ -393,7 +402,7 @@ class Handler(BaseHTTPRequestHandler):
             argv = iosef_cmd() + ["view", "--local", "--device", UDID]
         except RuntimeError as e:
             return self._send_error(500, str(e))
-        rc, stdout, stderr = run_argv(argv)
+        rc, stdout, stderr = run_argv(argv, timeout=IOSEF_TIMEOUT_SEC)
         if rc != 0 or not stdout:
             return self._send_error(
                 500, "iosef view failed",

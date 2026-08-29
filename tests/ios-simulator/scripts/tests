@@ -101,15 +101,26 @@ phase_launch_preferences() {
 phase_describe() {
     log "Test 3: describe"
     local response=""
-    local i
-    for i in $(seq 1 15); do
-        response=$(curl -sf "$EP/describe") || response=""
+    local i=0
+    local deadline=$(( $(date +%s) + 90 ))
+    # Bound by wall-clock, not poll count: a slow/wedged iosef makes each call
+    # take seconds rather than returning instantly, so a fixed poll count can
+    # stretch this phase to many minutes. The deadline keeps the phase bounded
+    # however long individual calls take.
+    while :; do
+        i=$(( i + 1 ))
+        # No `-f`: on an HTTP error curl would print nothing, discarding the
+        # bridge's error body (e.g. iosef's "timeout after Ns"). The length
+        # check below still rejects error responses, so keeping the body only
+        # affects what a failure reports, not whether it passes.
+        response=$(curl -s "$EP/describe") || response=""
         if [[ ${#response} -gt 100 ]]; then
             log "  PASS (${#response} bytes, after ${i} polls)"
             return
         fi
-        if [[ $i -eq 15 ]]; then
-            fail "/describe returned unexpected output:\n${response}"
+        if [[ $(date +%s) -ge $deadline ]]; then
+            fail "/describe did not return a tree within 90s (${i} polls); last response:\n${response}"
+            return
         fi
         sleep 2
     done
