@@ -1,0 +1,69 @@
+#!/bin/bash
+# Start LightPanda browser inside the sandbox and export SV_BROWSER_ENDPOINT.
+# This script is sourced (not exec'd) by the sv host script's ZSH_COMMAND so
+# that the environment variable and cleanup trap are visible to the session.
+#
+# Requirements:
+#   - lightpanda binary on PATH (installed via Homebrew on the host)
+#   - Sourced after shell init (.zprofile) so homebrew PATH is available
+
+_lp_debug() {
+    [[ "${SV_VERBOSE:-0}" -lt 1 ]] || echo >&2 "start-lightpanda: $*"
+}
+
+_lp_bin="$(command -v lightpanda 2>/dev/null || true)"
+if [[ -z "$_lp_bin" ]]; then
+    echo >&2 "start-lightpanda: ERROR: lightpanda binary not found on PATH."
+    exit 1
+fi
+
+_SV_LP_LOG="$(mktemp "${TMPDIR:-/tmp}/lightpanda-XXXXXX.log")"
+
+_lp_debug "Starting lightpanda on 127.0.0.1..."
+"$_lp_bin" serve \
+    --host 127.0.0.1 \
+    --port 0 \
+    --log-level info \
+    > "$_SV_LP_LOG" 2>&1 &
+_SV_LP_PID=$!
+
+# Chain cleanup onto any existing EXIT trap so we don't clobber it.
+_lp_existing_trap="$(trap -p EXIT | sed "s/^trap -- '//;s/' EXIT$//" || true)"
+if [[ -n "$_lp_existing_trap" ]]; then
+    # shellcheck disable=SC2064
+    trap "${_lp_existing_trap}; kill $_SV_LP_PID 2>/dev/null; wait $_SV_LP_PID 2>/dev/null; rm -f '$_SV_LP_LOG'" EXIT
+else
+    # shellcheck disable=SC2064
+    trap "kill $_SV_LP_PID 2>/dev/null; wait $_SV_LP_PID 2>/dev/null; rm -f '$_SV_LP_LOG'" EXIT
+fi
+
+# Wait for lightpanda to log its bound address (up to 15 seconds).
+# Format: $msg="server running" address=127.0.0.1:NNNNN
+_lp_port=""
+_lp_i=0
+while [[ $_lp_i -lt 150 ]]; do
+    if ! kill -0 "$_SV_LP_PID" 2>/dev/null; then
+        echo >&2 "start-lightpanda: lightpanda exited unexpectedly. Log:"
+        cat >&2 "$_SV_LP_LOG" 2>/dev/null || true
+        echo >&2 "start-lightpanda: ERROR: lightpanda exited unexpectedly."
+        exit 1
+    fi
+    _lp_port=$(sed -n 's|.*"server running" address=127\.0\.0\.1:\([0-9]*\).*|\1|p' "$_SV_LP_LOG" 2>/dev/null | head -1)
+    if [[ -n "$_lp_port" ]]; then
+        break
+    fi
+    sleep 0.1
+    _lp_i=$(( _lp_i + 1 ))
+done
+
+if [[ -z "$_lp_port" ]]; then
+    kill "$_SV_LP_PID" 2>/dev/null || true
+    wait "$_SV_LP_PID" 2>/dev/null || true
+    echo >&2 "start-lightpanda: ERROR: lightpanda did not report a port within 15 seconds. Check $_SV_LP_LOG."
+    exit 1
+fi
+
+export SV_BROWSER_ENDPOINT="http://127.0.0.1:$_lp_port"
+_lp_debug "lightpanda started (PID $_SV_LP_PID, port $_lp_port, endpoint $SV_BROWSER_ENDPOINT)"
+
+unset _lp_bin _lp_port _lp_i _lp_existing_trap
