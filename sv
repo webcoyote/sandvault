@@ -979,7 +979,7 @@ show_help() {
     echo "  -x, --no-sandbox     Disable sandbox-exec restrictions"
     echo "  -b, --browser        Launch headless browser and pass endpoint into sandbox (alias of --chrome)"
     echo "      --chrome         Use Google Chrome / Chromium as the browser backend [default]"
-    echo "      --lightpanda     Use Lightpanda as the browser backend (lighter, ARM-only on macOS)"
+    echo "      --lightpanda     Use Lightpanda as the browser backend (runs inside sandbox, ARM-only on macOS)"
     echo "  -e, --endpoint       Show browser endpoint URL (requires --browser session)"
     echo "  -i, --ios            Boot iOS Simulator and expose HTTP bridge into sandbox"
     echo "  -I, --ios-gui        Also show the Simulator.app window (implies --ios)"
@@ -1645,10 +1645,18 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
     (subpath "$SHARED_WORKSPACE")
     (subpath "/Users/$SANDVAULT_USER"))
 
-;; System.keychain is world-readable (mode 644) on stock macOS, so this
-;; deny is load-bearing rather than belt-and-suspenders.
+;; Deny /Library/Keychains, then re-allow only System.keychain.
+;; The other keychains there hold user and system secrets, and unlike
+;; /dev/*disk* they are not protected by restrictive file permissions
+;; (System.keychain itself is mode 644), so this deny is the only thing
+;; keeping the sandvault user out of them.
+;; System.keychain is re-allowed because it holds the CA trust anchors
+;; that tools like LightPanda need to validate TLS connections; its
+;; contents are public certificates, not secrets.
 (deny file-read*
     (subpath "/Library/Keychains"))
+(allow file-read*
+    (literal "/Library/Keychains/System.keychain"))
 
 ;; Allow writes to sandvault home, shared workspace, temporary directories.
 ;; Allow writes to devices, which are protected by unix permissions
@@ -1879,17 +1887,18 @@ if [[ "$NESTED" == "false" ]]; then
     sv_exit_code=0
     register_session
     trap 'sv_exit_code=$?; set +e; unregister_session; exit $sv_exit_code' EXIT
-    if [[ "$USE_BROWSER" == "true" ]]; then
+    if [[ "$USE_BROWSER" == "true" && "$BROWSER_KIND" != "lightpanda" ]]; then
         start_browser
     fi
     if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
         start_ios_simulator
     fi
 else
-    if [[ "$USE_BROWSER" == "true" && -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
-        # Nested session with --browser: the browser cannot be launched inside
-        # the sandbox, so the parent session must already have started it.
-        abort "--browser requires a host-side browser, but the parent sandvault session was not started with --browser/--chrome/--lightpanda"
+    if [[ "$USE_BROWSER" == "true" && "$BROWSER_KIND" != "lightpanda" && -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
+        # Nested session with --browser/--chrome: the browser cannot be launched
+        # inside the sandbox, so the parent session must already have started it.
+        # LightPanda is exempt: it runs inside the sandbox.
+        abort "--browser/--chrome requires a host-side browser, but the parent sandvault session was not started with --browser/--chrome"
     fi
     if [[ "$USE_IOS_SIMULATOR" == "true" && -z "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
         # Nested session with --ios: the simulator runs on the host,
@@ -1916,6 +1925,13 @@ if [[ "$NESTED" == "false" ]]; then
     ZSH_COMMAND="$ZSH_COMMAND; ~/configure"
 fi
 ZSH_COMMAND="$ZSH_COMMAND; source ~/.zshenv; source ~/.zprofile; source ~/.zshrc"
+
+# LightPanda runs inside the sandbox (unlike Chrome, which runs on the host).
+# Source the start script after shell init so homebrew PATH is available.
+# ~/bin/start-lightpanda is deployed by the guest/home rsync above.
+if [[ "$USE_BROWSER" == "true" && "$BROWSER_KIND" == "lightpanda" ]]; then
+    ZSH_COMMAND="$ZSH_COMMAND; source ~/bin/start-lightpanda"
+fi
 
 if [[ "$COMMAND" != "" ]]; then
     # Agent command (sv claude -- optional arguments here): exec it under zsh
@@ -1956,7 +1972,9 @@ fi
 if [[ "$NATIVE_INSTALL" == "true" ]]; then
     EXTRA_ENV+=("SV_NATIVE_INSTALL=true")
 fi
-if [[ "$USE_BROWSER" == "true" ]]; then
+if [[ "$USE_BROWSER" == "true" && "$BROWSER_KIND" != "lightpanda" ]]; then
+    # LightPanda runs inside the sandbox and exports SV_BROWSER_ENDPOINT
+    # itself; Chrome runs on the host and needs the endpoint passed in.
     if [[ -n "${SV_BROWSER_ENDPOINT:-}" ]]; then
         EXTRA_ENV+=("SV_BROWSER_ENDPOINT=$SV_BROWSER_ENDPOINT")
     elif [[ -n "$BROWSER_PORT" ]]; then
