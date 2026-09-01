@@ -1618,6 +1618,18 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
 (allow file-read*
     (subpath "/Volumes/Macintosh HD"))
 
+;; Deny mounting disks
+;; diskarbitrationd -- diskutil mount, hdiutil attach, Finder disk handling
+;; NetAuthAgent     -- NetFS: 'open smb://...', Connect to Server
+;; NetAuthSysAgent
+;; appleeventsd     -- disallow osascript telling Finder to do it
+(deny file-mount file-unmount)
+(deny mach-lookup
+  (global-name "com.apple.DiskArbitration.diskarbitrationd")
+  (global-name "com.apple.NetAuthAgent")
+  (global-name "com.apple.NetAuthSysAgent")
+  (global-name "com.apple.appleeventsd"))
+
 ;; Block raw disk and packet-capture devices regardless of the broader
 ;; /dev write allow below. Defense in depth: /dev/*disk* is already
 ;; root:operator 640, but this removes reliance on POSIX perms alone.
