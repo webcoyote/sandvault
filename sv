@@ -723,6 +723,18 @@ start_ios_simulator() {
         abort "xcrun not found. Install Xcode or the Command Line Tools."
     fi
 
+    # simctl ships with Xcode, not the Command Line Tools, so xcrun can
+    # exist while simctl does not. Check before using it so the failure
+    # names the actual problem.
+    # Note: `xcode-select --install` installs only the Command Line Tools,
+    # which do not include simctl. Full Xcode has no Apple-supported CLI
+    # installer, so point at the Mac App Store (mas) or the xcodes tool.
+    if ! /usr/bin/xcrun --find simctl >/dev/null 2>&1; then
+        abort "simctl not found; iOS simulator needs Xcode (Command Line Tools are not enough).\n" \
+              "Install from the Mac App Store: https://apps.apple.com/app/xcode/id497799835\n" \
+              "  Then select it: sudo xcode-select -s /Applications/Xcode.app"
+    fi
+
     # Select device type and runtime.
     local device_type runtime pair
     # shellcheck disable=SC2310 # ios_pick_device_and_runtime intentionally used in condition
@@ -1617,6 +1629,18 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
     (subpath "/Volumes"))
 (allow file-read*
     (subpath "/Volumes/Macintosh HD"))
+
+;; Deny mounting disks
+;; diskarbitrationd -- diskutil mount, hdiutil attach, Finder disk handling
+;; NetAuthAgent     -- NetFS: 'open smb://...', Connect to Server
+;; NetAuthSysAgent
+;; appleeventsd     -- disallow osascript telling Finder to do it
+(deny file-mount file-unmount)
+(deny mach-lookup
+  (global-name "com.apple.DiskArbitration.diskarbitrationd")
+  (global-name "com.apple.NetAuthAgent")
+  (global-name "com.apple.NetAuthSysAgent")
+  (global-name "com.apple.appleeventsd"))
 
 ;; Block raw disk and packet-capture devices regardless of the broader
 ;; /dev write allow below. Defense in depth: /dev/*disk* is already

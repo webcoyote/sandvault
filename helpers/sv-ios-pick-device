@@ -24,7 +24,12 @@ def dt_key(d):
 
 
 def main():
-    data = json.load(sys.stdin)
+    # `xcrun simctl` writes nothing to stdout when Xcode isn't installed
+    # (only the Command Line Tools). Exit non-zero rather than traceback.
+    try:
+        data = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        sys.exit(1)
 
     runtimes = [
         r for r in data.get("runtimes", [])
