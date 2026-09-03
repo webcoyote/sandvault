@@ -722,6 +722,136 @@ EOF
     }
     queue_test test_pi_wrapper_no_command_v_loop
 
+    # muse listing, alongside the opencode and pi help tests.
+    test_help_lists_muse() {
+        local output
+        output=$(sv_cmd --help 2>&1)
+        if [[ "$output" == *"m,  muse"* ]]; then
+            pass "--help lists muse"
+        else
+            fail "--help lists muse" "muse command line" "$output"
+        fi
+    }
+    queue_test test_help_lists_muse
+
+    # Muse ships its own Seatbelt sandbox and staged approval prompts, both ON
+    # by default; --yolo turns both off and trusts the workspace, the direct
+    # analogue of codex's --dangerously-bypass-approvals-and-sandbox. Anchor it
+    # to the exec line, like the pi test: --yolo also appears in a comment and
+    # the startup banner, so a whole-file grep would stay green after it was
+    # dropped from the exec -- exactly the drift this guards.
+    test_muse_wrapper_uses_yolo() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/muse"
+        if [[ ! -x "$wrapper" ]]; then
+            fail "muse wrapper uses --yolo" "executable wrapper" "$wrapper"
+            return
+        fi
+        if grep -Eq '^exec .*--yolo' "$wrapper"; then
+            pass "muse wrapper uses --yolo"
+        else
+            fail "muse wrapper uses --yolo" \
+                "--yolo on the exec line" "$wrapper"
+        fi
+    }
+    queue_test test_muse_wrapper_uses_yolo
+
+    # Guard the dispatch mapping, as for pi: a typo in (or removal of) the
+    # m|muse) case arm would pass the wrapper static tests but break 'sv muse'.
+    test_sv_dispatches_muse() {
+        if grep -Eq '^[[:space:]]+m[|]muse\)' "$SV_BASE" \
+            && grep -A2 -E '^[[:space:]]+m[|]muse\)' "$SV_BASE" | grep -q 'COMMAND=muse'; then
+            pass "sv dispatches m|muse -> COMMAND=muse"
+        else
+            fail "sv dispatches m|muse -> COMMAND=muse" \
+                "an m|muse) case arm setting COMMAND=muse" \
+                "missing or broken dispatch arm in $SV_BASE"
+        fi
+    }
+    queue_test test_sv_dispatches_muse
+
+    # Same error class as the pi formula test: muse installs from the
+    # homebrew/cask "muse-code" token, whose name differs from its "muse"
+    # binary. Passing only the token would look for a "muse-code" binary that
+    # does not exist, reinstalling on every run.
+    test_sv_installs_muse_via_brew_cask() {
+        if grep -F -- 'ensure_brew_tool "muse-code" "muse"' "$SV_BASE" &>/dev/null; then
+            pass "sv installs muse via the muse-code cask"
+        else
+            fail "sv installs muse via the muse-code cask" \
+                'ensure_brew_tool "muse-code" "muse"' \
+                "missing or broken install arm in $SV_BASE"
+        fi
+    }
+    queue_test test_sv_installs_muse_via_brew_cask
+
+    # The other install path. Muse is not an npm package: its installer drops a
+    # self-updating launcher into MUSE_INSTALL_DIR and would append PATH lines
+    # to the shell rc files that sandvault owns and rewrites from guest/home on
+    # every build, so MUSE_NO_MODIFY_PATH must stay set. Both surface only at
+    # runtime under 'sv -N muse', which the suite never exercises.
+    test_muse_wrapper_native_install() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/muse"
+        if [[ ! -x "$wrapper" ]]; then
+            fail "muse wrapper native-installs from dev.meta.ai" \
+                "executable wrapper" "$wrapper"
+            return
+        fi
+        local code
+        code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        if ! grep -F -- 'https://dev.meta.ai/install.sh' <<< "$code" &>/dev/null; then
+            fail "muse wrapper native-installs from dev.meta.ai" \
+                'curl -fsSL https://dev.meta.ai/install.sh' "$wrapper"
+        elif ! grep -F -- 'MUSE_INSTALL_DIR="$HOME/.local/bin"' <<< "$code" &>/dev/null; then
+            # Not redundant with the installer's default. This pins the install
+            # dir to the one path the wrapper then execs, so an upstream default
+            # change cannot separate them. Were they to diverge, the
+            # [[ ! -x "$HOME/.local/bin/muse" ]] guard would never become false:
+            # every 'sv -N muse' would re-download ~230MB, re-run the installer,
+            # and still exit "ERROR: muse is not installed".
+            fail "muse wrapper native-installs from dev.meta.ai" \
+                'MUSE_INSTALL_DIR="$HOME/.local/bin" pinned to the exec path' \
+                "$wrapper"
+        elif ! grep -F -- 'MUSE_NO_MODIFY_PATH=1' <<< "$code" &>/dev/null; then
+            fail "muse wrapper native-installs from dev.meta.ai" \
+                "MUSE_NO_MODIFY_PATH=1 so the installer leaves .zshrc alone" \
+                "$wrapper"
+        else
+            pass "muse wrapper native-installs from dev.meta.ai"
+        fi
+    }
+    queue_test test_muse_wrapper_native_install
+
+    # muse is deliberately NOT in AGENTSVIEW_AGENTS: agentsview 0.42.0 has no
+    # muse parser or config key, so a mirror would copy files it cannot read.
+    # Assert the omission is still deliberate rather than half-done -- a muse
+    # entry with no matching key in agentsview-config.py's VALID_KEYS would
+    # abort sv-agentsview-setup for every agent, not just muse.
+    test_agentsview_omits_muse() {
+        local paths="$SCRIPT_DIR/../helpers/agentsview-paths.sh"
+        if [[ ! -r "$paths" ]]; then
+            fail "agentsview omits muse" "readable agentsview-paths.sh" "$paths"
+            return
+        fi
+        # shellcheck source=/dev/null
+        source "$paths"
+        local found=false agent
+        for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            [[ "$agent" == "muse" ]] && found=true
+        done
+        if [[ "$found" == "true" ]]; then
+            fail "agentsview omits muse" \
+                "muse absent from AGENTSVIEW_AGENTS until agentsview supports it" \
+                "muse is listed; add its key to VALID_KEYS/DEFAULT_SUBPATHS in agentsview-config.py and the scripts/test-agentsview-resync.sh fixtures too"
+        elif ! grep -q 'muse' "$paths"; then
+            fail "agentsview omits muse" \
+                "a comment recording why muse is omitted" \
+                "no muse note in $paths -- the omission looks accidental"
+        else
+            pass "agentsview omits muse"
+        fi
+    }
+    queue_test test_agentsview_omits_muse
+
     # Unknown option
     test_unknown_option() {
         local output
@@ -935,7 +1065,7 @@ EOF
         fi
         local failed=false
         local link
-        for link in claude codex opencode gemini pi; do
+        for link in claude codex opencode gemini pi muse; do
             if [[ -L "$brew_prefix/bin/$link" ]]; then
                 local link_perms
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_prefix/bin/$link")

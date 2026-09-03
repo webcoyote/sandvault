@@ -470,6 +470,12 @@ install_deps () {
             pi)
                 ensure_brew_tool "pi-coding-agent" "pi"
                 ;;
+            muse)
+                # The "muse-code" cask ships a "muse" binary; names differ, so
+                # both arguments are required. Casks are quarantined on
+                # download, which ensure_brew_tool's warm-up step clears.
+                ensure_brew_tool "muse-code" "muse"
+                ;;
             *)
                 # No tool installation needed for other commands
                 ;;
@@ -1006,11 +1012,12 @@ show_help() {
     echo "  o,  opencode [PATH]  Open OpenCode in sandvault"
     echo "  g,  gemini [PATH]    Open Google Gemini in sandvault"
     echo "  p,  pi     [PATH]    Open pi in sandvault"
+    echo "  m,  muse   [PATH]    Open Muse Code in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove sandvault; keep shared files"
     echo ""
-    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, shell)"
+    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, shell)"
     echo ""
     echo "Environment:"
     echo "  SANDVAULT_ARGS       Default arguments (prepended to command line)"
@@ -1140,6 +1147,10 @@ case "${1:-}" in
         ;;
     p|pi)
         COMMAND=pi
+        INITIAL_DIR="${2:-}"
+        ;;
+    m|muse)
+        COMMAND=muse
         INITIAL_DIR="${2:-}"
         ;;
     s|shell)
@@ -1828,7 +1839,7 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
     # Fix homebrew symlinks for any installed tools
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in condition
     if brew_shellenv 2>/dev/null; then
-        for tool_cli in claude codex opencode gemini pi; do
+        for tool_cli in claude codex opencode gemini pi muse; do
             brew_link="$(brew --prefix)/bin/$tool_cli"
             if [[ -L "$brew_link" ]]; then
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_link")

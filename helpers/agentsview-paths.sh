@@ -9,6 +9,16 @@
 
 AGENTSVIEW_AGENTS=(claude codex opencode gemini pi)
 
+# muse (Muse Code) is deliberately absent. agentsview 0.42.0 has no muse parser
+# and no muse config key -- its nearest entry, commandcode_project_dirs
+# (~/.commandcode/projects), is a different tool; muse keeps sessions under
+# ~/.local/share/muse/sessions. Mirroring that directory would copy files
+# agentsview cannot read. Add muse here (SUBDIR/DEFAULT/TOMLKEY, the
+# VALID_KEYS and DEFAULT_SUBPATHS tables in agentsview-config.py, and the
+# fixtures in scripts/test-agentsview-resync.sh) once agentsview ships one.
+# Existing opt-in users then pick it up the documented way: delete
+# $SV_PRIVATE_DIR/setup/agentsview-export.state and re-run sv-agentsview-setup.
+
 # Sandbox-side path under /Users/sandvault-$USER/
 AGENTSVIEW_SUBDIR_claude=".claude/projects"
 AGENTSVIEW_SUBDIR_codex=".codex/sessions"
