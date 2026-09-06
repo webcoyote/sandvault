@@ -1797,6 +1797,170 @@ STUB_EOF
     queue_test test_sv_clone_dash_k_no_gh
     wait_for_all_running_tests
 
+    # Test that -t/--worktree stores the repository bare and starts the
+    # session in a sibling worktree instead of in the repository itself.
+    # The assertions below are the reasons the mode exists, so each one is
+    # checked separately rather than collapsed into a single "it worked".
+    test_sv_clone_worktree() {
+        local src_repository repository_name branch repo_path worktree_path
+        local output status launch_dir bare refspec heads
+
+        branch="sv-test/worktree"
+        src_repository="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null || true)"
+        if [[ -z "$src_repository" ]]; then
+            fail "sv-clone -t starts the session in a worktree" "current repository available" "$src_repository"
+            return
+        fi
+        repository_name="$(basename "$src_repository")"
+        repo_path="$SHARED_WORKSPACE/repos/$repository_name.git"
+        worktree_path="$SHARED_WORKSPACE/worktrees/$repository_name/$branch"
+
+        sv_cmd s -- rm -rf "$repo_path" "$SHARED_WORKSPACE/worktrees/$repository_name" >/dev/null 2>&1
+
+        # sv-clone writes its own messages to stderr, so stdout ends with the
+        # guest's output: the directory the session actually started in.
+        set +e
+        launch_dir=$(sv_clone_cmd -t "$branch" "$src_repository" -- --no-build shell -- pwd 2>/dev/null)
+        status=$?
+        set -e
+        launch_dir="${launch_dir##*$'\n'}"
+        if [[ "$status" -ne 0 ]]; then
+            fail "sv-clone -t starts the session in a worktree" "exit 0" "$status | $launch_dir"
+            return
+        fi
+
+        # The session starts in the worktree, and the worktree is outside the
+        # repository rather than nested under it.
+        if [[ "$launch_dir" != "$worktree_path" ]]; then
+            fail "sv-clone -t starts the session in the worktree" "$worktree_path" "$launch_dir"
+            return
+        fi
+        if [[ "$launch_dir" == "$repo_path"/* ]]; then
+            fail "sv-clone -t worktree is outside the repository" "not under $repo_path" "$launch_dir"
+            return
+        fi
+
+        # The repository is bare, so the session cannot commit into it.
+        bare=$(git -C "$repo_path" config core.bare 2>/dev/null || true)
+        if [[ "$bare" != "true" ]]; then
+            fail "sv-clone -t repository is bare" "true" "$bare"
+            return
+        fi
+
+        # Without a refspec, "git fetch origin" would populate nothing.
+        refspec=$(git -C "$repo_path" config remote.origin.fetch 2>/dev/null || true)
+        if [[ "$refspec" != "+refs/heads/*:refs/remotes/origin/*" ]]; then
+            fail "sv-clone -t repository has a fetch refspec" "+refs/heads/*:refs/remotes/origin/*" "$refspec"
+            return
+        fi
+
+        # Only the task branch: clone-time heads would shadow origin/*, so a
+        # branch name would resolve to whatever was current at clone time.
+        heads=$(git -C "$repo_path" for-each-ref --format='%(refname)' refs/heads 2>/dev/null || true)
+        if [[ "$heads" != "refs/heads/$branch" ]]; then
+            fail "sv-clone -t leaves no clone-time local heads" "refs/heads/$branch" "$heads"
+            return
+        fi
+
+        # Re-running the same branch reuses the worktree instead of failing.
+        set +e
+        output=$(sv_clone_cmd -t "$branch" "$src_repository" -- --no-build shell -- pwd 2>/dev/null)
+        status=$?
+        set -e
+        output="${output##*$'\n'}"
+        if [[ "$status" -ne 0 || "$output" != "$worktree_path" ]]; then
+            fail "sv-clone -t re-run reuses the worktree" "exit 0 | $worktree_path" "$status | $output"
+            return
+        fi
+
+        pass "sv-clone -t clones bare and starts the session in a sibling worktree"
+
+        sv_cmd s -- rm -rf "$repo_path" "$SHARED_WORKSPACE/worktrees/$repository_name" >/dev/null 2>&1
+    }
+    queue_test test_sv_clone_worktree
+    wait_for_all_running_tests
+
+    # Test that --base with a bare branch name still creates the task branch.
+    # A bare name triggers "git worktree add"'s remote-tracking DWIM, which
+    # discards -b unless -b precedes the path, checking out a branch named for
+    # the base instead. The default base is a remote-qualified origin/HEAD, so
+    # only an explicit --base of this shape reaches that path.
+    test_sv_clone_worktree_bare_base() {
+        local src_repository repository_name branch base repo_path worktree_path
+        local status launch_dir head_branch heads
+
+        branch="sv-test/bare-base"
+        base="main"
+        src_repository="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null || true)"
+        if [[ -z "$src_repository" ]]; then
+            fail "sv-clone -t --base <bare name> creates the task branch" "current repository available" ""
+            return
+        fi
+        repository_name="$(basename "$src_repository")"
+        repo_path="$SHARED_WORKSPACE/repos/$repository_name.git"
+        worktree_path="$SHARED_WORKSPACE/worktrees/$repository_name/$branch"
+
+        sv_cmd s -- rm -rf "$repo_path" "$SHARED_WORKSPACE/worktrees/$repository_name" >/dev/null 2>&1
+
+        set +e
+        launch_dir=$(sv_clone_cmd -t "$branch" --base "$base" "$src_repository" \
+            -- --no-build shell -- pwd 2>/dev/null)
+        status=$?
+        set -e
+        launch_dir="${launch_dir##*$'\n'}"
+        if [[ "$status" -ne 0 || "$launch_dir" != "$worktree_path" ]]; then
+            fail "sv-clone -t --base <bare name> starts in the worktree" "$worktree_path" "$status | $launch_dir"
+            return
+        fi
+
+        # The session is on the task branch, not on a branch named for the base.
+        head_branch=$(git -C "$worktree_path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+        if [[ "$head_branch" != "$branch" ]]; then
+            fail "sv-clone -t --base <bare name> checks out the task branch" "$branch" "$head_branch"
+            return
+        fi
+
+        heads=$(git -C "$repo_path" for-each-ref --format='%(refname)' refs/heads 2>/dev/null || true)
+        if [[ "$heads" != "refs/heads/$branch" ]]; then
+            fail "sv-clone -t --base <bare name> creates only the task branch" "refs/heads/$branch" "$heads"
+            return
+        fi
+
+        pass "sv-clone -t with a bare --base name still creates the task branch"
+
+        sv_cmd s -- rm -rf "$repo_path" "$SHARED_WORKSPACE/worktrees/$repository_name" >/dev/null 2>&1
+    }
+    queue_test test_sv_clone_worktree_bare_base
+    wait_for_all_running_tests
+
+    # Test that the worktree options are validated before anything is cloned.
+    test_sv_clone_worktree_rejects_invalid_input() {
+        local output status
+        local repository="https://example.invalid/org/repo.git"
+
+        set +e
+        output=$(sv_clone_cmd -t 'bad..branch' "$repository" -- --no-build shell -- true 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -eq 0 || "$output" != *"Not a valid branch name"* ]]; then
+            fail "sv-clone -t rejects an invalid branch name" "non-zero exit naming the branch" "$status | $output"
+            return
+        fi
+
+        set +e
+        output=$(sv_clone_cmd --base origin/main "$repository" -- --no-build shell -- true 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -eq 0 || "$output" != *"--base requires --worktree"* ]]; then
+            fail "sv-clone --base requires --worktree" "non-zero exit" "$status | $output"
+            return
+        fi
+
+        pass "sv-clone rejects an invalid branch name and --base without --worktree"
+    }
+    queue_test test_sv_clone_worktree_rejects_invalid_input
+    wait_for_all_running_tests
+
     fi # end sv-clone tests (non-SSH only)
 
     ###############################################################################

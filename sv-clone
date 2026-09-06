@@ -16,6 +16,9 @@
 #                            to GitHub (read-only)
 #   -w, --allow-repo-write   Allow the deploy key to push to this repo
 #                            (implies --repo-deploy-key)
+#   -t, --worktree BRANCH    Store the repository bare and launch the session
+#                            in a fresh git worktree checked out on BRANCH
+#       --base REF           Branch point for a new BRANCH [default: origin/HEAD]
 #
 # Everything after -- is passed directly to sv (options, command, args).
 # If no command is given, defaults to "shell".
@@ -24,6 +27,7 @@
 #   sv-clone https://github.com/org/repo.git
 #   sv-clone -k git@github.com:org/repo.git -- claude
 #   sv-clone -w ~/projects/myrepo -- -b shell -- echo hello
+#   sv-clone -t fix-login https://github.com/org/repo.git -- claude
 set -Eeuo pipefail
 trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
@@ -83,6 +87,8 @@ CLONE_REPOSITORY=""
 SV_ARGS=()
 DEPLOY_KEY=false
 DEPLOY_KEY_WRITE=false
+WORKTREE_BRANCH=""
+WORKTREE_BASE=""
 
 if [[ $# -lt 1 ]]; then
     echo >&2 "Usage: $(basename "$0") [OPTIONS] <URL|PATH> [-- sv-args ...]"
@@ -117,6 +123,16 @@ while [[ $# -gt 0 ]]; do
             DEPLOY_KEY_WRITE=true
             shift
             ;;
+        -t|--worktree)
+            WORKTREE_BRANCH="${2:-}"
+            [[ -n "$WORKTREE_BRANCH" ]] || abort "$1 requires a branch name"
+            shift 2
+            ;;
+        --base)
+            WORKTREE_BASE="${2:-}"
+            [[ -n "$WORKTREE_BASE" ]] || abort "$1 requires a ref"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $(basename "$0") [-v|-vv|-vvv] [options] <URL|PATH> [-- sv-args ...]"
             echo ""
@@ -128,6 +144,9 @@ while [[ $# -gt 0 ]]; do
             echo "                          to GitHub (read-only)"
             echo "  -w, --allow-repo-write  Allow the deploy key to push to this repo"
             echo "                          (implies --repo-deploy-key)"
+            echo "  -t, --worktree BRANCH   Store the repository bare and launch the session"
+            echo "                          in a fresh git worktree checked out on BRANCH"
+            echo "      --base REF          Branch point for a new BRANCH [default: origin/HEAD]"
             echo "  -v, --verbose           Enable verbose output"
             echo "  -vv / -vvv              More verbose / even more verbose"
             echo "  -h, --help              Show this help message"
@@ -153,6 +172,19 @@ done
 if [[ -z "$CLONE_REPOSITORY" ]]; then
     abort "Missing repository URL or path"
 fi
+
+if [[ -n "$WORKTREE_BASE" && -z "$WORKTREE_BRANCH" ]]; then
+    abort "--base requires --worktree"
+fi
+
+# The branch name doubles as the worktree's path, so validate it before it is
+# joined to a directory: check-ref-format rejects "..", leading / and leading -.
+if [[ -n "$WORKTREE_BRANCH" ]] \
+    && ! git check-ref-format --branch "$WORKTREE_BRANCH" >/dev/null 2>&1; then
+    abort "Not a valid branch name: $WORKTREE_BRANCH"
+fi
+readonly WORKTREE_BRANCH
+readonly WORKTREE_BASE
 
 
 ###############################################################################
@@ -200,7 +232,16 @@ fi
 readonly REPOSITORY_NAME
 readonly REPOSITORY_SOURCE_URL
 readonly CLONE_SOURCE="${LOCAL_REPOSITORY:-$REPOSITORY_SOURCE_URL}"
-readonly REPO_DIR="$SHARED_WORKSPACE/repos/$REPOSITORY_NAME"
+
+# Distinct repository path so the two modes never share a directory. Worktrees
+# live outside it: the repository must not be an ancestor of the session's cwd.
+if [[ -n "$WORKTREE_BRANCH" ]]; then
+    readonly REPO_DIR="$SHARED_WORKSPACE/repos/$REPOSITORY_NAME.git"
+    readonly WORKTREE_DIR="$SHARED_WORKSPACE/worktrees/$REPOSITORY_NAME/$WORKTREE_BRANCH"
+else
+    readonly REPO_DIR="$SHARED_WORKSPACE/repos/$REPOSITORY_NAME"
+    readonly WORKTREE_DIR=""
+fi
 
 # Fixed regardless of whether -k/-w is given this run, so a later re-run
 # (with or without those flags) can tell whether an earlier run already
@@ -217,8 +258,16 @@ debug "Destination: $REPO_DIR"
 ###############################################################################
 # Clone or fetch
 ###############################################################################
+# A bare repository has no .git subdirectory; its object store sits at the top.
+if [[ -n "$WORKTREE_BRANCH" ]]; then
+    REPO_MARKER="$REPO_DIR/objects"
+else
+    REPO_MARKER="$REPO_DIR/.git"
+fi
+readonly REPO_MARKER
+
 REPO_EXISTED=false
-if [[ -d "$REPO_DIR/.git" ]]; then
+if [[ -d "$REPO_MARKER" ]]; then
     REPO_EXISTED=true
     # Defer the fetch until after the deploy key is (re)configured below, so
     # the fetch uses an sshCommand we control rather than one the guest may
@@ -228,7 +277,19 @@ if [[ -d "$REPO_DIR/.git" ]]; then
 else
     debug "Cloning into $REPO_DIR..."
     mkdir -p "$(dirname "$REPO_DIR")"
-    git clone --no-hardlinks "$CLONE_SOURCE" "$REPO_DIR"
+    if [[ -n "$WORKTREE_BRANCH" ]]; then
+        # init + fetch rather than "clone --bare": a bare clone gets no
+        # remote.origin.fetch refspec, and its clone-time refs/heads/* shadow
+        # the remote-tracking refs, so a branch name resolves to whatever was
+        # current at clone time. An empty ref namespace avoids both. Fetch also
+        # transfers a pack, so like --no-hardlinks below it never hardlinks the
+        # host's objects into guest-writable storage.
+        git init --quiet --bare "$REPO_DIR"
+        git_repo remote add origin "$CLONE_SOURCE"
+        git_repo fetch --quiet origin
+    else
+        git clone --no-hardlinks "$CLONE_SOURCE" "$REPO_DIR"
+    fi
 
     # If cloned from a local path, set origin to the real remote URL
     if [[ -n "$LOCAL_REPOSITORY" ]]; then
@@ -395,11 +456,17 @@ fi
 # didn't pass either flag — the origin still needs the key to fetch.
 if [[ "$REPO_EXISTED" == true ]]; then
     debug "Fetching existing repository..."
+    FETCH_ARGS=("${LOCAL_REPOSITORY:-origin}")
+    # Fetching a path rather than a named remote updates only FETCH_HEAD, so
+    # worktree mode names the refspec explicitly to keep origin/* current.
+    if [[ -n "$WORKTREE_BRANCH" && -n "$LOCAL_REPOSITORY" ]]; then
+        FETCH_ARGS+=("+refs/heads/*:refs/remotes/origin/*")
+    fi
     if [[ -f "$DEPLOY_KEY_PRIV" ]]; then
         git_repo -c "core.sshCommand=ssh -i '$DEPLOY_KEY_PRIV' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-            fetch "${LOCAL_REPOSITORY:-origin}"
+            fetch "${FETCH_ARGS[@]}"
     else
-        git_repo fetch "${LOCAL_REPOSITORY:-origin}"
+        git_repo fetch "${FETCH_ARGS[@]}"
     fi
 fi
 
@@ -418,6 +485,56 @@ fi
 
 
 ###############################################################################
+# Create the worktree the session will start in
+###############################################################################
+# Re-running the same branch reuses its worktree rather than failing, so an
+# interrupted session can be relaunched. Prune drops registrations for trees
+# deleted from disk; worktrees themselves are never removed automatically.
+if [[ -n "$WORKTREE_BRANCH" ]]; then
+    git_repo worktree prune
+
+    # for-each-ref rather than show-ref: it reports "no such branch" by printing
+    # nothing instead of exiting non-zero, which keeps set -e in force. Compared
+    # exactly, because the pattern refs/heads/foo also matches refs/heads/foo/bar.
+    WORKTREE_LIST="$(git_repo worktree list --porcelain)"
+    BRANCH_REF="$(git_repo for-each-ref --format='%(refname)' "refs/heads/$WORKTREE_BRANCH")"
+
+    if grep -Fxq "worktree $WORKTREE_DIR" <<< "$WORKTREE_LIST"; then
+        debug "Reusing existing worktree $WORKTREE_DIR"
+    else
+        mkdir -p "$(dirname "$WORKTREE_DIR")"
+        # git worktree add reports progress on stdout. Everything this script
+        # emits goes to stderr, so redirect it and leave stdout to the session.
+        if [[ "$BRANCH_REF" == "refs/heads/$WORKTREE_BRANCH" ]]; then
+            git_repo worktree add "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+        else
+            BASE_REF="$WORKTREE_BASE"
+            if [[ -z "$BASE_REF" ]]; then
+                # git records refs/remotes/origin/HEAD as part of the fetch
+                # above, but only since 2.48; on older git, and on remotes
+                # that publish no HEAD, --base has to name the branch point.
+                BASE_REF="$(git_repo for-each-ref --format='%(symref:short)' refs/remotes/origin/HEAD)"
+                [[ -n "$BASE_REF" ]] \
+                    || abort "Could not determine the default branch of $REPOSITORY_NAME; pass --base REF"
+            fi
+            # Qualify a bare base name: left bare it triggers worktree add's
+            # DWIM, which discards -b and checks out the base branch instead.
+            BASE_REMOTE_REF="$(git_repo for-each-ref --format='%(refname)' \
+                "refs/remotes/origin/$BASE_REF")"
+            if [[ "$BASE_REMOTE_REF" == "refs/remotes/origin/$BASE_REF" ]]; then
+                BASE_REF="origin/$BASE_REF"
+            fi
+            # An unresolvable BASE_REF is left to git, which rejects it with
+            # "fatal: invalid reference: <ref>".
+            git_repo worktree add -b "$WORKTREE_BRANCH" "$WORKTREE_DIR" "$BASE_REF" >&2
+        fi
+    fi
+    info "Worktree ready at $WORKTREE_DIR (branch $WORKTREE_BRANCH)"
+fi
+readonly LAUNCH_DIR="${WORKTREE_DIR:-$REPO_DIR}"
+
+
+###############################################################################
 # Launch sandvault session in the cloned repository
 ###############################################################################
 # Default to "shell" if no sv args were given
@@ -425,20 +542,20 @@ if [[ ${#SV_ARGS[@]} -eq 0 ]]; then
     SV_ARGS=("shell")
 fi
 
-# Insert REPO_DIR after the first non-option argument (the sv command name)
+# Insert LAUNCH_DIR after the first non-option argument (the sv command name)
 # so it is always parsed as PATH, even when sv options precede the command.
 LAUNCH_ARGS=()
-REPO_DIR_INSERTED=false
+LAUNCH_DIR_INSERTED=false
 for arg in "${SV_ARGS[@]}"; do
     LAUNCH_ARGS+=("$arg")
-    if [[ "$REPO_DIR_INSERTED" == false && "$arg" != -* && "$arg" != "--" ]]; then
-        LAUNCH_ARGS+=("$REPO_DIR")
-        REPO_DIR_INSERTED=true
+    if [[ "$LAUNCH_DIR_INSERTED" == false && "$arg" != -* && "$arg" != "--" ]]; then
+        LAUNCH_ARGS+=("$LAUNCH_DIR")
+        LAUNCH_DIR_INSERTED=true
     fi
 done
-if [[ "$REPO_DIR_INSERTED" == false ]]; then
-    LAUNCH_ARGS+=("$REPO_DIR")
+if [[ "$LAUNCH_DIR_INSERTED" == false ]]; then
+    LAUNCH_ARGS+=("$LAUNCH_DIR")
 fi
 
-info "Starting sandvault in $REPO_DIR..."
+info "Starting sandvault in $LAUNCH_DIR..."
 exec "$SV" "${LAUNCH_ARGS[@]}"
