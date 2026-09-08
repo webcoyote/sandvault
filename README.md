@@ -6,7 +6,7 @@ SandVault (`sv`) manages a limited user account to sandbox shell commands and AI
 </br>
 </br>
 
-- **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini, pi
+- **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini, pi, Muse Code
 - **Web and iOS automation** - sandbox access to Chrome / Lightpanda and iOS Simulator
 - **Fast context switching** - No VM overhead; instant user switching
 - **Passwordless** - switch accounts without a prompt (after setup)
@@ -93,6 +93,10 @@ Install via git:
 # Run pi in the sandbox
 # shortcut: sv p
   sv pi
+
+# Run Muse Code in the sandbox
+# shortcut: sv m
+  sv muse
 
 # Run command shell in the sandbox
 # shortcut: sv s
@@ -182,6 +186,7 @@ By default, SandVault installs AI tools via Homebrew on the host side. With `--n
 - **OpenCode** — installed via `curl -fsSL https://opencode.ai/install | bash`
 - **Gemini** — installed via `npm install -g @google/gemini-cli`
 - **pi** — installed via `npm install -g @earendil-works/pi-coding-agent`
+- **Muse Code** — installed via `curl -fsSL https://dev.meta.ai/install.sh | bash`
 
 Tools are installed on first run and reused on subsequent runs.
 
@@ -195,6 +200,7 @@ sv -N codex
 sv -N opencode
 sv -N gemini
 sv -N pi
+sv -N muse
 ```
 
 To make native install the default, set `SANDVAULT_ARGS`:
@@ -258,7 +264,7 @@ Explicit command-line arguments are appended after `SANDVAULT_ARGS`, so they are
 
 ## `agentsview` Integration
 
-[`agentsview`](https://github.com/badlogic/agentsview) is a dashboard for AI coding agents (Claude Code, Codex, OpenCode, Gemini, pi). It shows session history, search, and cost tracking. If you have agentsview installed on the host, `sv-agentsview-setup` mirrors sandbox session data so that it appears next to your host-side sessions.
+[`agentsview`](https://github.com/badlogic/agentsview) is a dashboard for AI coding agents (Claude Code, Codex, OpenCode, Gemini, pi). It shows session history, search, and cost tracking. If you have agentsview installed on the host, `sv-agentsview-setup` mirrors sandbox session data so that it appears next to your host-side sessions. Muse Code is not included: agentsview has no parser for its session format yet.
 
 ```bash
 # Detect agentsview, prompt to opt in, and configure
@@ -408,6 +414,11 @@ Next time you run sandvault, your files will be copied to the sandvault user hom
 
 SandVault supports a headless browser for automation from within the sandbox. The browser runs on the host side and the sandbox connects to it via the Chrome DevTools Protocol (CDP) over localhost. Two backends are supported: **Chrome** (default) and **Lightpanda**.
 
+> **Muse Code:** `sv --browser muse` starts the browser, but muse is not told the
+> endpoint exists — it is the one agent with no way to inject a system prompt. The
+> `SV_BROWSER_ENDPOINT` variable below is still set in its environment, so mention
+> it in your prompt or the project's `AGENTS.md` to make muse aware of it.
+
 ### Usage
 
 ```bash
@@ -446,6 +457,11 @@ See also [`./tests/browser/*.js`](./tests/browser) for examples of using Playwri
 ## iOS Simulator Automation
 
 SandVault can expose the iOS Simulator to sandboxed AI agents for iOS app testing. The simulator runs on the host (it is a GUI app and cannot run inside the sandbox), and an HTTP bridge on localhost translates sandbox-side requests into `xcrun simctl` and [`iosef`](https://github.com/riwsky/iosef) invocations.
+
+> **Muse Code:** `sv --ios muse` boots the simulator, but muse is not told the
+> bridge exists — it is the one agent with no way to inject a system prompt. The
+> `SV_IOS_SIMULATOR_ENDPOINT` variable below is still set in its environment, so
+> mention it in your prompt or the project's `AGENTS.md`.
 
 ### Usage
 
@@ -528,6 +544,7 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Runs OpenCode with `OPENCODE_PERMISSION='{"*":"allow"}'`
 - Runs Google Gemini with `--yolo`
 - Runs pi with `--approve` to trust project-local files (pi needs no permission bypass)
+- Runs Muse Code with `--yolo`, which disables both its approval prompts and its own sandbox — sandvault is already the sandbox, and muse's nested one defaults to proxy-only network and workspace-only writes
 - Automates Chrome for web testing (via Chrome DevTools Protocol)
 - Automated iOS Simulator for app testing (via `xcrun simctl`, and `iosef`)
 - Maintains a clean separation between trusted and untrusted code

@@ -1,0 +1,47 @@
+#!/bin/bash
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+unset MUSE
+if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
+    if [[ ! -x "$HOME/.local/bin/muse" ]]; then
+        echo >&2 "Installing Muse Code natively..."
+        # MUSE_INSTALL_DIR is the installer's default, set explicitly so the
+        # binary lands where the line below looks for it regardless of the
+        # installer's future defaults. MUSE_NO_MODIFY_PATH stops the installer
+        # appending "export PATH=..." to .zshrc/.zprofile: sandvault owns those
+        # files and rewrites them from guest/home on every build, so the edit is
+        # both lost and noise. ~/.local/bin is already on PATH via .zprofile.
+        curl -fsSL https://dev.meta.ai/install.sh \
+            | MUSE_INSTALL_DIR="$HOME/.local/bin" MUSE_NO_MODIFY_PATH=1 bash
+    fi
+    MUSE="$HOME/.local/bin/muse"
+elif command -v brew &>/dev/null ; then
+    HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
+    if [[ -x "$HOMEBREW_PREFIX/bin/muse" ]]; then
+        # Homebrew install (the "muse-code" cask ships a "muse" binary)
+        MUSE="$HOMEBREW_PREFIX/bin/muse"
+    fi
+fi
+
+if [[ -z "${MUSE:-}" || ! -x "$MUSE" ]]; then
+    echo >&2 "ERROR: muse is not installed"
+    exit 1
+fi
+
+# No sv-tool-prompts.sh source: muse 1.0.2 has no way to inject a session
+# prompt -- no --append-system-prompt, no instructions-file option, no
+# extra-context directory. It reads instructions only from rules files
+# (AGENTS.md and friends), which would mean writing into the user's repo or
+# another agent's config and outliving the session. So `sv -b/-i muse` set
+# SV_BROWSER_ENDPOINT / SV_IOS_SIMULATOR_ENDPOINT but never announce them;
+# the README says so too. Revisit if muse gains a system-prompt flag.
+
+# --yolo is muse's own "approval and sandbox off" switch, the direct analogue of
+# codex's --dangerously-bypass-approvals-and-sandbox: muse ships a Seatbelt
+# sandbox and staged approval prompts, both ON by default. Sandvault is already
+# the sandbox, so muse's nested one adds no protection while defaulting to
+# proxy-only network and workspace-only writes. --yolo also trusts the workspace
+# for the run, which is what loads its project-local skills and rules.
+echo >&2 "$USER: running muse --yolo"
+exec "$MUSE" --yolo "$@"

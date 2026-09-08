@@ -2,6 +2,25 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.31.0] - 2026-09-08
+
+### Added
+
+- Muse Code is now a first-class agent: run it with `sv muse` (shortcut `sv m`), and pass arguments through with `--`. It is installed automatically on first run via the `muse-code` Homebrew cask, or with the upstream installer under `--native-install`. Muse runs with `--yolo`, which disables both its approval prompts and its own nested sandbox, since sandvault already provides the sandbox. Two current limitations: the `agentsview` dashboard does not yet cover muse sessions, and `sv --browser muse` / `sv --ios muse` start the browser and simulator but cannot announce the endpoints to muse — read `SV_BROWSER_ENDPOINT` and `SV_IOS_SIMULATOR_ENDPOINT` from its environment, or mention them in your prompt or `AGENTS.md`. ([#238](https://github.com/webcoyote/sandvault/pull/238)) — thanks @jeffbowen!
+
+### Changed
+
+- The sandbox account can no longer mount or unmount disks, including via `diskutil`, `hdiutil`, network shares (`smb://`), and Finder automation. ([#233](https://github.com/webcoyote/sandvault/pull/233))
+
+### Fixed
+
+- Starting the iOS simulator without full Xcode installed now explains the actual problem and how to fix it, instead of failing with a confusing error or a Python traceback. The Command Line Tools alone do not include `simctl`, so the message points to the Mac App Store and the follow-up `xcode-select -s` step. ([#233](https://github.com/webcoyote/sandvault/pull/233))
+
+### Thanks to 2 contributors!
+
+- [@jeffbowen](https://github.com/jeffbowen)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.30.0] - 2026-08-29
 
 ### Changed

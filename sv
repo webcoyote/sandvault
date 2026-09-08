@@ -144,7 +144,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.30.0"
+readonly VERSION="1.31.0"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -469,6 +469,12 @@ install_deps () {
                 ;;
             pi)
                 ensure_brew_tool "pi-coding-agent" "pi"
+                ;;
+            muse)
+                # The "muse-code" cask ships a "muse" binary; names differ, so
+                # both arguments are required. Casks are quarantined on
+                # download, which ensure_brew_tool's warm-up step clears.
+                ensure_brew_tool "muse-code" "muse"
                 ;;
             *)
                 # No tool installation needed for other commands
@@ -1006,11 +1012,12 @@ show_help() {
     echo "  o,  opencode [PATH]  Open OpenCode in sandvault"
     echo "  g,  gemini [PATH]    Open Google Gemini in sandvault"
     echo "  p,  pi     [PATH]    Open pi in sandvault"
+    echo "  m,  muse   [PATH]    Open Muse Code in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove sandvault; keep shared files"
     echo ""
-    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, shell)"
+    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, shell)"
     echo ""
     echo "Environment:"
     echo "  SANDVAULT_ARGS       Default arguments (prepended to command line)"
@@ -1140,6 +1147,10 @@ case "${1:-}" in
         ;;
     p|pi)
         COMMAND=pi
+        INITIAL_DIR="${2:-}"
+        ;;
+    m|muse)
+        COMMAND=muse
         INITIAL_DIR="${2:-}"
         ;;
     s|shell)
@@ -1739,15 +1750,27 @@ elif [[ "$REBUILD" == "true" ]]; then
     mkdir -p "$SV_PRIVATE_DIR/setup"
 
     # .gitconfig: seed identity if missing, preserving user overrides
+    # Uses a retry loop because concurrent sandbox sessions may race on the
+    # git config lock file (~/.gitconfig.lock).
     cat > "$SV_PRIVATE_DIR/setup/gitconfig" << SETUP_EOF
 #!/bin/bash
 set -Eeuo pipefail
+_git_config_retry() {
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        if "\$@" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.\$((RANDOM % 5 + 1))
+    done
+    "\$@"
+}
 if [[ ! -f "\$HOME/.gitconfig" ]]; then
-    git config -f "\$HOME/.gitconfig" user.name "$GIT_USER_NAME"
-    git config -f "\$HOME/.gitconfig" user.email "$GIT_USER_EMAIL"
+    _git_config_retry git config -f "\$HOME/.gitconfig" user.name "$GIT_USER_NAME"
+    _git_config_retry git config -f "\$HOME/.gitconfig" user.email "$GIT_USER_EMAIL"
 fi
 if ! git config -f "\$HOME/.gitconfig" --get-all safe.directory 2>/dev/null | /usr/bin/grep -Fx "$SHARED_WORKSPACE/*" &>/dev/null; then
-    git config -f "\$HOME/.gitconfig" --add safe.directory "$SHARED_WORKSPACE/*"
+    _git_config_retry git config -f "\$HOME/.gitconfig" --add safe.directory "$SHARED_WORKSPACE/*"
 fi
 SETUP_EOF
     chmod +x "$SV_PRIVATE_DIR/setup/gitconfig"
@@ -1828,7 +1851,7 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
     # Fix homebrew symlinks for any installed tools
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in condition
     if brew_shellenv 2>/dev/null; then
-        for tool_cli in claude codex opencode gemini pi; do
+        for tool_cli in claude codex opencode gemini pi muse; do
             brew_link="$(brew --prefix)/bin/$tool_cli"
             if [[ -L "$brew_link" ]]; then
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_link")
