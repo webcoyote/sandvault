@@ -37,6 +37,7 @@ PARALLEL_JOBS=0
 GUARD_FIFO=""
 GUARD_PID=""
 GUARD_FD=""
+CLONE_WORKSPACE=""
 TEST_PIDS=()
 
 write_result() {
@@ -1323,8 +1324,21 @@ EOF
 
     if [[ "$mode_label" != *" --ssh" && -x "$SV_CLONE_BASE" ]]; then
 
+    # sv-clone writes to $SHARED_WORKSPACE/repos/<name>, which for this repo is
+    # exactly where sv-clone puts a contributor's own checkout (see README).
+    # Cloning and rm -rf'ing that path would destroy uncommitted work, so point
+    # sv-clone at a unique per-run workspace instead: the fixture path can then
+    # never collide with a real checkout, whatever the repo is named.
+    #
+    # Deliberately not under $SHARED_WORKSPACE/repos -- that directory holds the
+    # user's real checkouts, and a fixture leaked there (or a stray rm) lands
+    # right next to them.  _tests/ is ours alone, so a leak is harmless.
+    mkdir -p "$SHARED_WORKSPACE/_tests"
+    CLONE_WORKSPACE="$(mktemp -d "$SHARED_WORKSPACE/_tests/clone.XXXXXX")"
+    mkdir -p "$CLONE_WORKSPACE/repos" "$CLONE_WORKSPACE/_sandvault/.ssh"
+
     sv_clone_cmd() {
-        "$bash_path" "$SV_CLONE_BASE" "$@"
+        SV_CLONE_WORKSPACE_ROOT="$CLONE_WORKSPACE" "$bash_path" "$SV_CLONE_BASE" "$@"
     }
 
     # Create a fake `gh` on PATH that records every invocation (to
@@ -1423,7 +1437,7 @@ STUB_EOF
         fi
 
         clone_name="$(basename "$src_repository")"
-        clone_path="$SHARED_WORKSPACE/repos/$clone_name"
+        clone_path="$CLONE_WORKSPACE/repos/$clone_name"
         expected_upstream="$(git -C "$src_repository" remote get-url origin 2>/dev/null || true)"
         if [[ -z "$expected_upstream" ]]; then
             fail "sv-clone clones local repository" "source repository has origin remote" "$src_repository"
@@ -1498,7 +1512,7 @@ STUB_EOF
         local https_repository
 
         https_repository="https://github.com/webcoyote/sandvault.git"
-        clone_path="$SHARED_WORKSPACE/repos/sandvault"
+        clone_path="$CLONE_WORKSPACE/repos/sandvault"
 
         # Start clean to avoid stale clone state influencing assertions.
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
@@ -1585,8 +1599,8 @@ STUB_EOF
         local clone_path key_file origin_after output status
         local https_repository="https://github.com/webcoyote/sandvault.git"
 
-        clone_path="$SHARED_WORKSPACE/repos/sandvault"
-        key_file="$SHARED_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        clone_path="$CLONE_WORKSPACE/repos/sandvault"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
 
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
         sv_cmd s -- rm -f "$key_file" "$key_file.pub" >/dev/null 2>&1
@@ -1624,8 +1638,8 @@ STUB_EOF
         local https_repository="https://github.com/webcoyote/sandvault.git"
         local output status origin_after ssh_command add_line
 
-        clone_path="$SHARED_WORKSPACE/repos/sandvault"
-        key_file="$SHARED_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        clone_path="$CLONE_WORKSPACE/repos/sandvault"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
         stub_dir="$(mktemp -d)"
         log_file="$(mktemp)"
         state_file="$(mktemp)"
@@ -1708,8 +1722,8 @@ STUB_EOF
         local https_repository="https://github.com/webcoyote/sandvault.git"
         local output status add_line
 
-        clone_path="$SHARED_WORKSPACE/repos/sandvault"
-        key_file="$SHARED_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        clone_path="$CLONE_WORKSPACE/repos/sandvault"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
         stub_dir="$(mktemp -d)"
         log_file="$(mktemp)"
         state_file="$(mktemp)"
@@ -1751,8 +1765,8 @@ STUB_EOF
         local https_repository="https://github.com/webcoyote/sandvault.git"
         local output status key_hash_before key_hash_after
 
-        clone_path="$SHARED_WORKSPACE/repos/sandvault"
-        key_file="$SHARED_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        clone_path="$CLONE_WORKSPACE/repos/sandvault"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
         stub_dir="$(mktemp -d)"
         log_file="$(mktemp)"
         state_file="$(mktemp)"
@@ -1820,8 +1834,8 @@ STUB_EOF
         local https_repository="https://github.com/webcoyote/sandvault.git"
         local dir path_dirs
 
-        clone_path="$SHARED_WORKSPACE/repos/sandvault"
-        key_file="$SHARED_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        clone_path="$CLONE_WORKSPACE/repos/sandvault"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
 
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
         sv_cmd s -- rm -f "$key_file" "$key_file.pub" >/dev/null 2>&1
@@ -1862,6 +1876,11 @@ STUB_EOF
     }
     queue_test test_sv_clone_dash_k_no_gh
     wait_for_all_running_tests
+
+    # Remove the fixture workspace while the guard session is still up, so the
+    # sandbox-side removal can run.  Also registered on EXIT in case we never
+    # get here.
+    cleanup_clone_workspace
 
     fi # end sv-clone tests (non-SSH only)
 
@@ -2345,7 +2364,20 @@ start_guard() {
     fi
 }
 
+# Remove the sv-clone fixture workspace.  Idempotent and safe to call when the
+# clone tests never ran ($CLONE_WORKSPACE empty).  The clones are made by the
+# sandbox user, so try sv_cmd first; that needs a live session, hence callers
+# run this before tearing the guard down.  The host-side rm is a fallback for
+# when the session is already gone -- it clears at least the directory we own.
+cleanup_clone_workspace() {
+    [[ -n "$CLONE_WORKSPACE" ]] || return 0
+    sv_cmd s -- rm -rf "$CLONE_WORKSPACE" >/dev/null 2>&1 || true
+    rm -rf "$CLONE_WORKSPACE" 2>/dev/null || true
+    CLONE_WORKSPACE=""
+}
+
 cleanup_guard() {
+    cleanup_clone_workspace
     if [[ -n "$GUARD_FIFO" && -n "$GUARD_PID" ]]; then
         if [[ -n "$GUARD_FD" ]]; then
             printf 'exit\n' 1>&9 2>/dev/null || true
@@ -2386,8 +2418,10 @@ if [[ -z "${SV_SESSION_ID:-}" ]]; then
     CONNECT_MODES+=("ssh")
 else
     # If this script is already running inside sandvault then that parent
-    # process is already acting as a guard against teardown
-    true
+    # process is already acting as a guard against teardown -- but we still
+    # need the EXIT trap so an aborted run does not leak the fixture
+    # workspace.  cleanup_guard no-ops on the guard state we never set.
+    trap cleanup_guard EXIT
 fi
 
 for bash_path in "$SYSTEM_BASH" "$BREW_BASH"; do

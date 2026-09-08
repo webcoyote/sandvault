@@ -164,7 +164,10 @@ else
     HOST_USER="$USER"
 fi
 readonly HOST_USER
-readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
+# SV_CLONE_WORKSPACE_ROOT relocates the workspace so the test suite can clone
+# into a throwaway directory instead of the real one — see scripts/tests.  It
+# is not part of the supported interface; unset, this is the normal location.
+readonly SHARED_WORKSPACE="${SV_CLONE_WORKSPACE_ROOT:-/Users/Shared/sv-$HOST_USER}"
 readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
 
 if [[ ! -d "$SHARED_WORKSPACE" ]]; then
