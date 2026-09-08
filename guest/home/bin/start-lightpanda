@@ -24,6 +24,7 @@ _lp_debug "Starting lightpanda on 127.0.0.1..."
     --host 127.0.0.1 \
     --port 0 \
     --log-level info \
+    --ca-cert /etc/ssl/cert.pem \
     > "$_SV_LP_LOG" 2>&1 &
 _SV_LP_PID=$!
 

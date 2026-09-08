@@ -144,7 +144,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.30.0"
+readonly VERSION="1.31.0"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -1750,15 +1750,27 @@ elif [[ "$REBUILD" == "true" ]]; then
     mkdir -p "$SV_PRIVATE_DIR/setup"
 
     # .gitconfig: seed identity if missing, preserving user overrides
+    # Uses a retry loop because concurrent sandbox sessions may race on the
+    # git config lock file (~/.gitconfig.lock).
     cat > "$SV_PRIVATE_DIR/setup/gitconfig" << SETUP_EOF
 #!/bin/bash
 set -Eeuo pipefail
+_git_config_retry() {
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        if "\$@" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.\$((RANDOM % 5 + 1))
+    done
+    "\$@"
+}
 if [[ ! -f "\$HOME/.gitconfig" ]]; then
-    git config -f "\$HOME/.gitconfig" user.name "$GIT_USER_NAME"
-    git config -f "\$HOME/.gitconfig" user.email "$GIT_USER_EMAIL"
+    _git_config_retry git config -f "\$HOME/.gitconfig" user.name "$GIT_USER_NAME"
+    _git_config_retry git config -f "\$HOME/.gitconfig" user.email "$GIT_USER_EMAIL"
 fi
 if ! git config -f "\$HOME/.gitconfig" --get-all safe.directory 2>/dev/null | /usr/bin/grep -Fx "$SHARED_WORKSPACE/*" &>/dev/null; then
-    git config -f "\$HOME/.gitconfig" --add safe.directory "$SHARED_WORKSPACE/*"
+    _git_config_retry git config -f "\$HOME/.gitconfig" --add safe.directory "$SHARED_WORKSPACE/*"
 fi
 SETUP_EOF
     chmod +x "$SV_PRIVATE_DIR/setup/gitconfig"
