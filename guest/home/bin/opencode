@@ -2,16 +2,64 @@
 set -Eeuo pipefail
 trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
+WRAPPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# Re-entry guard, independent of how PATH is spelled. The PATH filter below is
+# the first defence against the #235 recursion, but it matches entries exactly,
+# so a user .zprofile prepending "$HOME/bin/" (trailing slash) slips past it.
+# check_version() already treats a non-zero probe as "no version installed".
+if [[ -n "${SV_OPENCODE_INSTALLING:-}" ]]; then
+    echo >&2 "opencode: refusing to re-enter the installer (webcoyote/sandvault#235)"
+    exit 1
+fi
+
 # shellcheck source=sv-tool-prompts.sh
-source "$(dirname "${BASH_SOURCE[0]}")/sv-tool-prompts.sh"
+source "$WRAPPER_DIR/sv-tool-prompts.sh"
 
 unset OPENCODE
 if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
-    if [[ ! -x "$HOME/.local/bin/opencode" ]]; then
-        echo >&2 "Installing OpenCode natively..."
-        curl -fsSL https://opencode.ai/install | XDG_BIN_DIR="$HOME/.local/bin" bash
+    # Look where the installer actually puts the binary. It assigns
+    # INSTALL_DIR=$HOME/.opencode/bin outright -- not a ${INSTALL_DIR:-...}
+    # default -- and reads no XDG_BIN_DIR at all, so neither variable can move
+    # it. Pointing this wrapper at ~/.local/bin instead meant the guard below
+    # was never satisfied and the final check reported "not installed" after a
+    # perfectly good install (webcoyote/sandvault#235).
+    OPENCODE_NATIVE="$HOME/.opencode/bin/opencode"
+    if [[ ! -x "$OPENCODE_NATIVE" && -x "$HOME/.local/bin/opencode" ]]; then
+        # Reuse a binary already at the pre-#235 location instead of
+        # downloading a second copy elsewhere. The installer never honoured
+        # XDG_BIN_DIR, so sandvault never actually put one there -- but anyone
+        # who staged one by hand did have a working `sv -N opencode`, because
+        # the guard below saw it and skipped the install. Keep that working.
+        OPENCODE_NATIVE="$HOME/.local/bin/opencode"
     fi
-    OPENCODE="$HOME/.local/bin/opencode"
+    if [[ ! -x "$OPENCODE_NATIVE" ]]; then
+        echo >&2 "Installing OpenCode natively..."
+
+        # Hide this wrapper's directory from the installer. Its check_version()
+        # probes `command -v opencode`, `which opencode` and `opencode
+        # --version`; .zprofile puts $HOME/bin ahead of ~/.local/bin, so all
+        # three resolve to THIS script, which runs the installer, which probes
+        # again. That recursion is the ~60 nested installs of #235. Filtering
+        # the entry out is exact -- .zprofile inserts these paths literally --
+        # and leaves everything the installer needs (curl, tar, unzip) on PATH.
+        INSTALL_PATH=""
+        while IFS= read -r dir; do
+            [[ "$dir" == "$WRAPPER_DIR" || "$dir" == "$HOME/bin" ]] && continue
+            INSTALL_PATH="${INSTALL_PATH:+$INSTALL_PATH:}$dir"
+        done < <(tr ':' '\n' <<< "$PATH")
+
+        # --no-modify-path stops the installer appending "export PATH=..." to
+        # .zshrc/.zshenv: sandvault owns those files and rewrites them from
+        # guest/home on every build, so the edit is both lost and noise.
+        # `if !` keeps a failed install from aborting under `set -e`, so we
+        # reach the "not installed" guidance below instead of a bare trap line.
+        if ! curl -fsSL https://opencode.ai/install \
+            | SV_OPENCODE_INSTALLING=1 PATH="$INSTALL_PATH" bash -s -- --no-modify-path; then
+            echo >&2 "WARNING: the OpenCode installer failed."
+        fi
+    fi
+    OPENCODE="$OPENCODE_NATIVE"
 elif command -v brew &>/dev/null ; then
     HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
     if [[ -x "$HOMEBREW_PREFIX/bin/opencode" ]]; then
@@ -20,8 +68,31 @@ elif command -v brew &>/dev/null ; then
     fi
 fi
 
+# Fallback: a pre-existing install at a known location. Covers the installer's
+# own target when this wrapper took the Homebrew branch, and ~/.local/bin,
+# where a user may have staged their own build (or where an earlier sandvault
+# aimed its native install). Explicit paths rather than `command -v opencode`:
+# this wrapper is installed at ~/bin/opencode and $HOME/bin precedes both, so a
+# PATH search would resolve to the wrapper and re-exec it in a loop.
 if [[ -z "${OPENCODE:-}" || ! -x "$OPENCODE" ]]; then
-    echo >&2 "ERROR: opencode is not installed"
+    for candidate in "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"; do
+        if [[ -x "$candidate" ]]; then
+            OPENCODE="$candidate"
+            break
+        fi
+    done
+fi
+
+if [[ -z "${OPENCODE:-}" || ! -x "$OPENCODE" ]]; then
+    # Suggest only sandbox-home paths, never $SHARED_WORKSPACE/user/{bin,
+    # .local/bin}: .zprofile puts those ahead of $HOME/bin, so an opencode
+    # there shadows this wrapper rather than being found by it. Same reasoning
+    # as the pi wrapper.
+    echo >&2 "ERROR: opencode is not installed."
+    echo >&2 "       To install opencode on the host, run 'brew install anomalyco/tap/opencode'."
+    echo >&2 "       To install opencode in the sandbox, run 'sv -N opencode'."
+    echo >&2 "       To use an install you already have, put it at ~/.opencode/bin/opencode"
+    echo >&2 "       or ~/.local/bin/opencode in the sandbox home. Use 'sv shell' to get there."
     exit 1
 fi
 

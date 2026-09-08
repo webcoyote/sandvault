@@ -368,6 +368,72 @@ run_tests() {
     }
     queue_test test_opencode_wrapper_uses_skip_permissions
 
+    # Regression guard for webcoyote/sandvault#235: `sv -N opencode` ran the
+    # upstream installer ~60 times over and then reported "opencode is not
+    # installed" anyway. Two faults, both re-checked against the installer
+    # (460 lines, fetched 2026-09-03), and both guarded here:
+    #
+    #   1. Line 68 is a bare `INSTALL_DIR=$HOME/.opencode/bin` assignment, and
+    #      XDG_BIN_DIR appears nowhere in the script. The wrapper used to pass
+    #      XDG_BIN_DIR="$HOME/.local/bin" and then look there, so its
+    #      already-installed guard never went false and its final -x check
+    #      always failed.
+    #   2. check_version() (lines 221-235) probes `command -v opencode`,
+    #      `which opencode` and `opencode --version`. .zprofile puts $HOME/bin
+    #      -- where this wrapper lives -- ahead of ~/.local/bin, so each probe
+    #      re-entered the wrapper, which re-ran the installer. Fault 1 meant
+    #      nothing ever stopped it.
+    #
+    # Comments are stripped before matching so the explanatory prose in the
+    # wrapper (which names XDG_BIN_DIR and command -v) cannot pass the test on
+    # its own.
+    test_opencode_wrapper_native_install() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/opencode"
+        if [[ ! -x "$wrapper" ]]; then
+            fail "opencode wrapper native-installs to ~/.opencode/bin" \
+                "executable wrapper" "$wrapper"
+            return
+        fi
+        local code
+        code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        if grep -F -- 'XDG_BIN_DIR' <<< "$code" &>/dev/null; then
+            fail "opencode wrapper native-installs to ~/.opencode/bin" \
+                "no XDG_BIN_DIR (the installer never reads it)" \
+                "wrapper still sets XDG_BIN_DIR"
+        elif ! grep -F -- '"$HOME/.opencode/bin/opencode"' <<< "$code" &>/dev/null; then
+            fail "opencode wrapper native-installs to ~/.opencode/bin" \
+                'the installer'"'"'s hardcoded $HOME/.opencode/bin target' \
+                "$wrapper"
+        elif ! grep -F -- '--no-modify-path' <<< "$code" &>/dev/null; then
+            # Sandvault owns .zshrc/.zprofile and rewrites them from guest/home
+            # on every build, so an installer PATH edit is both lost and noise.
+            fail "opencode wrapper native-installs to ~/.opencode/bin" \
+                "--no-modify-path so the installer leaves .zshrc alone" \
+                "$wrapper"
+        elif ! grep -F -- '"$HOME/bin"' <<< "$code" &>/dev/null; then
+            fail "opencode wrapper native-installs to ~/.opencode/bin" \
+                'the install PATH filtered so $HOME/bin cannot re-enter this wrapper' \
+                "$wrapper"
+        elif [[ $(grep -c 'SV_OPENCODE_INSTALLING' <<< "$code") -lt 2 ]]; then
+            # The PATH filter compares entries exactly, and .zprofile sources
+            # $SHARED_WORKSPACE/user/.zprofile before building PATH -- a user
+            # config prepending "$HOME/bin/" (trailing slash) slips a second
+            # entry past it and the #235 recursion returns. The sentinel must
+            # be both exported into the installer and checked on entry, hence
+            # two occurrences.
+            fail "opencode wrapper native-installs to ~/.opencode/bin" \
+                "SV_OPENCODE_INSTALLING set for the install and checked on entry" \
+                "$wrapper"
+        elif grep -E 'command -v opencode\b|type -P opencode\b|type -aP opencode\b' <<< "$code" &>/dev/null; then
+            fail "opencode wrapper native-installs to ~/.opencode/bin" \
+                "no PATH search for opencode" \
+                "wrapper resolves opencode via command -v/type -P (would self-resolve and loop)"
+        else
+            pass "opencode wrapper native-installs to ~/.opencode/bin"
+        fi
+    }
+    queue_test test_opencode_wrapper_native_install
+
     test_codex_code_mode_host_warmup_present() {
         if grep -F -- "codex-code-mode-host" "$SV_BASE" &>/dev/null \
             && grep -F -- "Warming up codex-code-mode-host" "$SV_BASE" &>/dev/null \
