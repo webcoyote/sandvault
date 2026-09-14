@@ -31,7 +31,7 @@ if [[ -z "${SV_SESSION_ID:-}" && -z "${SV_TESTS_REEXEC:-}" ]]; then
             readonly SRC_DIR
             DST_DIR="$(mktemp -d -p "$SHARED_WORKSPACE")"
             readonly DST_DIR
-            trap 'rm -rf "$DST_DIR"' EXIT
+            trap 'rm -rf "$DST_DIR" 2>/dev/null || true' EXIT
             # git clone --depth 1 --no-local "$SRC_DIR" "$DST_DIR" &>/dev/null
             tar -c \
                 -C "$SRC_DIR" \
