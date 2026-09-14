@@ -264,7 +264,7 @@ Explicit command-line arguments are appended after `SANDVAULT_ARGS`, so they are
 
 ## `agentsview` Integration
 
-[`agentsview`](https://github.com/badlogic/agentsview) is a dashboard for AI coding agents (Claude Code, Codex, OpenCode, Gemini, pi). It shows session history, search, and cost tracking. If you have agentsview installed on the host, `sv-agentsview-setup` mirrors sandbox session data so that it appears next to your host-side sessions. Muse Code is not included: agentsview has no parser for its session format yet.
+[`agentsview`](https://www.agentsview.io) is a dashboard for AI coding agents that shows session history, search, and cost tracking. If you have agentsview installed on the host, `sv-agentsview-setup` mirrors sandbox session data so that it appears next to your host-side sessions.
 
 ```bash
 # Detect agentsview, prompt to opt in, and configure
