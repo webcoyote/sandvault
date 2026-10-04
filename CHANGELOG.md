@@ -2,6 +2,22 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.32.0] - 2026-10-03
+
+### Fixed
+
+- Sessions now clean up after themselves when they exit. Previously every `sv --browser` session leaked its headless Chrome process and `chrome-data-<id>` profile, and every `sv --ios` session leaked a booted simulator and its cloned device, because starting the session with `exec` discarded the cleanup handler. Sessions now run as a supervised child that forwards the exit status and relays HUP/TERM, so closing a terminal window also tears the session down. ([#272](https://github.com/webcoyote/sandvault/pull/272))
+- Piped and non-interactive invocations work again: `echo cmd | sv s` and `sv s -- tr A-Z a-z` no longer exit immediately with no output, because the session supervisor now passes your stdin through instead of reading EOF from `/dev/null`. ([#272](https://github.com/webcoyote/sandvault/pull/272))
+- `sv -N opencode` no longer loops re-running the installer and then falsely reporting that opencode is "not installed". The wrapper now targets `~/.opencode/bin/opencode`, leaves your shell config alone with `--no-modify-path`, and blocks recursion. An existing opencode in `~/.local/bin` is still reused rather than re-downloaded, and a failed install now shows the "not installed" guidance instead of a bare error-trap line. ([#239](https://github.com/webcoyote/sandvault/pull/239)) — thanks @jeffbowen!
+- Running `scripts/tests` from a checkout created by `sv-clone` no longer deletes that checkout and any uncommitted work in it. The clone tests now get a unique per-run workspace instead of hardcoding the path where `sv-clone` puts a contributor's own checkout. ([#256](https://github.com/webcoyote/sandvault/pull/256))
+- Installing on a machine without Claude Code no longer creates stray directories or prints misleading output about the `/sv` skill. ([#255](https://github.com/webcoyote/sandvault/pull/255))
+- Browser and iOS simulator teardown now runs reliably on every session exit, rather than being gated behind a check meant for the user-wide cleanup that only `uninstall` performs. ([#274](https://github.com/webcoyote/sandvault/pull/274))
+
+### Thanks to 2 contributors!
+
+- [@jeffbowen](https://github.com/jeffbowen)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.31.0] - 2026-09-08
 
 ### Added
