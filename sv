@@ -876,7 +876,10 @@ run_session() {
         trap "forward_signal_to_session $sig" "$sig"
     done
 
-    "$@" &
+    # `<&0` is required: this script is non-interactive, so bash has job
+    # control off and would otherwise redirect a background command's stdin
+    # from /dev/null, breaking `echo cmd | sv` and `sv s -- tr ...`.
+    "$@" <&0 &
     SESSION_CHILD_PID=$!
 
     # `wait` returns >128 when interrupted by a trapped signal; keep waiting
