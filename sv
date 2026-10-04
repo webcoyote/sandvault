@@ -36,38 +36,6 @@ quote_zsh_args() {
     /bin/zsh -fc 'for arg; do printf "%s " "${(q)arg}"; done' -- "$@"
 }
 
-git_config_set_if_changed() {
-    local file="$1"
-    local key="$2"
-    local value="$3"
-    local values=()
-
-    while IFS= read -r line; do
-        values+=("$line")
-    done < <(git config -f "$file" --get-all "$key" 2>/dev/null || true)
-    if [[ ${#values[@]} -eq 1 && "${values[0]}" == "$value" ]]; then
-        return 0
-    fi
-
-    git config set -f "$file" "$key" "$value"
-}
-
-git_config_require_value() {
-    local file="$1"
-    local key="$2"
-    local value="$3"
-    local values=()
-
-    while IFS= read -r line; do
-        values+=("$line")
-    done < <(git config -f "$file" --get-all "$key" 2>/dev/null || true)
-    if [[ ${#values[@]} -eq 1 && "${values[0]}" == "$value" ]]; then
-        return 0
-    fi
-
-    abort "--no-build set: git config $key in $file would change"
-}
-
 configure_ssh_access() {
     local guest_authorized_keys
     local key_file
@@ -205,9 +173,8 @@ readonly INSTALL_ORG="$HOME/.config/codeofhonor"
 readonly INSTALL_PRODUCT="$INSTALL_ORG/sandvault"
 readonly INSTALL_MARKER="$INSTALL_PRODUCT/install"
 
-# Session tracking for safe multi-instance cleanup
+# Per-session state (browser profiles, logs, migration markers)
 readonly SESSION_DIR="$HOME/.local/state/sandvault"
-readonly SESSION_FILE="$SESSION_DIR/sandvault.count"
 # One-shot migration markers. Each marker means "this migration already
 # ran on this host"; presence skips the migration on subsequent runs.
 readonly ACL_LEGACY_STRIPPED_MARKER="$SESSION_DIR/acl-legacy-stripped"
@@ -501,17 +468,10 @@ install_deps () {
     fi
 }
 
+# Full user-wide teardown: kills every process owned by $SANDVAULT_USER,
+# including sibling sessions this one does not track. Only `uninstall` may
+# call this; ordinary session exit uses unregister_session
 force_cleanup_sandvault_processes() {
-    local cleanup_mode="${1:-session-exit}"
-    if [[ "$NESTED" == "true" ]]; then
-        return 0
-    fi
-
-    if [[ "$cleanup_mode" != "force-all" ]]; then
-        trace "Skipping user-wide cleanup on ordinary session exit"
-        return 0
-    fi
-
     # Stop host-side browser if running
     stop_browser
 
@@ -814,45 +774,13 @@ start_ios_simulator() {
     debug "iOS bridge started (PID $IOS_BRIDGE_PID, port $IOS_BRIDGE_PORT)"
 }
 
-register_session() {
-    mkdir -p "$SESSION_DIR"
-    local new_count
-    # shellcheck disable=SC2016 # Single quotes intentional - variables expand in inner bash
-    new_count=$(/usr/bin/lockf "$SESSION_FILE.lock" /bin/bash -c '
-        session_file=$1
-        count=$(cat "$session_file" 2>/dev/null || echo 0)
-        [[ "$count" =~ ^[0-9]+$ ]] || count=0
-        new_count=$((count + 1))
-        echo "$new_count" > "$session_file"
-        echo "$new_count"
-    ' bash "$SESSION_FILE")
-    trace "Session registered (count: $new_count)"
-}
-
+# shellcheck disable=SC2329 # invoked indirectly from the EXIT trap
 unregister_session() {
     # Per-session cleanup
     [[ "$USE_BROWSER" == "true" ]] && stop_browser
     [[ "$USE_IOS_SIMULATOR" == "true" ]] && stop_ios_simulator
-
-    mkdir -p "$SESSION_DIR"
-    local prev_count
-    local new_count
-    # shellcheck disable=SC2016 # Single quotes intentional - variables expand in inner bash
-    read -r prev_count new_count < <(/usr/bin/lockf "$SESSION_FILE.lock" /bin/bash -c '
-        session_file=$1
-        count=$(cat "$session_file" 2>/dev/null || echo 1)
-        [[ "$count" =~ ^[0-9]+$ ]] || count=1
-        new_count=$((count - 1))
-        echo "$new_count" > "$session_file"
-        echo "$count $new_count"
-    ' bash "$SESSION_FILE")
-    trace "Session unregistered (count: $new_count)"
-    if [[ "$prev_count" -le 1 ]]; then
-        trace "Last session exited; skipping user-wide sandvault cleanup"
-        force_cleanup_sandvault_processes
-    else
-        trace "Other sessions still active; skipping cleanup"
-    fi
+    trace "Session cleanup complete"
+    return 0
 }
 
 # Run the session as a child process rather than exec'ing it, so the EXIT trap
@@ -863,11 +791,13 @@ unregister_session() {
 # process group, so the tty delivers Ctrl-C to it directly, and forwarding
 # would signal it twice.
 SESSION_CHILD_PID=""
+# shellcheck disable=SC2329 # invoked indirectly from the HUP/TERM traps below
 forward_signal_to_session() {
     local sig="$1"
     [[ -n "$SESSION_CHILD_PID" ]] && kill -"$sig" "$SESSION_CHILD_PID" 2>/dev/null
     return 0
 }
+# shellcheck disable=SC2329 # invoked indirectly via the $sv_session_runner array
 run_session() {
     local rc=0
     local sig
@@ -953,7 +883,7 @@ configure_shared_folder_permssions() {
 
 uninstall() {
     info "Uninstalling..."
-    force_cleanup_sandvault_processes force-all
+    force_cleanup_sandvault_processes
 
     # Remove the install marker file first; it's a sentinel for "everything is complete".
     # By removing it first we force a rebuild if the user wants to run this again.
@@ -1974,10 +1904,9 @@ which are required to SSH to the Virtual Machine.
 \n
 EOF
 
-# Register this session and set up trap to unregister on exit
+# Set up trap to clean up this session's host-side processes on exit
 if [[ "$NESTED" == "false" ]]; then
     sv_exit_code=0
-    register_session
     trap 'sv_exit_code=$?; set +e; unregister_session; exit $sv_exit_code' EXIT
     if [[ "$USE_BROWSER" == "true" && "$BROWSER_KIND" != "lightpanda" ]]; then
         start_browser
