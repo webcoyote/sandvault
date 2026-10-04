@@ -855,6 +855,49 @@ unregister_session() {
     fi
 }
 
+# Run the session as a child process rather than exec'ing it, so the EXIT trap
+# installed for non-nested sessions survives to run unregister_session (which
+# tears down the host-side browser and iOS simulator). Forwards the child's
+# exit status, and relays HUP/TERM so closing a terminal window still cleans up.
+# SIGINT is intentionally not forwarded: the child shares our foreground
+# process group, so the tty delivers Ctrl-C to it directly, and forwarding
+# would signal it twice.
+SESSION_CHILD_PID=""
+forward_signal_to_session() {
+    local sig="$1"
+    [[ -n "$SESSION_CHILD_PID" ]] && kill -"$sig" "$SESSION_CHILD_PID" 2>/dev/null
+    return 0
+}
+run_session() {
+    local rc=0
+    local sig
+    for sig in HUP TERM; do
+        # shellcheck disable=SC2064 # Expand $sig now, at trap-install time
+        trap "forward_signal_to_session $sig" "$sig"
+    done
+
+    # `<&0` is required: this script is non-interactive, so bash has job
+    # control off and would otherwise redirect a background command's stdin
+    # from /dev/null, breaking `echo cmd | sv` and `sv s -- tr ...`.
+    "$@" <&0 &
+    SESSION_CHILD_PID=$!
+
+    # `wait` returns >128 when interrupted by a trapped signal; keep waiting
+    # until the child is actually reaped so cleanup never races the session.
+    # Capture the status directly: inside `while ! wait`, $? would be the
+    # negated result rather than the child's exit status.
+    while true; do
+        rc=0
+        wait "$SESSION_CHILD_PID" || rc=$?
+        (( rc > 128 )) && kill -0 "$SESSION_CHILD_PID" 2>/dev/null && continue
+        break
+    done
+    SESSION_CHILD_PID=""
+
+    trap - HUP TERM
+    return "$rc"
+}
+
 configure_shared_folder_permssions() {
     local enable="$1"
 
@@ -2090,7 +2133,12 @@ if [[ "$MODE" == "ssh" ]]; then
     # Without them, the remote shell would word-split the command, causing incorrect execution.
     # Example: "'export TMPDIR=...'" becomes a single arg after local expansion, then the remote
     # shell strips the outer quotes, passing 'export TMPDIR=...' correctly to /bin/zsh -c
-    exec ssh \
+    # Nested sessions install no EXIT trap, so there is nothing to preserve:
+    # exec directly and avoid keeping a supervisor process around.
+    sv_session_rc=0
+    sv_session_runner=(run_session)
+    [[ "$NESTED" == "true" ]] && sv_session_runner=(exec)
+    "${sv_session_runner[@]}" ssh \
         -q \
         "$SSH_TTY_OPT" \
         -o StrictHostKeyChecking=no \
@@ -2110,7 +2158,8 @@ if [[ "$MODE" == "ssh" ]]; then
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
-            /bin/zsh -c "$ZSH_COMMAND_SSH"
+            /bin/zsh -c "$ZSH_COMMAND_SSH" || sv_session_rc=$?
+    exit "$sv_session_rc"
 else
 
     LAUNCHER=()
@@ -2139,7 +2188,12 @@ else
     # Simple double quotes "$ZSH_COMMAND" are sufficient because sudo passes arguments
     # directly to the command without an intermediate shell parsing layer.
     # This is different from SSH (see above) which requires extra quoting.
-    exec "${LAUNCHER[@]+"${LAUNCHER[@]}"}" \
+    # Nested sessions install no EXIT trap, so there is nothing to preserve:
+    # exec directly and avoid keeping a supervisor process around.
+    sv_session_rc=0
+    sv_session_runner=(run_session)
+    [[ "$NESTED" == "true" ]] && sv_session_runner=(exec)
+    "${sv_session_runner[@]}" "${LAUNCHER[@]+"${LAUNCHER[@]}"}" \
         /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
@@ -2153,5 +2207,6 @@ else
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
-            /bin/zsh -c "$ZSH_COMMAND"
+            /bin/zsh -c "$ZSH_COMMAND" || sv_session_rc=$?
+    exit "$sv_session_rc"
 fi
