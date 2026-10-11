@@ -2014,6 +2014,17 @@ fi
 if [[ -n "${COLORTERM:-}" ]]; then
     EXTRA_ENV+=("COLORTERM=$COLORTERM")
 fi
+# Forward locale so UTF-8 glyphs render instead of falling back to "C"
+for var in LANG LC_ALL LC_CTYPE LC_COLLATE LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME; do
+    if [[ -n "${!var:-}" ]]; then
+        EXTRA_ENV+=("$var=${!var}")
+    fi
+done
+# Forward TERMINFO (e.g. Ghostty sets it to its app bundle) so custom TERM
+# values resolve; skip paths in the host home, which sandvault can't read
+if [[ -n "${TERMINFO:-}" && "$TERMINFO" != "$HOME" && "$TERMINFO" != "$HOME/"* ]]; then
+    EXTRA_ENV+=("TERMINFO=$TERMINFO")
+fi
 
 if [[ "$MODE" == "ssh" ]]; then
     # Only allocate a TTY for interactive shells and agent TUIs;
