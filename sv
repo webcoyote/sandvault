@@ -164,8 +164,12 @@ readonly SANDVAULT_DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,de
 readonly SANDVAULT_FILE_INHERIT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit,only_inherit"
 readonly SANDVAULT_FILE_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown"
 
-# Create sudoers.d file for passwordless sudo to sandvault user
-readonly SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
+# Create sudoers.d file for passwordless sudo to sandvault user.
+# sudo skips sudoers.d files whose names contain '.', so a dotted
+# username (first.last) must not reach the filename.
+readonly SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-${SANDVAULT_USER//./_}"
+# Name used before the fix above; sudo ignored it for dotted usernames
+readonly SUDOERS_FILE_LEGACY="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
 readonly SUDOERS_BUILD_HOME_SCRIPT_NAME="/var/sandvault/buildhome-$SANDVAULT_USER"
 
 # Installation marker file
@@ -892,7 +896,7 @@ uninstall() {
     rmdir "$INSTALL_ORG" &>/dev/null || true
 
     # Remove the sudoers file
-    sudo rm -rf "$SUDOERS_FILE"
+    sudo rm -rf "$SUDOERS_FILE" "$SUDOERS_FILE_LEGACY"
 
     # Remove build home script and sandbox profile
     sudo rm -rf "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
@@ -1572,6 +1576,9 @@ EOF
 
     if sudo visudo -c -f "$SUDOERS_TMP" &>/dev/null; then
         sudo /bin/mv -f "$SUDOERS_TMP" "$SUDOERS_FILE"
+        if [[ "$SUDOERS_FILE_LEGACY" != "$SUDOERS_FILE" ]]; then
+            sudo rm -f "$SUDOERS_FILE_LEGACY"
+        fi
     else
         error "Failed to create valid sudoers file"
         sudo rm -f "$SUDOERS_TMP"
