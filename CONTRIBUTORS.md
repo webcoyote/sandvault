@@ -13,3 +13,4 @@ Thanks to the following users for improving SandVault:
 - [@gamepoet](https://github.com/gamepoet)
 - [@jeffbowen](https://github.com/jeffbowen)
 - [@hobthross](https://github.com/hobthross)
+- [@liudonggalaxy](https://github.com/liudonggalaxy)

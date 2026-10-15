@@ -2,6 +2,16 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.33.0] - 2026-10-14
+
+### Fixed
+
+- Passwordless sudo now works for usernames that contain dots ([#302](https://github.com/webcoyote/sandvault/pull/302)) — thanks @liudonggalaxy!
+
+### Thanks to 1 contributor!
+
+- [@liudonggalaxy](https://github.com/liudonggalaxy)
+
 ## [1.32.0] - 2026-10-03
 
 ### Fixed
