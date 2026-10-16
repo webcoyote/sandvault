@@ -2,6 +2,17 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.34.0] - 2026-10-15
+
+### Fixed
+
+- Copies home-directory files into the sandbox as the sandvault user instead of root, so symlinks or hard links in the host-writable source can no longer expose root-only files inside the sandbox. Copied files now get the correct owner and follow the sandvault user's umask, and `.ssh` permissions are tightened explicitly afterward.
+
+### Thanks to 2 contributors!
+
+- [@hs-matt](https://github.com/hs-matt)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.33.0] - 2026-10-14
 
 ### Fixed
