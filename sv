@@ -92,7 +92,7 @@ configure_ssh_access() {
     trace "Configuring remote SSH access"
     mkdir -p "$(dirname "$guest_authorized_keys")"
     /bin/chmod 0700 "$(dirname "$guest_authorized_keys")"
-    /bin/chmod 0600 "$tmp_authorized_keys"
+    /bin/chmod 0644 "$tmp_authorized_keys"
     mv -f "$tmp_authorized_keys" "$guest_authorized_keys"
 }
 
@@ -1512,36 +1512,27 @@ sudo mkdir -p "/Users/$SANDVAULT_USER"
 sudo chown "$SANDVAULT_USER:$SANDVAULT_GROUP" "/Users/$SANDVAULT_USER"
 sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 
-# Copy files preserving permissions for contents only
-# Use the system rsync to avoid Homebrew dependencies.
-# Perform rsync from within the destination directory so that the paths
-# passed through xargs to chown are correct.
+# Copy files using the system tar to avoid Homebrew dependencies.
 #
-# Collect changed files first, then chown only if rsync reported changes.
-# macOS xargs lacks --no-run-if-empty so we guard against empty input.
+# Never copy as root. The source tree is writable by the host user, so a
+# root copy could be tricked (via symlinks, hard links, or swapping the
+# source directory) into reading root-only files and copying them into the
+# sandvault home. Instead, read the source as the host user (who can only
+# read what they could already read) and write it as the sandvault user
+# (so files are created with the correct owner and no chown pass is
+# needed). The sandvault user can't read the source directly because it
+# may live under the host user's private home directory.
 #
-# Use OSX chown, not GNU chown, because I've tested that it works
-cd "/Users/$SANDVAULT_USER/"
-_changed=\$(/usr/bin/rsync \
-    --itemize-changes \
-    --out-format="%n" \
-    --links \
-    --copy-unsafe-links \
-    --checksum \
-    --recursive \
-    --perms \
-    --times \
-    "$WORKSPACE/guest/home/." \
-    ".")
-if [[ -n "\$_changed" ]]; then
-    # Use chown -h so the chown never follows a symlink. The home directory
-    # is owned and writable by the (untrusted) sandvault user, so between
-    # rsync completing and this chown running it could swap one of the
-    # just-synced paths for a symlink pointing at a root-owned file. Without
-    # -h, root would then chown the symlink target. -h operates on the link
-    # itself, closing that race.
-    echo "\$_changed" | tr '\n' '\0' \
-        | xargs -0 sudo /usr/sbin/chown -h "$SANDVAULT_USER:$SANDVAULT_GROUP"
+# Extracting as a non-root user applies the sandvault user's umask rather
+# than copying source permissions, and leaves the existing home directory's
+# own mode untouched. SSH permissions are fixed up explicitly below.
+sudo -u "$HOST_USER" /usr/bin/tar -C "$WORKSPACE/guest/home" -cf - . \
+    | sudo -u "$SANDVAULT_USER" /usr/bin/tar -C "/Users/$SANDVAULT_USER" -xf -
+
+# SSH requires restrictive permissions
+if [[ -d "/Users/$SANDVAULT_USER/.ssh" ]]; then
+    sudo -u "$SANDVAULT_USER" chmod 700 "/Users/$SANDVAULT_USER/.ssh"
+    sudo -u "$SANDVAULT_USER" chmod -R go= "/Users/$SANDVAULT_USER/.ssh"
 fi
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
