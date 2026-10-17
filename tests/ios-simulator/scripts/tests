@@ -102,7 +102,8 @@ phase_describe() {
     log "Test 3: describe"
     local response=""
     local i=0
-    local deadline=$(( $(date +%s) + 90 ))
+    # 150s fits two full 60s describe calls (the bridge's describe budget).
+    local deadline=$(( $(date +%s) + 150 ))
     # Bound by wall-clock, not poll count: a slow/wedged iosef makes each call
     # take seconds rather than returning instantly, so a fixed poll count can
     # stretch this phase to many minutes. The deadline keeps the phase bounded
@@ -119,7 +120,7 @@ phase_describe() {
             return
         fi
         if [[ $(date +%s) -ge $deadline ]]; then
-            fail "/describe did not return a tree within 90s (${i} polls); last response:\n${response}"
+            fail "/describe did not return a tree within 150s (${i} polls); last response:\n${response}"
             return
         fi
         sleep 2

@@ -48,6 +48,13 @@ SUBPROCESS_TIMEOUT_SEC = 120
 # short budget converts that hang into a fast, visible, retryable error.
 IOSEF_TIMEOUT_SEC = 20
 
+# `describe` gets a longer budget than other iosef calls. On a cold simulator
+# iosef does setup before reading the tree (checks/enables accessibility and
+# may restart CoreSimulatorBridge, each via `simctl spawn`), and remembers
+# that only per process. On slow runners that setup alone can exceed 20s, so
+# every call was killed partway and the next one started over.
+IOSEF_DESCRIBE_TIMEOUT_SEC = 60
+
 # `simctl bootstatus -b` blocks server-side until the simulator finishes
 # booting. Cold first-boot of a freshly installed iOS runtime can exceed the
 # normal 120s budget, so give it its own (much larger) timeout. If even this
@@ -121,7 +128,11 @@ def run_argv(argv, stdin_bytes=None, timeout=SUBPROCESS_TIMEOUT_SEC):
         )
         return proc.returncode, proc.stdout, proc.stderr.decode("utf-8", "replace")
     except subprocess.TimeoutExpired as e:
-        return 124, e.stdout or b"", f"timeout after {timeout}s"
+        # Keep whatever the killed process wrote to stderr: for iosef that is
+        # its diagnostics, the only clue to where a hung call was stuck.
+        partial = (e.stderr or b"").decode("utf-8", "replace").strip()
+        msg = f"timeout after {timeout}s"
+        return 124, e.stdout or b"", f"{msg}\n{partial}" if partial else msg
     except FileNotFoundError as e:
         return 127, b"", f"executable not found: {e.filename}"
 
@@ -195,7 +206,31 @@ def watch_boot(udid):
     )
     if rc != 0:
         READY_ERROR = stderr.strip() or f"bootstatus exited {rc}"
+    else:
+        enable_accessibility(udid)
     _ready_event.set()
+
+
+def enable_accessibility(udid):
+    """Turn on simulator accessibility before any app is launched.
+
+    iosef otherwise does this lazily on the first `describe`, after apps are
+    already running: those apps then need a relaunch, and CoreSimulatorBridge
+    (started at boot) keeps answering nil until restarted. Doing it here,
+    before readiness is signaled, avoids both. Best-effort: on failure iosef
+    still falls back to its own enablement.
+    """
+    def spawn(*args):
+        return run_argv(["xcrun", "simctl", "spawn", udid] + list(args))
+
+    rc, stdout, _stderr = spawn(
+        "defaults", "read", "com.apple.Accessibility", "ApplicationAccessibilityEnabled")
+    if rc == 0 and stdout.strip() == b"1":
+        return
+    for key in ("AccessibilityEnabled", "ApplicationAccessibilityEnabled"):
+        spawn("defaults", "write", "com.apple.Accessibility", key, "-bool", "true")
+    # launchd restarts the bridge, which then picks up the new defaults.
+    spawn("launchctl", "stop", "com.apple.CoreSimulator.bridge")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -274,7 +309,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send_text(500, stderr.strip() if stderr.strip() else f"command failed (exit {rc})")
 
-    def _iosef(self, *args):
+    def _iosef(self, *args, timeout=IOSEF_TIMEOUT_SEC):
         # iosef accepts `--device <udid>` (or its `--udid` alias) as a
         # per-subcommand option — it must appear AFTER the subcommand name,
         # not before it. args[0] is the subcommand; everything else is its
@@ -292,7 +327,7 @@ class Handler(BaseHTTPRequestHandler):
         except RuntimeError as e:
             self._send_error(500, str(e))
             return
-        rc, stdout, stderr = run_argv(argv, timeout=IOSEF_TIMEOUT_SEC)
+        rc, stdout, stderr = run_argv(argv, timeout=timeout)
         self._send_shell_result(rc, stdout, stderr)
 
     def _simctl(self, *args):
@@ -344,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not (0 <= depth <= 20):
                     return self._send_error(400, "depth out of range")
                 args += ["--depth", str(depth)]
-            return self._iosef(*args)
+            return self._iosef(*args, timeout=IOSEF_DESCRIBE_TIMEOUT_SEC)
         if path == "/view":
             return self._iosef_view()
         if path == "/view_pixels":
