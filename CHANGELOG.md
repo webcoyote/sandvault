@@ -2,6 +2,17 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.35.0] - 2026-10-17
+
+### Fixed
+
+- Locale environment variables (such as `LANG` and `LC_*`) now pass through to the sandbox, so programs inside it use your locale settings ([#291](https://github.com/webcoyote/sandvault/pull/291))
+
+### Thanks to 2 contributors!
+
+- [@jeffbowen](https://github.com/jeffbowen)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.34.0] - 2026-10-15
 
 ### Fixed
