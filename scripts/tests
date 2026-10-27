@@ -1122,6 +1122,129 @@ EOF
     }
     queue_test test_var_sandvault_traversable
 
+    # herdr is a multiplexer, not an agent: the --help listing, the dispatch arm
+    # and the brew install arm are all needed for 'sv herdr' to work.
+    test_help_lists_herdr() {
+        local output
+        output=$("$SV_BASE" --help 2>&1 || true)
+        if [[ "$output" == *"hd, herdr"* ]]; then
+            pass "--help lists herdr"
+        else
+            fail "--help lists herdr" "herdr command line" "$output"
+        fi
+    }
+    queue_test test_help_lists_herdr
+
+    test_sv_dispatches_herdr() {
+        if grep -Eq '^[[:space:]]+hd[|]herdr\)' "$SV_BASE" \
+            && grep -A2 -E '^[[:space:]]+hd[|]herdr\)' "$SV_BASE" | grep -q 'COMMAND=herdr'; then
+            pass "sv dispatches hd|herdr -> COMMAND=herdr"
+        else
+            fail "sv dispatches hd|herdr -> COMMAND=herdr" \
+                "an hd|herdr) case arm setting COMMAND=herdr" \
+                "missing or broken case arm in $SV_BASE"
+        fi
+    }
+    queue_test test_sv_dispatches_herdr
+
+    test_sv_installs_herdr_via_brew() {
+        if grep -F -- 'ensure_brew_tool "herdr" "herdr"' "$SV_BASE" &>/dev/null; then
+            pass "sv installs herdr via brew"
+        else
+            fail "sv installs herdr via brew" \
+                'ensure_brew_tool "herdr" "herdr"' \
+                "missing or broken install arm in $SV_BASE"
+        fi
+    }
+    queue_test test_sv_installs_herdr_via_brew
+
+    # Passthrough only. An injected leading flag would shadow herdr's own
+    # subcommands, and command -v would find this wrapper (~/bin is first on
+    # PATH) and exec itself forever.
+    test_herdr_wrapper_passthrough() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/herdr"
+        if [[ ! -x "$wrapper" ]]; then
+            fail "herdr wrapper passes arguments through" "executable wrapper" "$wrapper"
+            return
+        fi
+        local code
+        code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        if ! grep -Eq '^exec "\$HERDR" "\$@"$' <<< "$code"; then
+            fail "herdr wrapper passes arguments through" \
+                'exec "$HERDR" "$@" with no injected flags' "$wrapper"
+        elif grep -q 'command -v herdr' <<< "$code"; then
+            fail "herdr wrapper passes arguments through" \
+                "explicit-path lookup, not command -v herdr" "$wrapper"
+        else
+            pass "herdr wrapper passes arguments through"
+        fi
+    }
+    queue_test test_herdr_wrapper_passthrough
+
+    test_herdr_wrapper_native_install() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/herdr"
+        if [[ ! -x "$wrapper" ]]; then
+            fail "herdr wrapper native-installs from herdr.dev" "executable wrapper" "$wrapper"
+            return
+        fi
+        local code
+        code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        if ! grep -F -- 'https://herdr.dev/install.sh' <<< "$code" &>/dev/null; then
+            fail "herdr wrapper native-installs from herdr.dev" \
+                'curl -fsSL https://herdr.dev/install.sh' "$wrapper"
+        elif ! grep -F -- 'HERDR_INSTALL_DIR="$HOME/.local/bin"' <<< "$code" &>/dev/null; then
+            fail "herdr wrapper native-installs from herdr.dev" \
+                'HERDR_INSTALL_DIR="$HOME/.local/bin" pinned to the exec path' "$wrapper"
+        else
+            pass "herdr wrapper native-installs from herdr.dev"
+        fi
+    }
+    queue_test test_herdr_wrapper_native_install
+
+    # herdr starts its own server on demand. A brew service / launchd entry was
+    # removed upstream (homebrew-core#310924) and broke clodpod's build.
+    test_herdr_no_brew_service() {
+        if grep -Eq 'brew services|start_service' "$SV_BASE" "$SCRIPT_DIR/../guest/home/bin/herdr"; then
+            fail "herdr is not run as a brew service" \
+                "no 'brew services' or start_service" "found in sv or the herdr wrapper"
+        else
+            pass "herdr is not run as a brew service"
+        fi
+    }
+    queue_test test_herdr_no_brew_service
+
+    # The herdr server outlives sv and its panes inherit the first session's
+    # sandbox, so --no-sandbox must be refused.
+    test_herdr_refuses_no_sandbox() {
+        if grep -A4 -E 'COMMAND.*== "herdr"' "$SV_BASE" | grep -q 'USE_SANDBOX.*== "false"' \
+            && grep -A6 -E 'COMMAND.*== "herdr"' "$SV_BASE" | grep -q 'abort .*herdr cannot run with --no-sandbox'; then
+            pass "herdr refuses --no-sandbox"
+        else
+            fail "herdr refuses --no-sandbox" \
+                "abort when COMMAND is herdr and USE_SANDBOX is false" \
+                "missing guard in $SV_BASE"
+        fi
+    }
+    queue_test test_herdr_refuses_no_sandbox
+
+    # Browser/iOS endpoints are torn down on detach but the server's panes keep
+    # them, so both flags must warn.
+    test_herdr_warns_stale_endpoints() {
+        local block
+        block=$(grep -A14 -E 'COMMAND.*== "herdr"' "$SV_BASE")
+        if grep -q 'USE_BROWSER.*== "true"' <<< "$block" \
+            && grep -q 'warn "herdr: --browser' <<< "$block" \
+            && grep -q 'USE_IOS_SIMULATOR.*== "true"' <<< "$block" \
+            && grep -q 'warn "herdr: --ios' <<< "$block"; then
+            pass "herdr warns about stale --browser/--ios endpoints"
+        else
+            fail "herdr warns about stale --browser/--ios endpoints" \
+                "warn for USE_BROWSER and USE_IOS_SIMULATOR when COMMAND is herdr" \
+                "missing guard in $SV_BASE"
+        fi
+    }
+    queue_test test_herdr_warns_stale_endpoints
+
     # Test that brew symlinks used by sv are accessible
     test_brew_symlink_accessible() {
         local brew_prefix
@@ -1132,7 +1255,7 @@ EOF
         fi
         local failed=false
         local link
-        for link in claude codex opencode gemini pi muse; do
+        for link in claude codex opencode gemini pi muse herdr; do
             if [[ -L "$brew_prefix/bin/$link" ]]; then
                 local link_perms
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_prefix/bin/$link")

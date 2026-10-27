@@ -447,6 +447,9 @@ install_deps () {
                 # download, which ensure_brew_tool's warm-up step clears.
                 ensure_brew_tool "muse-code" "muse"
                 ;;
+            herdr)
+                ensure_brew_tool "herdr" "herdr"
+                ;;
             *)
                 # No tool installation needed for other commands
                 ;;
@@ -990,11 +993,12 @@ show_help() {
     echo "  g,  gemini [PATH]    Open Google Gemini in sandvault"
     echo "  p,  pi     [PATH]    Open pi in sandvault"
     echo "  m,  muse   [PATH]    Open Muse Code in sandvault"
+    echo "  hd, herdr  [PATH]    Open herdr agent multiplexer in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove sandvault; keep shared files"
     echo ""
-    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, shell)"
+    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, herdr, shell)"
     echo ""
     echo "Environment:"
     echo "  SANDVAULT_ARGS       Default arguments (prepended to command line)"
@@ -1130,6 +1134,10 @@ case "${1:-}" in
         COMMAND=muse
         INITIAL_DIR="${2:-}"
         ;;
+    hd|herdr)
+        COMMAND=herdr
+        INITIAL_DIR="${2:-}"
+        ;;
     s|shell)
         COMMAND=
         INITIAL_DIR="${2:-}"
@@ -1157,6 +1165,23 @@ case "${1:-}" in
         ;;
 esac
 readonly COMMAND
+
+# herdr runs a background server that outlives this sv invocation, and every
+# pane is a child of that server, so panes keep the sandbox and environment of
+# the session that first started it -- not of the session that later attaches.
+if [[ "$COMMAND" == "herdr" ]]; then
+    if [[ "$USE_SANDBOX" == "false" ]]; then
+        # An unsandboxed first launch would leave every later pane unsandboxed,
+        # even when reattached with a plain (sandboxed) 'sv herdr'.
+        abort "herdr cannot run with --no-sandbox: its server outlives this session, so every pane it starts, now or after a later reattach, would be unsandboxed. Use 'sv shell' if you need an unsandboxed shell."
+    fi
+    if [[ "$USE_BROWSER" == "true" ]]; then
+        warn "herdr: --browser endpoint is only valid while this session lasts. The herdr server (and its panes) keeps running after you detach, but the browser is stopped, so panes are left with a stale SV_BROWSER_ENDPOINT. A later 'sv --browser herdr' reattaches to the existing server and does not update it."
+    fi
+    if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
+        warn "herdr: --ios endpoint is only valid while this session lasts. The herdr server (and its panes) keeps running after you detach, but the simulator and bridge are stopped, so panes are left with a stale SV_IOS_SIMULATOR_ENDPOINT. A later 'sv --ios herdr' reattaches to the existing server and does not update it."
+    fi
+fi
 
 if [[ "$FIX_PERMISSIONS" == "true" && "$COMMAND" != "build" ]]; then
     abort "--fix-permissions can only be used standalone or with build"
@@ -1822,7 +1847,7 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
     # Fix homebrew symlinks for any installed tools
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in condition
     if brew_shellenv 2>/dev/null; then
-        for tool_cli in claude codex opencode gemini pi muse; do
+        for tool_cli in claude codex opencode gemini pi muse herdr; do
             brew_link="$(brew --prefix)/bin/$tool_cli"
             if [[ -L "$brew_link" ]]; then
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_link")
