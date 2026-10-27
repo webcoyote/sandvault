@@ -1,0 +1,44 @@
+#!/bin/bash
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+# Find the real binary by explicit path only. ~/bin (this wrapper) precedes
+# ~/.local/bin and the Homebrew bin on PATH, so `command -v herdr` would find
+# this script again and exec itself forever.
+unset HERDR
+if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
+    if [[ ! -x "$HOME/.local/bin/herdr" ]]; then
+        echo >&2 "Installing herdr natively..."
+        # HERDR_INSTALL_DIR is the installer's default, set explicitly so the
+        # binary lands where the line below looks for it regardless of the
+        # installer's future defaults. The installer verifies the download's
+        # SHA-256 and only prints a PATH hint, it does not edit .zshrc or
+        # .zprofile (sandvault owns those and rewrites them on every build).
+        curl -fsSL https://herdr.dev/install.sh \
+            | HERDR_INSTALL_DIR="$HOME/.local/bin" sh
+    fi
+    HERDR="$HOME/.local/bin/herdr"
+elif command -v brew &>/dev/null ; then
+    HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
+    if [[ -x "$HOMEBREW_PREFIX/bin/herdr" ]]; then
+        # Homebrew install
+        HERDR="$HOMEBREW_PREFIX/bin/herdr"
+    fi
+fi
+
+# Fallback: a pre-existing native install.
+if [[ -z "${HERDR:-}" && -x "$HOME/.local/bin/herdr" ]]; then
+    HERDR="$HOME/.local/bin/herdr"
+fi
+
+if [[ -z "${HERDR:-}" || ! -x "$HERDR" ]]; then
+    echo >&2 "ERROR: herdr is not installed"
+    exit 1
+fi
+
+# No sv-tool-prompts.sh source and no injected flags: herdr is a terminal
+# multiplexer, not an agent, so there is nothing to approve or prompt, and an
+# extra leading flag would shadow herdr's own subcommands. Inside panes,
+# `herdr api ... --json` and `herdr pane ...` also resolve to this wrapper
+# first on PATH, so nothing may be written to stdout here.
+exec "$HERDR" "$@"

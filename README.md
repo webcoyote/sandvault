@@ -6,7 +6,7 @@ SandVault (`sv`) manages a limited user account to sandbox shell commands and AI
 </br>
 </br>
 
-- **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini, pi, Muse Code
+- **AI ready** - Includes Claude Code, OpenAI Codex, OpenCode, Google Gemini, pi, Muse Code, and the [herdr](https://herdr.dev) agent multiplexer
 - **Web and iOS automation** - sandbox access to Chrome / Lightpanda and iOS Simulator
 - **Fast context switching** - No VM overhead; instant user switching
 - **Passwordless** - switch accounts without a prompt (after setup)
@@ -98,6 +98,10 @@ Install via git:
 # shortcut: sv m
   sv muse
 
+# Run herdr (many agents, one terminal) in the sandbox
+# shortcut: sv hd
+  sv herdr
+
 # Run command shell in the sandbox
 # shortcut: sv s
   sv shell
@@ -187,6 +191,7 @@ By default, SandVault installs AI tools via Homebrew on the host side. With `--n
 - **Gemini** — installed via `npm install -g @google/gemini-cli`
 - **pi** — installed via `npm install -g @earendil-works/pi-coding-agent`
 - **Muse Code** — installed via `curl -fsSL https://dev.meta.ai/install.sh | bash`
+- **herdr** — installed via `curl -fsSL https://herdr.dev/install.sh | sh`
 
 Tools are installed on first run and reused on subsequent runs.
 
@@ -201,6 +206,7 @@ sv -N opencode
 sv -N gemini
 sv -N pi
 sv -N muse
+sv -N herdr
 ```
 
 To make native install the default, set `SANDVAULT_ARGS`:
@@ -274,6 +280,26 @@ sv-agentsview-setup
 You are prompted once, on the first run. After that, `sv-agentsview-setup` re-syncs on every run. It installs the mirror symlinks and adds the missing scan paths to `~/.agentsview/config.toml`. New agents that sandvault adds in a later release appear the next time you run the command. When a new scan path is added, the command shows a diff and asks for confirmation. If you decline, that agent is skipped permanently. Remove its key from `/Users/Shared/sv-$USER/_sandvault/setup/agentsview-declined.keys` to enable it again.
 
 Then run `agentsview serve`. You will see your sandvault AI sessions in the `agentsview` dashboard.
+
+
+## Running many agents with herdr
+
+[herdr](https://herdr.dev) is a terminal multiplexer for coding agents: run several agents as panes in one session, with a sidebar showing which are working, blocked or done.
+
+```bash
+sv herdr                          # start, or reattach to, herdr in the sandbox
+sv herdr -- --session experiments # arguments after -- go to herdr (separate server)
+```
+
+Detach with `ctrl+b q`; the panes keep running and the next `sv herdr` reattaches.
+
+herdr runs a background server that **outlives the `sv` command**, and every pane is a child of that server. So panes keep the sandbox and environment of the session that first started the server, not of the session that later attaches:
+
+- `--no-sandbox` is refused with herdr: an unsandboxed first launch would leave every later pane unsandboxed too.
+- `--browser` and `--ios` print a warning. Their endpoints are torn down when you detach, but the server's panes keep the old `SV_BROWSER_ENDPOINT` / `SV_IOS_SIMULATOR_ENDPOINT`, and a later `sv --browser herdr` reattaches without updating them.
+- The starting directory and `-N` setting are also fixed when the server starts. Use `-- --session NAME` for a separate server.
+
+herdr can install state-reporting hooks into other agents (`herdr integration install claude`). This is not done automatically because it edits those agents' config files; run each agent once first so its config folder exists.
 
 
 ## Nested sandboxes
@@ -544,6 +570,7 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Runs Google Gemini with `--yolo`
 - Runs pi with `--approve` to trust project-local files (pi needs no permission bypass)
 - Runs Muse Code with `--yolo`, which disables both its approval prompts and its own sandbox — sandvault is already the sandbox, and muse's nested one defaults to proxy-only network and workspace-only writes
+- Runs herdr unmodified (it is a multiplexer, not an agent) and refuses to run it with `--no-sandbox`, because its server outlives the session
 - Automates Chrome for web testing (via Chrome DevTools Protocol)
 - Automated iOS Simulator for app testing (via `xcrun simctl`, and `iosef`)
 - Maintains a clean separation between trusted and untrusted code
