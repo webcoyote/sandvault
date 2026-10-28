@@ -447,7 +447,7 @@ From the host, you can query the endpoint URL:
 sv --endpoint
 ```
 
-See also [`./tests/browser/*.js`](./tests/browser) for examples of using Playwright and Puppeteer. See [`guest/home/bin/prompts/browser.md`](./guest/home/bin/prompts/browser.md) for prompt.
+See also [`./tests/chrome/*.js`](./tests/chrome) and [`./tests/lightpanda/*.js`](./tests/lightpanda) for examples of using Playwright and Puppeteer. See [`guest/home/bin/prompts/browser.md`](./guest/home/bin/prompts/browser.md) for prompt.
 
 ### How it works
 
