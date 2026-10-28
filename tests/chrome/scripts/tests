@@ -4,10 +4,17 @@ set -Eeuo pipefail
 trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Exit 77 tells tests/tests to report this suite as skipped (missing prerequisite).
+skip() { echo "SKIP: $*"; exit 77; }
+
 # Re-exec under `sv --chrome` if Chrome's CDP endpoint isn't already wired
 # in. `sv` handles nesting safely, so re-execing when already inside an sv
 # session is harmless.
 if [[ -z "${SV_BROWSER_ENDPOINT:-}" ]]; then
+    if [[ ! -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+       && ! -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]]; then
+        skip "Chrome or Chromium not installed; run: ./sv --chrome build"
+    fi
     exec "$SCRIPT_DIR/../../../sv" --chrome --no-build shell -- "$0" "$@"
 fi
 
@@ -15,6 +22,7 @@ cd "$SCRIPT_DIR/.."
 
 [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
 
+command -v pnpm >/dev/null || skip "pnpm not installed; run: brew install pnpm"
 pnpm install --prefer-offline --reporter=append-only
 
 node test-playwright.js
