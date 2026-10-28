@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Pick the newest available iPhone device type and iOS runtime.
+Pick the newest available iOS runtime and the newest iPhone device type it
+supports. A runtime that supports no iPhone (e.g. a partially installed one)
+is skipped in favor of the next newest.
 
 Reads `xcrun simctl list -j devicetypes runtimes` JSON on stdin and prints
 "<device_type_identifier>\t<runtime_identifier>" on stdout. Exits non-zero if
@@ -36,20 +38,22 @@ def main():
         if r.get("isAvailable") and "iOS" in (r.get("name") or "")
     ]
     runtimes.sort(key=rt_key, reverse=True)
-    if not runtimes:
-        sys.exit(1)
-    rt = runtimes[0]["identifier"]
 
     devs = [
         d for d in data.get("devicetypes", [])
         if d.get("productFamily") == "iPhone" and "iPhone" in (d.get("name") or "")
     ]
     devs.sort(key=dt_key, reverse=True)
-    if not devs:
-        sys.exit(1)
-    dt = devs[0]["identifier"]
 
-    print(f"{dt}\t{rt}")
+    for r in runtimes:
+        # Older simctl versions omit supportedDeviceTypes; assume all supported.
+        supported = r.get("supportedDeviceTypes")
+        ids = None if supported is None else {d.get("identifier") for d in supported}
+        for d in devs:
+            if ids is None or d["identifier"] in ids:
+                print(f"{d['identifier']}\t{r['identifier']}")
+                return
+    sys.exit(1)
 
 
 if __name__ == "__main__":
