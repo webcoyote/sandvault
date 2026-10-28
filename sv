@@ -716,9 +716,12 @@ start_ios_simulator() {
     debug "Selected device=$device_type runtime=$runtime"
 
     # Create a fresh scratch simulator for this session.
-    if ! IOS_SIM_UDID=$(/usr/bin/xcrun simctl create "$IOS_SIM_DEVICE_NAME" "$device_type" "$runtime" 2>/dev/null); then
-        abort "Failed to create iOS simulator (device=$device_type runtime=$runtime)"
+    # Keep simctl's stderr (e.g. "Incompatible device") for the error message.
+    local create_err="$SESSION_DIR/simctl-create.err"
+    if ! IOS_SIM_UDID=$(/usr/bin/xcrun simctl create "$IOS_SIM_DEVICE_NAME" "$device_type" "$runtime" 2>"$create_err"); then
+        abort "Failed to create iOS simulator (device=$device_type runtime=$runtime):\n$(cat "$create_err" 2>/dev/null || true)"
     fi
+    rm -f "$create_err"
     debug "Created simulator $IOS_SIM_DEVICE_NAME UDID=$IOS_SIM_UDID"
 
     # Begin booting. Don't wait for bootstatus here — the bridge polls
