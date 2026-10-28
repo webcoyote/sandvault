@@ -4,8 +4,15 @@ set -Eeuo pipefail
 trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Exit 77 tells tests/tests to report this suite as skipped (missing prerequisite).
+skip() { echo "SKIP: $*"; exit 77; }
+
 # Re-exec under `sv shell` if not already inside a sandvault session.
 if [[ -z "${SV_SESSION_ID:-}" ]]; then
+    # /usr/bin/xcodebuild exists with only the Command Line Tools but fails.
+    if ! xcodebuild -version >/dev/null 2>&1; then
+        skip "xcodebuild needs Xcode (Command Line Tools are not enough)"
+    fi
     exec "$SCRIPT_DIR/../../../sv" --no-build shell -- "$0" "$@"
 fi
 

@@ -9,8 +9,19 @@ set -Eeuo pipefail
 trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Exit 77 tells tests/tests to report this suite as skipped (missing prerequisite).
+skip() { echo "SKIP: $*"; exit 77; }
+
 # Re-exec under `sv --ios` if the bridge endpoint isn't already wired in.
 if [[ -z "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
+    if ! /usr/bin/xcrun --find simctl >/dev/null 2>&1; then
+        skip "simctl not found; install Xcode (Command Line Tools are not enough)"
+    fi
+    # Mirrors sv's lookup: iosef on PATH or in uv's tool bin dir.
+    if ! command -v iosef >/dev/null \
+       && ! [[ -x "$(uv tool dir --bin 2>/dev/null || true)/iosef" ]]; then
+        skip "iosef not installed; run: ./sv --ios build"
+    fi
     exec "$SCRIPT_DIR/../../../sv" --ios --no-build shell -- "$0" "$@"
 fi
 

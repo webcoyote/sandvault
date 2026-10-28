@@ -41,6 +41,7 @@ jobs:
         env:
           XCODE_DESTINATION: platform=macOS,arch=arm64
           VERBOSE: 1
+          SV_TESTS_STRICT: 1
         run: ./tests/tests
 
   tag-version:

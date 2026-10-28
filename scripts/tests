@@ -2313,6 +2313,51 @@ print(mod["DEFAULT_SUBPATHS"].get(sys.argv[2], "<missing>"))
     queue_test test_agentsview_resync_integration
 
     ###############################################################################
+    # iOS Simulator Device Picker Tests
+    ###############################################################################
+
+    IOS_PICK_DEVICE_SCRIPT="$SCRIPT_DIR/../helpers/sv-ios-pick-device"
+
+    # A partially installed newest runtime can list none of the newest
+    # iPhones; simctl create then fails with "Incompatible device" (#313).
+    # The picker must pair each runtime only with device types it supports,
+    # falling back to an older runtime when the newest supports no iPhone.
+    test_ios_pick_device_respects_supported_types() {
+        local devtypes runtimes out1 out2 out3
+        devtypes='"devicetypes": [
+            {"identifier": "dt.iPhone-18", "name": "iPhone 18", "productFamily": "iPhone"},
+            {"identifier": "dt.iPhone-17", "name": "iPhone 17", "productFamily": "iPhone"},
+            {"identifier": "dt.iPad", "name": "iPad Pro", "productFamily": "iPad"}]'
+        # Newest runtime supports only an older iPhone: pick that pair.
+        runtimes='"runtimes": [
+            {"identifier": "rt.27-1", "name": "iOS 27.1", "version": "27.1", "isAvailable": true,
+             "supportedDeviceTypes": [{"identifier": "dt.iPhone-17"}]},
+            {"identifier": "rt.27-0", "name": "iOS 27.0", "version": "27.0", "isAvailable": true,
+             "supportedDeviceTypes": [{"identifier": "dt.iPhone-18"}]}]'
+        out1=$(echo "{$devtypes, $runtimes}" | "$IOS_PICK_DEVICE_SCRIPT")
+        # Newest runtime supports no iPhone: fall back to the older runtime.
+        runtimes='"runtimes": [
+            {"identifier": "rt.27-1", "name": "iOS 27.1", "version": "27.1", "isAvailable": true,
+             "supportedDeviceTypes": [{"identifier": "dt.iPad"}]},
+            {"identifier": "rt.27-0", "name": "iOS 27.0", "version": "27.0", "isAvailable": true,
+             "supportedDeviceTypes": [{"identifier": "dt.iPhone-18"}]}]'
+        out2=$(echo "{$devtypes, $runtimes}" | "$IOS_PICK_DEVICE_SCRIPT")
+        # No supportedDeviceTypes key (older simctl): newest of each.
+        runtimes='"runtimes": [
+            {"identifier": "rt.27-1", "name": "iOS 27.1", "version": "27.1", "isAvailable": true}]'
+        out3=$(echo "{$devtypes, $runtimes}" | "$IOS_PICK_DEVICE_SCRIPT")
+
+        local expected=$'dt.iPhone-17\trt.27-1|dt.iPhone-18\trt.27-0|dt.iPhone-18\trt.27-1'
+        local got="$out1|$out2|$out3"
+        if [[ "$got" == "$expected" ]]; then
+            pass "sv-ios-pick-device pairs runtimes only with supported device types"
+        else
+            fail "sv-ios-pick-device pairs runtimes only with supported device types" "$expected" "$got"
+        fi
+    }
+    queue_test test_ios_pick_device_respects_supported_types
+
+    ###############################################################################
     # Summary
     ###############################################################################
 

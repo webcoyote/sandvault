@@ -56,11 +56,18 @@ fi
 TOTAL=0
 PASSED=0
 FAILED=0
+SKIPPED=0
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
 NC='\033[0m'
 RESULTS_DIR=""
 PARALLEL_JOBS=0
+
+# Suites exit with this code when a prerequisite (browser, simulator tooling,
+# pnpm, Xcode) is missing; see README "Running the tests". CI sets
+# SV_TESTS_STRICT=1 so a missing prerequisite there is a failure, not a skip.
+readonly SKIP_STATUS=77
 TEST_PIDS=()
 
 PARALLEL_JOBS="${SV_TEST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)}"
@@ -108,7 +115,9 @@ queue_suite() {
 
     wait_for_slot
     (
+        # Suite status is recorded below; don't print an ERR trace for it.
         set +e
+        trap - ERR
         suite_start=$(date +%s.%N)
         "$tests" > "$RESULTS_DIR/$id.output" 2>&1
         status=$?
@@ -157,6 +166,10 @@ collect_results() {
             if [[ "$VERBOSE" -ne 0 ]]; then
                 echo -e "  ${GREEN}PASS${NC}: $(basename "$dir")${suffix}"
             fi
+        elif [[ "$status" -eq "$SKIP_STATUS" && "${SV_TESTS_STRICT:-0}" == "0" ]]; then
+            ((SKIPPED++)) || true
+            reason=$(sed -n 's/^SKIP: //p' "$output_file" 2>/dev/null | tail -n 1)
+            echo -e "  ${YELLOW}SKIP${NC}: $(basename "$dir") (${reason:-missing prerequisite})"
         else
             ((FAILED++)) || true
             echo -e "  ${RED}FAIL${NC}: $(basename "$dir") (exit $status)${suffix}"
@@ -182,6 +195,7 @@ collect_results
 if [[ "$VERBOSE" -ne 0 ]]; then
     echo -e "Passed: ${GREEN}$PASSED${NC}"
     echo -e "Failed: ${RED}$FAILED${NC}"
+    echo -e "Skipped: ${YELLOW}$SKIPPED${NC}"
     echo "Tests run: $TOTAL"
 fi
 
@@ -193,4 +207,7 @@ END_TIME=$(date +%s.%N)
 ELAPSED_TIME=$(echo "$END_TIME - $START_TIME" | bc --mathlib | xargs printf "%.2f\n")
 if [[ "$VERBOSE" -ne 0 ]]; then
     echo -e "✅ Tests completed in $ELAPSED_TIME seconds!"
+fi
+if [[ "$SKIPPED" -gt 0 ]]; then
+    echo -e "${YELLOW}⚠️  $SKIPPED suite(s) skipped for missing prerequisites; see README \"Running the tests\"${NC}"
 fi
