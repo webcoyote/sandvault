@@ -81,10 +81,12 @@ if (verbose) console.log('test-puppeteer.js');
     }
     log('  PASS');
 
-    // Test 5: Real network access from inside the sandbox.
+    // Test 5: Real network access from inside the sandbox. Uses Apple's
+    // connectivity-check page: tiny, no subresources, built for automated
+    // clients. example.com asks not to be used in CI.
     // Asserts only on a non-empty title so a remote redesign cannot break it.
     log('Test 5: Network navigation...');
-    await page.goto('https://example.com');
+    await page.goto('https://captive.apple.com/');
     const netTitle = await page.title();
     log(`  Title: ${netTitle}`);
     if (!netTitle) {
