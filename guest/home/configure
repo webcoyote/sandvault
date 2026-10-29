@@ -138,7 +138,6 @@ if [[ -n "${SHARED_WORKSPACE:-}" ]]; then
     debug "Copying $SHARED_WORKSPACE/user contents to $HOME"
     mkdir -p "$SHARED_WORKSPACE/user"
     /usr/bin/rsync \
-        --quiet \
         --archive \
         --copy-links \
         --exclude='.git' \

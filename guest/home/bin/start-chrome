@@ -7,6 +7,12 @@
 # downloads can only reach what the sandbox itself can. --no-sandbox is
 # required because macOS does not allow Chrome's helper processes to apply
 # their own seatbelt sandbox inside an already-sandboxed process.
+#
+# The --disable-*background* flags match what Playwright/Puppeteer pass when
+# they launch Chrome themselves. Without them, on a display-less Mac (CI)
+# Chrome can treat the headless window as occluded and background its
+# renderer, which stalls CDP input (page.type times out) while reads,
+# evaluate, and screenshots keep working.
 
 _chrome_debug() {
     [[ "${SV_VERBOSE:-0}" -lt 1 ]] || echo >&2 "start-chrome: $*"
@@ -37,7 +43,10 @@ _chrome_debug "Starting headless Chrome on 127.0.0.1..."
     --no-default-browser-check \
     --disable-extensions \
     --disable-background-networking \
-    > "$_SV_CHROME_LOG" 2>&1 &
+    --disable-background-timer-throttling \
+    --disable-backgrounding-occluded-windows \
+    --disable-renderer-backgrounding \
+    >"$_SV_CHROME_LOG" 2>&1 &
 _SV_CHROME_PID=$!
 
 # The sandboxed zsh that sources this script ends by exec'ing the agent or
