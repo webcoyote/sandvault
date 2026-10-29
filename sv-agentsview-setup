@@ -136,6 +136,7 @@ agentsview_record_decline() {
         [[ -n "$key" ]] || continue
         known=0
         for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            # shellcheck disable=SC2310 # an unknown agent simply doesn't match
             if [[ "$(agentsview_field TOMLKEY "$agent")" == "$key" ]]; then
                 known=1
                 break
@@ -260,6 +261,7 @@ agentsview_resync_config() {
     local missing_args=() mk
     for mk in "${missing_keys[@]}"; do
         for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            # shellcheck disable=SC2310 # an unknown agent simply doesn't match
             if [[ "$(agentsview_field TOMLKEY "$agent")" == "$mk" ]]; then
                 missing_args+=(--agent "$mk=$SV_PRIVATE_DIR/sessions/$agent")
                 break
@@ -461,6 +463,7 @@ agentsview_setup() {
 
     # First-run opt-in: prompt only when no choice is recorded yet.
     if [[ ! -f "$AGENTSVIEW_STATE_FILE" ]]; then
+        # shellcheck disable=SC2310 # declining the prompt intentionally returns early
         agentsview_first_run_prompt || return 0
     fi
 

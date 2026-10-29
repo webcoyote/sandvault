@@ -249,6 +249,7 @@ run_tests() {
         id=$(printf "%04d" "$TESTS_RUN")
         (
             set +e
+            # shellcheck disable=SC2030 # per-test by design; only the test running in this subshell reads it
             TEST_ID="$id"
             "$@"
         ) &
@@ -397,6 +398,7 @@ run_tests() {
         fi
         local code
         code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        # shellcheck disable=SC2016 # literal match: the file under test contains this text verbatim
         if grep -F -- 'XDG_BIN_DIR' <<< "$code" &>/dev/null; then
             fail "opencode wrapper native-installs to ~/.opencode/bin" \
                 "no XDG_BIN_DIR (the installer never reads it)" \
@@ -721,6 +723,7 @@ EOF
     # suite never exercises.
     test_pi_wrapper_native_install_package() {
         local wrapper="$SCRIPT_DIR/../guest/home/bin/pi"
+        # shellcheck disable=SC2016 # literal match: the file under test contains this text verbatim
         if grep -F -- 'npm install --prefix "$NPM_PREFIX" -g @earendil-works/pi-coding-agent' \
             "$wrapper" &>/dev/null; then
             pass "pi wrapper native-installs @earendil-works/pi-coding-agent"
@@ -775,6 +778,7 @@ EOF
         fi
         local code
         code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        # shellcheck disable=SC2016 # literal match: the file under test contains this text verbatim
         if echo "$code" | grep -E 'command -v pi\b|type -P pi\b|type -aP pi\b' &>/dev/null; then
             fail "pi wrapper has no command -v loop" \
                 "no PATH-search fallback for pi" \
@@ -865,6 +869,7 @@ EOF
         fi
         local code
         code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        # shellcheck disable=SC2016 # literal match: the file under test contains this text verbatim
         if ! grep -F -- 'https://dev.meta.ai/install.sh' <<< "$code" &>/dev/null; then
             fail "muse wrapper native-installs from dev.meta.ai" \
                 'curl -fsSL https://dev.meta.ai/install.sh' "$wrapper"
@@ -1916,6 +1921,7 @@ STUB_EOF
 
         CODEX_TEST_STUB_LINK="$stub_dir/codex"
         CODEX_TEST_STUB_TARGET=""
+        # shellcheck disable=SC2031 # runs inside queue_test's subshell, which set TEST_ID
         CODEX_TEST_BACKUP="$RESULTS_DIR/codex-$TEST_ID.backup"
         cleanup_codex_unicode_args() {
             if [[ -n "$CODEX_TEST_STUB_TARGET" ]]; then
@@ -1923,8 +1929,10 @@ STUB_EOF
             fi
             if [[ -e "$CODEX_TEST_BACKUP" || -L "$CODEX_TEST_BACKUP" ]]; then
                 mv "$CODEX_TEST_BACKUP" "$CODEX_TEST_STUB_LINK"
+                # shellcheck disable=SC2310 # best-effort restore; cleanup must not abort
                 sv_cmd s -- /bin/cp -p "$CODEX_TEST_STUB_LINK" "$SANDVAULT_HOME/.local/bin/codex" &>/dev/null || true
             elif [[ -n "$CODEX_TEST_STUB_TARGET" ]]; then
+                # shellcheck disable=SC2310 # best-effort cleanup; must not abort
                 sv_cmd s -- /bin/rm -f "$SANDVAULT_HOME/.local/bin/codex" &>/dev/null || true
             fi
         }
@@ -1980,6 +1988,7 @@ CODEX_TEST_STUB
         local agent missing=""
         for agent in "${AGENTSVIEW_AGENTS[@]}"; do
             for field in SUBDIR DEFAULT TOMLKEY; do
+                # shellcheck disable=SC2310 # a lookup failure is reported as a missing field
                 if [[ -z "$(agentsview_field "$field" "$agent")" ]]; then
                     missing="$missing $agent.$field"
                 fi
@@ -2097,6 +2106,7 @@ CODEX_TEST_STUB
         # Generator aborts on an empty SUBDIR; generated script skips one.
         local gen_guard=false run_guard=false
         grep -F -- 'has no SUBDIR"' "$setup" &>/dev/null && gen_guard=true
+        # shellcheck disable=SC2016 # literal match: the file under test contains this text verbatim
         grep -F -- '[[ -n "\$subdir" ]] || continue' "$setup" &>/dev/null && run_guard=true
         if [[ "$empty_found" == "false" && "$parses" == "true" \
             && "$gen_guard" == "true" && "$run_guard" == "true" ]]; then
@@ -2127,7 +2137,9 @@ CODEX_TEST_STUB
         # shellcheck source=/dev/null
         source "$paths"
         local pi_private subdir
+        # shellcheck disable=SC2310 # an empty result is reported by the check below
         pi_private="$(agentsview_field PRIVATE pi || true)"
+        # shellcheck disable=SC2310 # an empty result is reported by the check below
         subdir="$(agentsview_field SUBDIR pi || true)"
         # The declared private dir must actually be a parent of the session dir,
         # or tightening it protects nothing.
@@ -2138,7 +2150,9 @@ CODEX_TEST_STUB
             return
         fi
         local priv_line subdir_line
+        # shellcheck disable=SC2016 # literal match: the file under test contains this text verbatim
         priv_line=$(grep -n 'for private in \$private_list' "$setup" | head -1 | cut -d: -f1 || true)
+        # shellcheck disable=SC2016 # literal match: the file under test contains this text verbatim
         subdir_line=$(grep -n 'for subdir in \$subdir_list' "$setup" | head -1 | cut -d: -f1 || true)
         if [[ -z "$priv_line" || -z "$subdir_line" ]]; then
             fail "agentsview private parent tightened first" \
@@ -2146,6 +2160,7 @@ CODEX_TEST_STUB
                 "private=$priv_line subdir=$subdir_line"
             return
         fi
+        # shellcheck disable=SC2016 # literal match: the file under test contains this text verbatim
         if [[ "$priv_line" -lt "$subdir_line" ]] \
             && grep -F -- 'chmod 700 "\$priv_full"' "$setup" &>/dev/null \
             && grep -F -- 'SEARCH_ONLY_RIGHTS="group:$SANDVAULT_GROUP allow search,readattr"' "$setup" &>/dev/null; then
@@ -2172,7 +2187,9 @@ CODEX_TEST_STUB
         source "$paths"
         local agent tomlkey shell_default py_default mismatches=""
         for agent in "${AGENTSVIEW_AGENTS[@]}"; do
+            # shellcheck disable=SC2310 # an empty result surfaces as a reported mismatch
             tomlkey="$(agentsview_field TOMLKEY "$agent" || true)"
+            # shellcheck disable=SC2310 # an empty result surfaces as a reported mismatch
             shell_default="$(agentsview_field DEFAULT "$agent" || true)"
             # `|| true`: a python failure here must surface as a mismatch the
             # test reports, not a pipefail abort of the whole suite.
@@ -2416,6 +2433,7 @@ start_guard() {
 # when the session is already gone -- it clears at least the directory we own.
 cleanup_clone_workspace() {
     [[ -n "$CLONE_WORKSPACE" ]] || return 0
+    # shellcheck disable=SC2310 # best-effort; the host-side rm below is the fallback
     sv_cmd s -- rm -rf "$CLONE_WORKSPACE" >/dev/null 2>&1 || true
     rm -rf "$CLONE_WORKSPACE" 2>/dev/null || true
     CLONE_WORKSPACE=""

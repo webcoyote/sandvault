@@ -59,8 +59,8 @@ opencode_dirs = ["$HOME/.local/share/opencode", "$SV_PRIVATE_DIR/sessions/openco
 gemini_dirs = ["$HOME/.gemini", "$SV_PRIVATE_DIR/sessions/gemini"]
 pi_dirs = ["$HOME/.pi/agent/sessions", "$SV_PRIVATE_DIR/sessions/pi"]
 EOF
-agentsview_resync_config </dev/null
-[[ $? -eq 0 ]] || fail "resync (all present) should return 0"
+st=0; agentsview_resync_config </dev/null || st=$?
+[[ "$st" -eq 0 ]] || fail "resync (all present) should return 0"
 pass "resync: all mirrors present is a no-op"
 set +e
 
@@ -99,8 +99,8 @@ count=$(agentsview_declined_keys | grep -c .)
 agentsview_record_decline "${pending[@]}"   # de-dup
 count=$(agentsview_declined_keys | grep -c .)
 [[ "$count" -eq 5 ]] || fail "decline not de-duplicated, got $count"
-agentsview_resync_config </dev/null
-[[ $? -eq 0 ]] || fail "resync (all declined) should return 0"
+st=0; agentsview_resync_config </dev/null || st=$?
+[[ "$st" -eq 0 ]] || fail "resync (all declined) should return 0"
 pass "resync: all-declined is a no-op (decline de-duped)"
 set +e
 
