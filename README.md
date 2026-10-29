@@ -412,7 +412,12 @@ Next time you run sandvault, your files will be copied to the sandvault user hom
 
 ## Browser Automation
 
-SandVault supports a headless browser for automation from within the sandbox. The browser runs on the host side and the sandbox connects to it via the Chrome DevTools Protocol (CDP) over localhost. Two backends are supported: **Chrome** (default) and **Lightpanda**.
+SandVault supports a headless browser for automation from within the sandbox. The browser runs inside the sandbox as the sandvault user, so it can only read and write the same files the sandbox can, and agents connect to it via the Chrome DevTools Protocol (CDP) over localhost. Two backends are supported: **Lightpanda** (default) and **Chrome**.
+
+> **Chrome:** macOS does not let Chrome apply its own internal sandbox inside the
+> sandvault sandbox, so Chrome is launched with `--no-sandbox`. A malicious web page
+> that exploits a Chrome bug would get the sandvault user's access, the same access
+> the agent already has, rather than Chrome's tighter per-page sandbox.
 
 > **Muse Code:** `sv --browser muse` starts the browser, but muse is not told the
 > endpoint exists — it is the one agent with no way to inject a system prompt. The
@@ -422,13 +427,13 @@ SandVault supports a headless browser for automation from within the sandbox. Th
 ### Usage
 
 ```bash
-# Launch with browser support (Chrome by default)
+# Launch with browser support (Lightpanda by default)
 sv --browser claude
 sv --browser shell
 
 # Explicit backend selection
-sv --chrome claude       # same as --browser
-sv --lightpanda claude   # use Lightpanda instead of Chrome
+sv --lightpanda claude   # same as --browser
+sv --chrome claude       # use Chrome instead of Lightpanda
 ```
 
 Inside the sandbox, the `SV_BROWSER_ENDPOINT` environment variable contains the CDP endpoint URL (e.g. `http://127.0.0.1:52858`).
@@ -439,12 +444,6 @@ const browser = await chromium.connectOverCDP(process.env.SV_BROWSER_ENDPOINT);
 
 // Puppeteer
 const browser = await puppeteer.connect({ browserURL: process.env.SV_BROWSER_ENDPOINT });
-```
-
-From the host, you can query the endpoint URL:
-```bash
-# Prints the CDP endpoint URL (or errors if browser is unavailable)
-sv --endpoint
 ```
 
 See also [`./tests/chrome/*.js`](./tests/chrome) and [`./tests/lightpanda/*.js`](./tests/lightpanda) for examples of using Playwright and Puppeteer. See [`guest/home/bin/prompts/browser.md`](./guest/home/bin/prompts/browser.md) for prompt.

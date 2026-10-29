@@ -28,15 +28,17 @@ _lp_debug "Starting lightpanda on 127.0.0.1..."
     > "$_SV_LP_LOG" 2>&1 &
 _SV_LP_PID=$!
 
-# Chain cleanup onto any existing EXIT trap so we don't clobber it.
-_lp_existing_trap="$(trap -p EXIT | sed "s/^trap -- '//;s/' EXIT$//" || true)"
-if [[ -n "$_lp_existing_trap" ]]; then
-    # shellcheck disable=SC2064
-    trap "${_lp_existing_trap}; kill $_SV_LP_PID 2>/dev/null; wait $_SV_LP_PID 2>/dev/null; rm -f '$_SV_LP_LOG'" EXIT
-else
-    # shellcheck disable=SC2064
-    trap "kill $_SV_LP_PID 2>/dev/null; wait $_SV_LP_PID 2>/dev/null; rm -f '$_SV_LP_LOG'" EXIT
-fi
+# The sandboxed zsh that sources this script ends by exec'ing the agent or
+# shell (see ZSH_COMMAND in sv), so an EXIT trap set here would never run.
+# Instead, watch the session PID (which exec preserves) and stop lightpanda once
+# it exits. Ignore HUP so closing the terminal doesn't kill the watcher.
+_lp_session_pid=$$
+(
+    trap '' HUP
+    while kill -0 "$_lp_session_pid" 2>/dev/null; do sleep 1; done
+    kill "$_SV_LP_PID" 2>/dev/null
+    rm -f "$_SV_LP_LOG"
+) > /dev/null 2>&1 &
 
 # Wait for lightpanda to log its bound address (up to 15 seconds).
 # Format: $msg="server running" address=127.0.0.1:NNNNN
@@ -67,4 +69,4 @@ fi
 export SV_BROWSER_ENDPOINT="http://127.0.0.1:$_lp_port"
 _lp_debug "lightpanda started (PID $_SV_LP_PID, port $_lp_port, endpoint $SV_BROWSER_ENDPOINT)"
 
-unset _lp_bin _lp_port _lp_i _lp_existing_trap
+unset _lp_bin _lp_port _lp_i _lp_session_pid
