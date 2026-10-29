@@ -2,6 +2,23 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.36.0] - 2026-10-29
+
+### Changed
+- Chrome now runs inside the sandbox, so it can no longer reach host files via `file://` URLs ([#318](https://github.com/webcoyote/sandvault/pull/318))
+- Lightpanda is now the default browser because it uses fewer resources ([#318](https://github.com/webcoyote/sandvault/pull/318))
+
+### Fixed
+- Browser processes are now shut down properly instead of being left running ([#318](https://github.com/webcoyote/sandvault/pull/318))
+- iOS simulator creation now picks an iPhone model that the chosen iOS runtime supports, falling back to an older runtime if needed, instead of failing with "Incompatible device" ([#314](https://github.com/webcoyote/sandvault/pull/314))
+- When the iOS simulator can't be created, the error now includes the underlying `simctl` message ([#314](https://github.com/webcoyote/sandvault/pull/314))
+
+### Removed
+- The `--endpoint` command-line option is removed ([#318](https://github.com/webcoyote/sandvault/pull/318))
+
+### Thanks to 1 contributor!
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.35.0] - 2026-10-17
 
 ### Fixed
