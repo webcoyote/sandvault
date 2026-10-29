@@ -1,0 +1,84 @@
+#!/bin/bash
+# Start headless Chrome inside the sandbox and export SV_BROWSER_ENDPOINT.
+# This script is sourced (not exec'd) by the sv host script's ZSH_COMMAND so
+# that the environment variable and cleanup trap are visible to the session.
+#
+# Chrome runs as the sandvault user under sandbox-exec, so file:// URLs and
+# downloads can only reach what the sandbox itself can. --no-sandbox is
+# required because macOS does not allow Chrome's helper processes to apply
+# their own seatbelt sandbox inside an already-sandboxed process.
+
+_chrome_debug() {
+    [[ "${SV_VERBOSE:-0}" -lt 1 ]] || echo >&2 "start-chrome: $*"
+}
+
+_chrome_bin=""
+if [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+    _chrome_bin="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+elif [[ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]]; then
+    _chrome_bin="/Applications/Chromium.app/Contents/MacOS/Chromium"
+else
+    echo >&2 "start-chrome: ERROR: Chrome or Chromium not found. Install Google Chrome to use --chrome, or use --browser/--lightpanda."
+    exit 1
+fi
+
+_SV_CHROME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/chrome-XXXXXX")"
+_SV_CHROME_LOG="$_SV_CHROME_DIR/chrome.log"
+
+_chrome_debug "Starting headless Chrome on 127.0.0.1..."
+"$_chrome_bin" \
+    --headless \
+    --no-sandbox \
+    --disable-gpu \
+    --remote-debugging-port=0 \
+    --remote-debugging-address=127.0.0.1 \
+    --user-data-dir="$_SV_CHROME_DIR/profile" \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-extensions \
+    --disable-background-networking \
+    > "$_SV_CHROME_LOG" 2>&1 &
+_SV_CHROME_PID=$!
+
+# The sandboxed zsh that sources this script ends by exec'ing the agent or
+# shell (see ZSH_COMMAND in sv), so an EXIT trap set here would never run.
+# Instead, watch the session PID (which exec preserves) and stop Chrome once
+# it exits. Ignore HUP so closing the terminal doesn't kill the watcher.
+_chrome_session_pid=$$
+(
+    trap '' HUP
+    while kill -0 "$_chrome_session_pid" 2>/dev/null; do sleep 1; done
+    kill "$_SV_CHROME_PID" 2>/dev/null
+    rm -rf "$_SV_CHROME_DIR"
+) > /dev/null 2>&1 &
+
+# Wait for Chrome to log its debugging port (up to 15 seconds).
+# Format: DevTools listening on ws://127.0.0.1:NNNNN/devtools/browser/...
+_chrome_port=""
+_chrome_i=0
+while [[ $_chrome_i -lt 150 ]]; do
+    if ! kill -0 "$_SV_CHROME_PID" 2>/dev/null; then
+        echo >&2 "start-chrome: Chrome exited unexpectedly. Log:"
+        cat >&2 "$_SV_CHROME_LOG" 2>/dev/null || true
+        echo >&2 "start-chrome: ERROR: Chrome exited unexpectedly."
+        exit 1
+    fi
+    _chrome_port=$(sed -n 's|.*DevTools listening on ws://127\.0\.0\.1:\([0-9]*\)/.*|\1|p' "$_SV_CHROME_LOG" 2>/dev/null | head -1)
+    if [[ -n "$_chrome_port" ]]; then
+        break
+    fi
+    sleep 0.1
+    _chrome_i=$(( _chrome_i + 1 ))
+done
+
+if [[ -z "$_chrome_port" ]]; then
+    kill "$_SV_CHROME_PID" 2>/dev/null || true
+    wait "$_SV_CHROME_PID" 2>/dev/null || true
+    echo >&2 "start-chrome: ERROR: Chrome did not report a debugging port within 15 seconds. Check $_SV_CHROME_LOG."
+    exit 1
+fi
+
+export SV_BROWSER_ENDPOINT="http://127.0.0.1:$_chrome_port"
+_chrome_debug "Chrome started (PID $_SV_CHROME_PID, port $_chrome_port, endpoint $SV_BROWSER_ENDPOINT)"
+
+unset _chrome_bin _chrome_port _chrome_i _chrome_session_pid
