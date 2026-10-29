@@ -295,8 +295,8 @@ Detach with `ctrl+b q`; the panes keep running and the next `sv herdr` reattache
 
 herdr runs a background server that **outlives the `sv` command**, and every pane is a child of that server. So panes keep the sandbox and environment of the session that first started the server, not of the session that later attaches:
 
-- `--no-sandbox` is refused with herdr: an unsandboxed first launch would leave every later pane unsandboxed too.
-- `--browser` and `--ios` print a warning. Their endpoints are torn down when you detach, but the server's panes keep the old `SV_BROWSER_ENDPOINT` / `SV_IOS_SIMULATOR_ENDPOINT`, and a later `sv --browser herdr` reattaches without updating them.
+- `--no-sandbox` is refused with herdr: an unsandboxed first launch would leave every later pane unsandboxed too. Running `herdr` from inside `sv -x shell` is refused for the same reason.
+- `--chrome` and `--ios` are refused with herdr. Their endpoints are torn down when you detach, but the server's panes would keep the stale `SV_BROWSER_ENDPOINT` / `SV_IOS_SIMULATOR_ENDPOINT`. Run `sv --lightpanda herdr`, as the lightpanda browser runs inside the sandbox.
 - The starting directory and `-N` setting are also fixed when the server starts. Use `-- --session NAME` for a separate server.
 
 herdr can install state-reporting hooks into other agents (`herdr integration install claude`). This is not done automatically because it edits those agents' config files; run each agent once first so its config folder exists.
@@ -571,7 +571,7 @@ After exploring Docker containers, Podman, sandbox-exec, and virtualization, I n
 - Runs Google Gemini with `--yolo`
 - Runs pi with `--approve` to trust project-local files (pi needs no permission bypass)
 - Runs Muse Code with `--yolo`, which disables both its approval prompts and its own sandbox — sandvault is already the sandbox, and muse's nested one defaults to proxy-only network and workspace-only writes
-- Runs herdr unmodified (it is a multiplexer, not an agent) and refuses to run it with `--no-sandbox`, because its server outlives the session
+- Runs herdr unmodified (it is a multiplexer, not an agent) and refuses to run it without the sandbox or with `--chrome` / `--ios`, because its server outlives the session
 - Automates Chrome for web testing (via Chrome DevTools Protocol)
 - Automated iOS Simulator for app testing (via `xcrun simctl`, and `iosef`)
 - Maintains a clean separation between trusted and untrusted code
