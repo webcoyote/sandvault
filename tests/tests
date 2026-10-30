@@ -185,11 +185,13 @@ collect_results() {
 # Run tests
 ###############################################################################
 
-queue_suite "ios-simulator" "$SCRIPT_DIR/ios-simulator/scripts/tests"
+# ios-simulator is queued last: booting the simulator saturates a small CI
+# runner (3 vCPUs), starving browsers running beside it until CDP times out.
 queue_suite "chrome"        "$SCRIPT_DIR/chrome/scripts/tests"
 queue_suite "lightpanda"    "$SCRIPT_DIR/lightpanda/scripts/tests"
 queue_suite "xcodebuild"    "$SCRIPT_DIR/xcodebuild/scripts/tests"
 queue_suite "swift"         "$SCRIPT_DIR/swift/scripts/tests"
+queue_suite "ios-simulator" "$SCRIPT_DIR/ios-simulator/scripts/tests"
 collect_results
 
 if [[ "$VERBOSE" -ne 0 ]]; then
