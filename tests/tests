@@ -77,6 +77,11 @@ fi
 if [[ -z "$PARALLEL_JOBS" || "$PARALLEL_JOBS" -lt 1 ]]; then
     PARALLEL_JOBS=4
 fi
+# Leave one core free unless SV_TEST_JOBS was given: on a 3-vCPU CI runner,
+# a full complement of suites starves the browsers until CDP times out.
+if [[ -z "${SV_TEST_JOBS:-}" && "$PARALLEL_JOBS" -gt 1 ]]; then
+    PARALLEL_JOBS=$((PARALLEL_JOBS - 1))
+fi
 RESULTS_DIR="$(mktemp -d)"
 trap 'rm -rf "$RESULTS_DIR"' EXIT
 
@@ -185,11 +190,13 @@ collect_results() {
 # Run tests
 ###############################################################################
 
-queue_suite "ios-simulator" "$SCRIPT_DIR/ios-simulator/scripts/tests"
+# ios-simulator is queued last: booting the simulator saturates a small CI
+# runner (3 vCPUs), starving browsers running beside it until CDP times out.
 queue_suite "chrome"        "$SCRIPT_DIR/chrome/scripts/tests"
 queue_suite "lightpanda"    "$SCRIPT_DIR/lightpanda/scripts/tests"
 queue_suite "xcodebuild"    "$SCRIPT_DIR/xcodebuild/scripts/tests"
 queue_suite "swift"         "$SCRIPT_DIR/swift/scripts/tests"
+queue_suite "ios-simulator" "$SCRIPT_DIR/ios-simulator/scripts/tests"
 collect_results
 
 if [[ "$VERBOSE" -ne 0 ]]; then
