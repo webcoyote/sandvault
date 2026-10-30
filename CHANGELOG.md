@@ -2,6 +2,17 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.37.0] - 2026-10-30
+
+### Fixed
+
+- Headless Chrome no longer moves its renderer into the background, which could make browser automation input (such as typing into a page) stall on Macs with no display
+- Errors from copying the shared workspace's `user` files into the sandbox home directory are now shown instead of hidden
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.36.0] - 2026-10-29
 
 ### Changed
