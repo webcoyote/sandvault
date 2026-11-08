@@ -1,0 +1,53 @@
+#!/bin/bash
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+# sv sets SV_NO_SANDBOX when sandbox-exec is off (sv -x). The herdr server
+# outlives this session and later sandboxed sessions attach to it over its
+# socket, so an unsandboxed server would run their panes unsandboxed too.
+if [[ "${SV_NO_SANDBOX:-}" == "true" ]]; then
+    echo >&2 "ERROR: herdr cannot run without the sandbox (sv -x): its server outlives this session, so panes started later, by any session, would be unsandboxed."
+    exit 1
+fi
+
+# Find the real binary by explicit path only. ~/bin (this wrapper) precedes
+# ~/.local/bin and the Homebrew bin on PATH, so `command -v herdr` would find
+# this script again and exec itself forever.
+unset HERDR
+if [[ "${SV_NATIVE_INSTALL:-}" == "true" ]]; then
+    if [[ ! -x "$HOME/.local/bin/herdr" ]]; then
+        echo >&2 "Installing herdr natively..."
+        # HERDR_INSTALL_DIR is the installer's default, set explicitly so the
+        # binary lands where the line below looks for it regardless of the
+        # installer's future defaults. The installer verifies the download's
+        # SHA-256 and only prints a PATH hint, it does not edit .zshrc or
+        # .zprofile (sandvault owns those and rewrites them on every build).
+        # Its progress goes to stderr: see the stdout note at the end.
+        curl -fsSL https://herdr.dev/install.sh \
+            | HERDR_INSTALL_DIR="$HOME/.local/bin" sh >&2
+    fi
+    HERDR="$HOME/.local/bin/herdr"
+elif command -v brew &>/dev/null ; then
+    HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-"$(brew --prefix)"}"
+    if [[ -x "$HOMEBREW_PREFIX/bin/herdr" ]]; then
+        # Homebrew install
+        HERDR="$HOMEBREW_PREFIX/bin/herdr"
+    fi
+fi
+
+# Fallback: a pre-existing native install.
+if [[ -z "${HERDR:-}" && -x "$HOME/.local/bin/herdr" ]]; then
+    HERDR="$HOME/.local/bin/herdr"
+fi
+
+if [[ -z "${HERDR:-}" || ! -x "$HERDR" ]]; then
+    echo >&2 "ERROR: herdr is not installed"
+    exit 1
+fi
+
+# No sv-tool-prompts.sh source and no injected flags: herdr is a terminal
+# multiplexer, not an agent, so there is nothing to approve or prompt, and an
+# extra leading flag would shadow herdr's own subcommands. Inside panes,
+# `herdr api ... --json` and `herdr pane ...` also resolve to this wrapper
+# first on PATH, so nothing may be written to stdout here.
+exec "$HERDR" "$@"

@@ -1127,6 +1127,161 @@ EOF
     }
     queue_test test_var_sandvault_traversable
 
+    # herdr is a multiplexer, not an agent: the --help listing, the dispatch arm
+    # and the brew install arm are all needed for 'sv herdr' to work.
+    test_help_lists_herdr() {
+        local output
+        output=$("$SV_BASE" --help 2>&1 || true)
+        if [[ "$output" == *"hd, herdr"* ]]; then
+            pass "--help lists herdr"
+        else
+            fail "--help lists herdr" "herdr command line" "$output"
+        fi
+    }
+    queue_test test_help_lists_herdr
+
+    test_sv_dispatches_herdr() {
+        if grep -Eq '^[[:space:]]+hd[|]herdr\)' "$SV_BASE" \
+            && grep -A2 -E '^[[:space:]]+hd[|]herdr\)' "$SV_BASE" | grep -q 'COMMAND=herdr'; then
+            pass "sv dispatches hd|herdr -> COMMAND=herdr"
+        else
+            fail "sv dispatches hd|herdr -> COMMAND=herdr" \
+                "an hd|herdr) case arm setting COMMAND=herdr" \
+                "missing or broken case arm in $SV_BASE"
+        fi
+    }
+    queue_test test_sv_dispatches_herdr
+
+    test_sv_installs_herdr_via_brew() {
+        if grep -F -- 'ensure_brew_tool "herdr" "herdr"' "$SV_BASE" &>/dev/null; then
+            pass "sv installs herdr via brew"
+        else
+            fail "sv installs herdr via brew" \
+                'ensure_brew_tool "herdr" "herdr"' \
+                "missing or broken install arm in $SV_BASE"
+        fi
+    }
+    queue_test test_sv_installs_herdr_via_brew
+
+    # Passthrough only. An injected leading flag would shadow herdr's own
+    # subcommands, and command -v would find this wrapper (~/bin is first on
+    # PATH) and exec itself forever.
+    test_herdr_wrapper_passthrough() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/herdr"
+        if [[ ! -x "$wrapper" ]]; then
+            fail "herdr wrapper passes arguments through" "executable wrapper" "$wrapper"
+            return
+        fi
+        local code
+        code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        if ! grep -Eq '^exec "\$HERDR" "\$@"$' <<< "$code"; then
+            fail "herdr wrapper passes arguments through" \
+                'exec "$HERDR" "$@" with no injected flags' "$wrapper"
+        elif grep -q 'command -v herdr' <<< "$code"; then
+            fail "herdr wrapper passes arguments through" \
+                "explicit-path lookup, not command -v herdr" "$wrapper"
+        else
+            pass "herdr wrapper passes arguments through"
+        fi
+    }
+    queue_test test_herdr_wrapper_passthrough
+
+    test_herdr_wrapper_native_install() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/herdr"
+        if [[ ! -x "$wrapper" ]]; then
+            fail "herdr wrapper native-installs from herdr.dev" "executable wrapper" "$wrapper"
+            return
+        fi
+        local code
+        code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        if ! grep -F -- 'https://herdr.dev/install.sh' <<< "$code" &>/dev/null; then
+            fail "herdr wrapper native-installs from herdr.dev" \
+                'curl -fsSL https://herdr.dev/install.sh' "$wrapper"
+        elif ! grep -F -- 'HERDR_INSTALL_DIR="$HOME/.local/bin"' <<< "$code" &>/dev/null; then
+            fail "herdr wrapper native-installs from herdr.dev" \
+                'HERDR_INSTALL_DIR="$HOME/.local/bin" pinned to the exec path' "$wrapper"
+        else
+            pass "herdr wrapper native-installs from herdr.dev"
+        fi
+    }
+    queue_test test_herdr_wrapper_native_install
+
+    # herdr starts its own server on demand. A brew service / launchd entry was
+    # removed upstream (homebrew-core#310924) and broke clodpod's build.
+    test_herdr_no_brew_service() {
+        local code
+        code="$(grep -A3 -E '^[[:space:]]+herdr\)' "$SV_BASE"; cat "$SCRIPT_DIR/../guest/home/bin/herdr")"
+        if grep -Eq 'brew services|start_service' <<< "$code"; then
+            fail "herdr is not run as a brew service" \
+                "no 'brew services' or start_service" "found in sv's herdr arm or the herdr wrapper"
+        else
+            pass "herdr is not run as a brew service"
+        fi
+    }
+    queue_test test_herdr_no_brew_service
+
+    # The herdr server outlives sv and its panes inherit the first session's
+    # sandbox and environment. An unsandboxed server would run every later
+    # pane unsandboxed, and browser/iOS endpoints go stale once this session
+    # stops them, so sv must refuse these flags before starting anything.
+    test_herdr_refuses_unsafe_flags() {
+        local flag output status got=""
+        for flag in -x -b -i -I; do
+            status=0
+            output=$(sv_cmd "$flag" hd 2>&1) || status=$?
+            # Must be the last line: a warning followed by some later failure
+            # would still start (or attach to) the server.
+            if [[ "$status" -eq 0 || "$(tail -n1 <<< "$output")" != *"herdr cannot run with"* ]]; then
+                got+="[$flag] exit $status: $output"$'\n'
+            fi
+        done
+        if [[ -z "$got" ]]; then
+            pass "herdr refuses -x, --browser, --ios"
+        else
+            fail "herdr refuses -x, --browser, --ios" \
+                "exit 1 with 'herdr cannot run with' as the last line" "$got"
+        fi
+    }
+    queue_test test_herdr_refuses_unsafe_flags
+
+    # 'sv -x shell' then 'herdr' never reaches sv's own check, so the wrapper
+    # must refuse too, or later sandboxed sessions attach to an unsandboxed
+    # server.
+    test_herdr_wrapper_refuses_no_sandbox() {
+        local output status=0
+        output=$(SV_NO_SANDBOX=true "$SCRIPT_DIR/../guest/home/bin/herdr" --version 2>&1) || status=$?
+        if [[ "$status" -ne 0 && "$output" == *"cannot run without the sandbox"* ]]; then
+            pass "herdr wrapper refuses SV_NO_SANDBOX=true"
+        else
+            fail "herdr wrapper refuses SV_NO_SANDBOX=true" \
+                "non-zero exit and 'cannot run without the sandbox'" "exit $status: $output"
+        fi
+    }
+    queue_test test_herdr_wrapper_refuses_no_sandbox
+
+    # The wrapper's refusal is only as good as SV_NO_SANDBOX: sv must set it for
+    # -x. Nested sessions never apply sandbox-exec themselves, so they always
+    # set it: herdr is not supported in a nested session, by design.
+    test_sv_exports_no_sandbox() {
+        local plain unsandboxed
+        plain=$(unset SV_NO_SANDBOX; sv_cmd s -- /usr/bin/printenv SV_NO_SANDBOX 2>/dev/null || true)
+        unsandboxed=$(sv_cmd -x s -- /usr/bin/printenv SV_NO_SANDBOX 2>/dev/null || true)
+        if [[ -n "${SV_SESSION_ID:-}" ]]; then
+            if [[ "$plain" == "true" && "$unsandboxed" == "true" ]]; then
+                pass "nested sv always exports SV_NO_SANDBOX=true"
+            else
+                fail "nested sv always exports SV_NO_SANDBOX=true" \
+                    "sandboxed='true' unsandboxed='true'" "sandboxed='$plain' unsandboxed='$unsandboxed'"
+            fi
+        elif [[ -z "$plain" && "$unsandboxed" == "true" ]]; then
+            pass "sv exports SV_NO_SANDBOX only when unsandboxed"
+        else
+            fail "sv exports SV_NO_SANDBOX only when unsandboxed" \
+                "sandboxed='' unsandboxed='true'" "sandboxed='$plain' unsandboxed='$unsandboxed'"
+        fi
+    }
+    queue_test test_sv_exports_no_sandbox
+
     # Test that brew symlinks used by sv are accessible
     test_brew_symlink_accessible() {
         local brew_prefix
@@ -1137,7 +1292,7 @@ EOF
         fi
         local failed=false
         local link
-        for link in claude codex opencode gemini pi muse; do
+        for link in claude codex opencode gemini pi muse herdr; do
             if [[ -L "$brew_prefix/bin/$link" ]]; then
                 local link_perms
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_prefix/bin/$link")

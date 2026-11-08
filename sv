@@ -422,6 +422,9 @@ install_deps () {
                 # download, which ensure_brew_tool's warm-up step clears.
                 ensure_brew_tool "muse-code" "muse"
                 ;;
+            herdr)
+                ensure_brew_tool "herdr" "herdr"
+                ;;
             *)
                 # No tool installation needed for other commands
                 ;;
@@ -821,11 +824,12 @@ show_help() {
     echo "  g,  gemini [PATH]    Open Google Gemini in sandvault"
     echo "  p,  pi     [PATH]    Open pi in sandvault"
     echo "  m,  muse   [PATH]    Open Muse Code in sandvault"
+    echo "  hd, herdr  [PATH]    Open herdr agent multiplexer in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove sandvault; keep shared files"
     echo ""
-    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, shell)"
+    echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, herdr, shell)"
     echo ""
     echo "Environment:"
     echo "  SANDVAULT_ARGS       Default arguments (prepended to command line)"
@@ -958,6 +962,10 @@ case "${1:-}" in
         COMMAND=muse
         INITIAL_DIR="${2:-}"
         ;;
+    hd|herdr)
+        COMMAND=herdr
+        INITIAL_DIR="${2:-}"
+        ;;
     s|shell)
         COMMAND=
         INITIAL_DIR="${2:-}"
@@ -985,29 +993,6 @@ case "${1:-}" in
         ;;
 esac
 readonly COMMAND
-
-if [[ "$FIX_PERMISSIONS" == "true" && "$COMMAND" != "build" ]]; then
-    abort "--fix-permissions can only be used standalone or with build"
-fi
-
-# Translate tilde in INITIAL_DIR to the sandvault user's HOME so that
-# `sv shell "~/foo" --` lands in /Users/$SANDVAULT_USER/foo instead of
-# silently falling back to $SHARED_WORKSPACE. Quoted "~" survives host
-# shell expansion; unquoted ~ is expanded by the host shell to the host
-# user's HOME before sv sees it and is left unchanged.
-# Compare against literal "~"; SC2088 warns about quoted tildes not expanding,
-# but here we are intentionally matching the literal character that survived
-# the host shell because the user quoted the CLI argument.
-# shellcheck disable=SC2088
-if [[ "$INITIAL_DIR" == "~" ]]; then
-    INITIAL_DIR="/Users/$SANDVAULT_USER"
-elif [[ "${INITIAL_DIR:0:2}" == "~/" ]]; then
-    INITIAL_DIR="/Users/$SANDVAULT_USER/${INITIAL_DIR:2}"
-fi
-
-# Resolve symlinks to get the real path
-INITIAL_DIR="$(cd "${INITIAL_DIR:-"${PWD}"}" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
-readonly INITIAL_DIR
 
 
 ###############################################################################
@@ -1051,6 +1036,52 @@ readonly NO_BUILD
 readonly REBUILD
 readonly USE_SANDBOX
 readonly FIX_PERMISSIONS
+
+# herdr runs a background server that outlives this sv invocation, and every
+# pane is a child of that server, so panes keep the sandbox and environment of
+# the session that first started it -- not of the session that later attaches.
+if [[ "$COMMAND" == "herdr" ]]; then
+    # The guest herdr wrapper refuses to start under SV_NO_SANDBOX, which
+    # covers launching herdr from inside an unsandboxed 'sv -x shell'.
+    if [[ "$USE_SANDBOX" == "false" ]]; then
+        # An unsandboxed first launch would leave every later pane unsandboxed,
+        # even when reattached with a plain (sandboxed) 'sv herdr'.
+        abort "herdr cannot run with --no-sandbox: its server outlives this session, so every pane it starts, now or after a later reattach, would be unsandboxed. Use 'sv shell' if you need an unsandboxed shell."
+    fi
+
+    # herdr server's panes would keep the endpoint after the chrome-browser/ios-simulator is
+    # stopped on detach, including panes opened by later sessions.
+    if [[ "$USE_BROWSER" == "true" ]]; then
+        abort "herdr cannot run with --browser: the herdr server outlives this session, so its panes would keep a stale SV_BROWSER_ENDPOINT after the browser stops. Run 'sv --browser claude' (or another agent) in its own window instead."
+    fi
+    if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
+        abort "herdr cannot run with --ios: the herdr server outlives this session, so its panes would keep a stale SV_IOS_SIMULATOR_ENDPOINT after the simulator stops. Run 'sv --ios claude' (or another agent) in its own window instead."
+    fi
+fi
+
+if [[ "$FIX_PERMISSIONS" == "true" && "$COMMAND" != "build" ]]; then
+    abort "--fix-permissions can only be used standalone or with build"
+fi
+
+# Translate tilde in INITIAL_DIR to the sandvault user's HOME so that
+# `sv shell "~/foo" --` lands in /Users/$SANDVAULT_USER/foo instead of
+# silently falling back to $SHARED_WORKSPACE. Quoted "~" survives host
+# shell expansion; unquoted ~ is expanded by the host shell to the host
+# user's HOME before sv sees it and is left unchanged.
+# Compare against literal "~"; SC2088 warns about quoted tildes not expanding,
+# but here we are intentionally matching the literal character that survived
+# the host shell because the user quoted the CLI argument.
+# shellcheck disable=SC2088
+if [[ "$INITIAL_DIR" == "~" ]]; then
+    INITIAL_DIR="/Users/$SANDVAULT_USER"
+elif [[ "${INITIAL_DIR:0:2}" == "~/" ]]; then
+    INITIAL_DIR="/Users/$SANDVAULT_USER/${INITIAL_DIR:2}"
+fi
+
+# Resolve symlinks to get the real path
+INITIAL_DIR="$(cd "${INITIAL_DIR:-"${PWD}"}" 2>/dev/null && pwd -P || echo "$INITIAL_DIR")"
+readonly INITIAL_DIR
+
 
 ###############################################################################
 # Umask check
@@ -1650,7 +1681,7 @@ if [[ "$FIX_PERMISSIONS" == "true" ]]; then
     # Fix homebrew symlinks for any installed tools
     # shellcheck disable=SC2310 # brew_shellenv intentionally used in condition
     if brew_shellenv 2>/dev/null; then
-        for tool_cli in claude codex opencode gemini pi muse; do
+        for tool_cli in claude codex opencode gemini pi muse herdr; do
             brew_link="$(brew --prefix)/bin/$tool_cli"
             if [[ -L "$brew_link" ]]; then
                 link_perms=$(/usr/bin/stat -f "%Lp" "$brew_link")
@@ -1808,9 +1839,18 @@ if [[ "$MODE" == "ssh" ]]; then
 else
     EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/*")
 fi
+
 if [[ "$NATIVE_INSTALL" == "true" ]]; then
     EXTRA_ENV+=("SV_NATIVE_INSTALL=true")
 fi
+
+# Tell the guest whether sandbox-exec is off, so tools that start long-lived
+# servers (herdr) can refuse. Nested sessions force USE_SANDBOX=false, so they
+# always get SV_NO_SANDBOX=true: by design, herdr does not run when nested.
+if [[ "$USE_SANDBOX" == "false" ]]; then
+    EXTRA_ENV+=("SV_NO_SANDBOX=true")
+fi
+
 if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
     if [[ -n "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
         EXTRA_ENV+=("SV_IOS_SIMULATOR_ENDPOINT=$SV_IOS_SIMULATOR_ENDPOINT")
@@ -1820,15 +1860,18 @@ if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
         abort "iOS bridge port not available. Bridge may have failed to start."
     fi
 fi
+
 if [[ -n "${COLORTERM:-}" ]]; then
     EXTRA_ENV+=("COLORTERM=$COLORTERM")
 fi
+
 # Forward locale so UTF-8 glyphs render instead of falling back to "C"
 for var in LANG LC_ALL LC_CTYPE LC_COLLATE LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME; do
     if [[ -n "${!var:-}" ]]; then
         EXTRA_ENV+=("$var=${!var}")
     fi
 done
+
 # Forward TERMINFO (e.g. Ghostty sets it to its app bundle) so custom TERM
 # values resolve; skip paths in the host home, which sandvault can't read
 if [[ -n "${TERMINFO:-}" && "$TERMINFO" != "$HOME" && "$TERMINFO" != "$HOME/"* ]]; then
