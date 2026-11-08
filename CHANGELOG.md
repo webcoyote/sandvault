@@ -2,6 +2,17 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.38.0] - 2026-11-08
+
+### Added
+
+- Add `sv herdr` (alias `sv hd`) to run the [herdr](https://herdr.dev) agent multiplexer inside the sandbox, so you can manage many coding agents as panes in one terminal session. herdr installs on demand, `--no-sandbox` is refused, and `--browser`/`--ios` print a warning ([#316](https://github.com/webcoyote/sandvault/pull/316)) — thanks @tallpsmith!
+
+### Thanks to 2 contributors!
+
+- [@tallpsmith](https://github.com/tallpsmith)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.37.0] - 2026-10-30
 
 ### Fixed
