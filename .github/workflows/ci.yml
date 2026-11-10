@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -47,6 +50,37 @@ jobs:
           VERBOSE: 1
           SV_TESTS_STRICT: 1
         run: ./tests/tests
+
+  nightly-report:
+    name: Nightly Report
+    needs: test
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TITLE: Nightly CI failure
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open issue on failure
+        if: needs.test.result == 'failure'
+        run: |
+          existing="$(gh issue list --state open --search "$TITLE in:title" --json number,title \
+            --jq '.[] | select(.title == env.TITLE) | .number')"
+          if [[ -z "$existing" ]]; then
+            gh issue create --title "$TITLE" --body "Scheduled CI run failed: $RUN_URL"
+          fi
+
+      - name: Close issue on success
+        if: needs.test.result == 'success'
+        run: |
+          gh issue list --state open --search "$TITLE in:title" --json number,title \
+            --jq '.[] | select(.title == env.TITLE) | .number' |
+          while read -r number; do
+            gh issue close "$number" --comment "Scheduled CI run passed: $RUN_URL"
+          done
 
   tag-version:
     name: Tag Version
