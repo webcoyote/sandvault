@@ -993,7 +993,7 @@ EOF
         local workdir keys_dir generated expected got output
         workdir="$(mktemp -d)"
         keys_dir="$workdir/authorized_keys.d"
-        generated="$workdir/guest/home/.ssh/authorized_keys"
+        generated="$workdir/authorized_keys"
         mkdir -p "$keys_dir"
         ssh-keygen -t ed25519 -f "$workdir/id" -N "" -q -C "sandvault"
         ssh-keygen -t ed25519 -f "$workdir/extra" -N "" -q -C "extra@laptop"
@@ -1015,6 +1015,7 @@ EOF
             NO_BUILD=false \
                 WORKSPACE="$workdir" \
                 AUTHORIZED_KEYS_DIR="$keys_dir" \
+                GUEST_AUTHORIZED_KEYS="$generated" \
                 SSH_KEYFILE_PRIV="$workdir/id" \
                 SSH_KEYFILE_PUB="$workdir/id.pub" \
                 SANDVAULT_USER="sandvault-test" \
@@ -1028,6 +1029,14 @@ EOF
         expected="$(cat "$workdir/extra.pub" "$workdir/id.pub")"
         if [[ "$got" != "$expected" ]]; then
             fail "authorized_keys.d keys are installed and revoked" "$expected" "$got"
+            rm -rf "$workdir"
+            return
+        fi
+        # WORKSPACE may be a shared install (e.g. Homebrew) the host user
+        # cannot write, so nothing may be generated inside it.
+        if [[ -e "$workdir/guest" ]]; then
+            fail "authorized_keys.d keys are installed and revoked" \
+                "nothing written under WORKSPACE" "$(find "$workdir/guest")"
             rm -rf "$workdir"
             return
         fi
@@ -1053,7 +1062,7 @@ EOF
         local workdir keys_dir generated expected got output status
         workdir="$(mktemp -d)"
         keys_dir="$workdir/authorized_keys.d"
-        generated="$workdir/guest/home/.ssh/authorized_keys"
+        generated="$workdir/authorized_keys"
         mkdir -p "$keys_dir"
         ssh-keygen -t ed25519 -f "$workdir/id" -N "" -q -C "sandvault"
         printf 'notes about my keys\n' > "$keys_dir/README"
@@ -1073,6 +1082,7 @@ EOF
             NO_BUILD=false \
                 WORKSPACE="$workdir" \
                 AUTHORIZED_KEYS_DIR="$keys_dir" \
+                GUEST_AUTHORIZED_KEYS="$generated" \
                 SSH_KEYFILE_PRIV="$workdir/id" \
                 SSH_KEYFILE_PUB="$workdir/id.pub" \
                 SANDVAULT_USER="sandvault-test" \
@@ -1110,6 +1120,58 @@ EOF
         rm -rf "$workdir"
     }
     queue_test test_authorized_keys_dir_rejects_non_public_keys
+
+    # Several sv instances can start at once; each installs authorized_keys.
+    # None may fail, the result must be complete, and no temp files may be
+    # left behind.
+    test_authorized_keys_concurrent_install() {
+        local workdir keys_dir generated expected got i failed=0
+        local -a pids=()
+        workdir="$(mktemp -d)"
+        keys_dir="$workdir/authorized_keys.d"
+        generated="$workdir/authorized_keys"
+        mkdir -p "$keys_dir"
+        ssh-keygen -t ed25519 -f "$workdir/id" -N "" -q -C "sandvault"
+        for i in 1 2 3 4 5 6 7 8; do
+            ssh-keygen -t ed25519 -f "$workdir/extra$i" -N "" -q -C "extra$i"
+            cp "$workdir/extra$i.pub" "$keys_dir/extra$i"
+        done
+
+        {
+            echo '#!/bin/bash'
+            echo 'set -Eeuo pipefail'
+            echo 'trace() { :; }'
+            echo 'warn() { echo >&2 "$*"; }'
+            echo 'abort() { echo >&2 "$*"; exit 1; }'
+            sed -n '/^configure_ssh_access() {$/,/^}$/p' "$SV_BASE"
+            echo 'configure_ssh_access'
+        } > "$workdir/run"
+        chmod +x "$workdir/run"
+
+        for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+            NO_BUILD=false \
+                AUTHORIZED_KEYS_DIR="$keys_dir" \
+                GUEST_AUTHORIZED_KEYS="$generated" \
+                SSH_KEYFILE_PRIV="$workdir/id" \
+                SSH_KEYFILE_PUB="$workdir/id.pub" \
+                SANDVAULT_USER="sandvault-test" \
+                "$workdir/run" 2>/dev/null &
+            pids+=("$!")
+        done
+        for i in "${pids[@]}"; do
+            wait "$i" || failed=$((failed + 1))
+        done
+
+        expected="failed=0 $(cat "$keys_dir"/extra* "$workdir/id.pub") authorized_keys authorized_keys.d"
+        got="failed=$failed $(cat "$generated" 2>/dev/null) $(cd "$workdir" && echo authorized_keys*)"
+        if [[ "$got" == "$expected" ]]; then
+            pass "authorized_keys concurrent installs are atomic"
+        else
+            fail "authorized_keys concurrent installs are atomic" "$expected" "$got"
+        fi
+        rm -rf "$workdir"
+    }
+    queue_test test_authorized_keys_concurrent_install
 
     # Test that /var/sandvault/ is world-traversable
     test_var_sandvault_traversable() {
