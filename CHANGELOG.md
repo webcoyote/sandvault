@@ -2,6 +2,16 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.39.0] - 2026-11-11
+
+### Fixed
+
+- Fix "Permission denied" errors when a user other than the one who installed sandvault (e.g. a shared Homebrew install) runs `sv`, and stop multiple host users sharing one install from overwriting each other's SSH authorized keys. ([#352](https://github.com/webcoyote/sandvault/pull/352))
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.38.0] - 2026-11-08
 
 ### Added
