@@ -103,7 +103,7 @@ Credit the people who made each release happen. This builds community and encour
 - Link each handle to their GitHub profile
 - Include everyone: PR authors, issue reporters, anyone whose work is in the release
 
-**GitHub Release body** — when the release is published, the GitHub Release should also include the "Thanks to N contributors!" section with linked handles.
+**GitHub Release body** — after the PR merges, CI tags the version and `.github/workflows/release.yml` creates the GitHub Release automatically, using the version's `CHANGELOG.md` section (including the "Thanks to N contributors!" section) as the body. The workflow fails if the section is missing. To create a release for an existing tag, run the Release workflow manually with the tag as input.
 
 ## Example Changelog Entry
 
