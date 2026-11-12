@@ -267,6 +267,19 @@ Explicit command-line arguments are appended after `SANDVAULT_ARGS`, so they are
   sv --help
 ```
 
+## Running sandvault from a non-admin user account
+
+Setting up sandvault requires administrative permission to create a new user account, shared directories, a sudoers file, and more, so a standard user account without the ability to run sudo cannot configure sandvault.
+
+It is possible for an administrative user to setup sandvault on behalf of a standard user account (here, `somebody`) by temporarily giving that person administrative rights, then revoking permission afterwards:
+
+```
+# assumes sandvault is already installed via `brew install sandvault`
+echo 'somebody ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/tmp-somebody
+sudo -u somebody -i sv build
+sudo rm /etc/sudoers.d/tmp-somebody
+```
+
 
 ## `agentsview` Integration
 
