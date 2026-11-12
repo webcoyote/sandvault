@@ -37,7 +37,6 @@ quote_zsh_args() {
 }
 
 configure_ssh_access() {
-    local guest_authorized_keys
     local key_file
     local tmp_authorized_keys
 
@@ -58,7 +57,6 @@ configure_ssh_access() {
     # Generate SANDVAULT_USER authorized_keys: every file in AUTHORIZED_KEYS_DIR
     # followed by the HOST_USER SSH public key. The file is written in full each
     # run, so deleting a file from AUTHORIZED_KEYS_DIR revokes that key.
-    guest_authorized_keys="$WORKSPACE/guest/home/.ssh/authorized_keys"
     mkdir -p "$AUTHORIZED_KEYS_DIR"
     tmp_authorized_keys="$(mktemp)"
     for key_file in "$AUTHORIZED_KEYS_DIR"/*; do
@@ -80,7 +78,7 @@ configure_ssh_access() {
     done
     awk 1 "$SSH_KEYFILE_PUB" >> "$tmp_authorized_keys"
 
-    if cmp -s "$tmp_authorized_keys" "$guest_authorized_keys"; then
+    if cmp -s "$tmp_authorized_keys" "$GUEST_AUTHORIZED_KEYS"; then
         rm -f "$tmp_authorized_keys"
         return 0
     fi
@@ -90,10 +88,8 @@ configure_ssh_access() {
     fi
 
     trace "Configuring remote SSH access"
-    mkdir -p "$(dirname "$guest_authorized_keys")"
-    /bin/chmod 0700 "$(dirname "$guest_authorized_keys")"
     /bin/chmod 0644 "$tmp_authorized_keys"
-    mv -f "$tmp_authorized_keys" "$guest_authorized_keys"
+    mv -f "$tmp_authorized_keys" "$GUEST_AUTHORIZED_KEYS"
 }
 
 
@@ -199,6 +195,12 @@ readonly SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
 # file. Kept in the host user's config directory so it survives upgrades and so
 # the (untrusted) sandvault user cannot grant itself extra access.
 readonly AUTHORIZED_KEYS_DIR="$INSTALL_PRODUCT/authorized_keys.d"
+
+# Generated authorized_keys for the sandvault user, installed by the build-home
+# script. Kept in the host user's config directory, not $WORKSPACE, because
+# $WORKSPACE may be a shared install (e.g. Homebrew) that this user cannot
+# write and that other host users also use.
+readonly GUEST_AUTHORIZED_KEYS="$INSTALL_PRODUCT/authorized_keys"
 
 # Sandbox profile to restrict /Volumes access (external drives)
 # Stored in /var/sandvault/ so sandvault user cannot modify it
@@ -1385,8 +1387,17 @@ sudo /bin/chmod 0750 "/Users/$SANDVAULT_USER"
 # Extracting as a non-root user applies the sandvault user's umask rather
 # than copying source permissions, and leaves the existing home directory's
 # own mode untouched. SSH permissions are fixed up explicitly below.
-sudo -u "$HOST_USER" /usr/bin/tar -C "$WORKSPACE/guest/home" -cf - . \
-    | sudo -u "$SANDVAULT_USER" /usr/bin/tar -C "/Users/$SANDVAULT_USER" -xf -
+#
+# --safe-writes extracts to a unique temp file and renames it into place, so
+# concurrent sv instances never clobber each other or expose a partial file.
+#
+# Exclude any stale .ssh/authorized_keys left in older checkouts; the
+# generated one is installed next.
+sudo -u "$HOST_USER" /usr/bin/tar -C "$WORKSPACE/guest/home" --exclude ./.ssh/authorized_keys -cf - . \
+    | sudo -u "$SANDVAULT_USER" /usr/bin/tar -C "/Users/$SANDVAULT_USER" --safe-writes -xf -
+# Install the generated authorized_keys as .ssh/authorized_keys the same way.
+sudo -u "$HOST_USER" /usr/bin/tar -C "$(dirname "$GUEST_AUTHORIZED_KEYS")" -s ',^,.ssh/,' -cf - "$(basename "$GUEST_AUTHORIZED_KEYS")" \
+    | sudo -u "$SANDVAULT_USER" /usr/bin/tar -C "/Users/$SANDVAULT_USER" --safe-writes -xf -
 
 # SSH requires restrictive permissions
 if [[ -d "/Users/$SANDVAULT_USER/.ssh" ]]; then
