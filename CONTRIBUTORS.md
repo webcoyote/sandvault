@@ -16,3 +16,4 @@ Thanks to the following users for improving SandVault:
 - Dong Liu [@liudonggalaxy](https://github.com/liudonggalaxy)
 - Matthew Schulkind [@hs-matt](https://github.com/hs-matt)
 - Paul Smith [@tallpsmith](https://github.com/tallpsmith)
+- Fabian Schwann [@fschwahn](https://github.com/fschwahn)
