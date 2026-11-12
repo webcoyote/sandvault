@@ -22,6 +22,7 @@ cd "$SCRIPT_DIR/.."
 
 [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
 
+command -v node >/dev/null || skip "node not installed; run: brew install node"
 command -v pnpm >/dev/null || skip "pnpm not installed; run: brew install pnpm"
 pnpm install --prefer-offline --reporter=append-only
 
