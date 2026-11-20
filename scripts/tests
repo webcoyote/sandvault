@@ -808,6 +808,18 @@ STUB
     }
     queue_test test_pi_wrapper_subcommand_args
 
+    # 'pi mcp add <server> -- <command>' forwards everything after -- to the
+    # command, so a trailing --approve would be handed to that command instead
+    # of being parsed by pi. The trust flag goes before the separator.
+    test_pi_wrapper_double_dash() {
+        STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
+        stub_agent_argv "$SCRIPT_DIR/../guest/home/bin/pi" mcp add myserver -- mycommand --flag
+        STUB_ENV=()
+        assert_stub_argv "pi wrapper keeps --approve before a -- separator" \
+            "mcp add myserver --approve -- mycommand --flag" 7
+    }
+    queue_test test_pi_wrapper_double_dash
+
     # gemini-cli answers 'gemini --yolo mcp list' by starting the agent with
     # "mcp list" as its initial prompt, and its subcommands reject --yolo, so
     # the flag has to be left off subcommand runs entirely.
