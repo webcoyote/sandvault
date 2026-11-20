@@ -685,6 +685,119 @@ EOF
     }
     queue_test test_pi_wrapper_wires_trust_and_prompt
 
+    # Every unguarded agent CLI parses its subcommands only when argv[1] is the
+    # subcommand name; a launch flag in front turns the subcommand into a chat
+    # message and its flags into unknown options. pi is the case that bit a
+    # user: 'sv shell -- pi update --extensions' printed "Unknown option:
+    # --extensions" and updated nothing. The wrappers injected their flags
+    # ahead of "$@", so assert the argv the agent actually receives.
+    #
+    # The stub harness keeps the agent installed on this machine out of the
+    # test: each wrapper prefers "$HOMEBREW_PREFIX/bin/<agent>" once brew is on
+    # PATH, so a throwaway prefix with a recording stub wins every branch.
+    # STUB_ENV carries optional extra environment for one call.
+    STUB_ENV=()
+    stub_agent_argv() {
+        local wrapper="$1"
+        shift
+        local dir argv stub
+        dir=$(mktemp -d)
+        argv="$dir/argv"
+        stub="$dir/bin/$(basename "$wrapper")"
+        mkdir -p "$dir/bin" "$dir/home"
+        printf '#!/bin/bash\nexit 0\n' > "$dir/bin/brew"
+        cat > "$stub" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$@" > "$SV_TEST_STUB_ARGV"
+STUB
+        chmod +x "$dir/bin/brew" "$stub"
+        set +e
+        env -i \
+            HOME="$dir/home" \
+            USER="stubuser" \
+            HOMEBREW_PREFIX="$dir" \
+            SV_TEST_STUB_ARGV="$argv" \
+            PATH="$dir/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            ${STUB_ENV[@]+"${STUB_ENV[@]}"} \
+            "$wrapper" "$@" >/dev/null 2>&1
+        STUB_STATUS=$?
+        set -e
+        STUB_ARGV=""
+        if [[ -s "$argv" ]]; then
+            STUB_ARGV=$(paste -sd' ' "$argv")
+        fi
+        rm -rf "$dir"
+    }
+
+    # pi rejects --extensions when --approve comes first, so the trust flag has
+    # to follow the subcommand's own arguments. It cannot simply be dropped:
+    # 'install -l' and 'config -l' write project settings, which pi refuses
+    # without --approve.
+    test_pi_wrapper_subcommand_args() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/pi"
+        STUB_ENV=()
+        stub_agent_argv "$wrapper" update --extensions
+        if [[ "$STUB_ARGV" == "update --extensions --approve" ]]; then
+            pass "pi wrapper puts subcommand args before --approve"
+        else
+            fail "pi wrapper puts subcommand args before --approve" \
+                "update --extensions --approve" \
+                "status $STUB_STATUS: $STUB_ARGV"
+        fi
+    }
+    queue_test test_pi_wrapper_subcommand_args
+
+    # gemini-cli answers 'gemini --yolo mcp list' by starting the agent with
+    # "mcp list" as the initial prompt, and its subcommands reject --yolo, so
+    # the flag has to be left off subcommand runs entirely.
+    test_gemini_wrapper_subcommand_args() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/gemini"
+        STUB_ENV=()
+        stub_agent_argv "$wrapper" mcp list
+        if [[ "$STUB_ARGV" == "mcp list" ]]; then
+            pass "gemini wrapper leaves --yolo off subcommand runs"
+        else
+            fail "gemini wrapper leaves --yolo off subcommand runs" \
+                "mcp list" \
+                "status $STUB_STATUS: $STUB_ARGV"
+        fi
+    }
+    queue_test test_gemini_wrapper_subcommand_args
+
+    # opencode takes --prompt only on its default command; 'opencode --prompt X
+    # mcp list' prints the mcp help instead of listing servers. The browser and
+    # iOS tool prompts inject --prompt, so that path needs the same guard.
+    test_opencode_wrapper_subcommand_args() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/opencode"
+        STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
+        stub_agent_argv "$wrapper" mcp list
+        STUB_ENV=()
+        if [[ "$STUB_ARGV" == "mcp list" ]]; then
+            pass "opencode wrapper leaves --prompt off subcommand runs"
+        else
+            fail "opencode wrapper leaves --prompt off subcommand runs" \
+                "mcp list" \
+                "status $STUB_STATUS: $STUB_ARGV"
+        fi
+    }
+    queue_test test_opencode_wrapper_subcommand_args
+
+    # The guard above must not turn into "drop the launch flags": an
+    # interactive 'sv gemini' still has to arrive in yolo mode.
+    test_gemini_wrapper_wires_yolo() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/gemini"
+        STUB_ENV=()
+        stub_agent_argv "$wrapper"
+        if [[ "$STUB_ARGV" == "--yolo" ]]; then
+            pass "gemini wrapper passes --yolo for interactive runs"
+        else
+            fail "gemini wrapper passes --yolo for interactive runs" \
+                "--yolo" \
+                "status $STUB_STATUS: $STUB_ARGV"
+        fi
+    }
+    queue_test test_gemini_wrapper_wires_yolo
+
     # Guard the dispatch mapping: a typo in (or removal of) the p|pi) case arm
     # would pass the wrapper static tests but break 'sv pi'. Assert sv has a
     # p|pi) arm that sets COMMAND=pi. (A full end-to-end stub test like

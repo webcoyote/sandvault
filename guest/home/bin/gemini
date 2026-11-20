@@ -31,6 +31,19 @@ if [[ -z "${GEMINI:-}" || ! -x "$GEMINI" ]]; then
     exit 1
 fi
 
+# gemini-cli resolves a subcommand only when no global option comes first:
+# 'gemini --yolo mcp list' starts the agent with "mcp list" as its initial
+# prompt instead of listing MCP servers. Its subcommands reject --yolo, so the
+# launch flags are left off subcommand runs entirely -- including the
+# tool-prompt directory, which is context for a chat session, not for a
+# subcommand.
+case "${1:-}" in
+    mcp|extensions|extension|skills|skill|hooks|hook|gemma|models)
+        echo >&2 "$USER: running gemini (subcommand, no --yolo)"
+        exec "$GEMINI" "$@"
+        ;;
+esac
+
 TOOL_PROMPT=$(sv_tool_prompt)
 EXTRA_ARGS=()
 if [[ -n "$TOOL_PROMPT" ]]; then

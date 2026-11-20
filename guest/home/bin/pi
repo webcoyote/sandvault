@@ -67,4 +67,18 @@ fi
 # extensions, skills, prompt templates, and themes load without stopping for
 # input. That is a real trust decision, and the sandbox is where to make it.
 echo >&2 "$USER: running pi ($PI) --approve (trusts project-local files)"
+
+# pi recognises its package subcommands only at argv[1]. With a global flag in
+# front, pi reads the subcommand as a chat message and the subcommand's own
+# flags as unknown extension flags, so 'pi --approve update --extensions' dies
+# with "Unknown option: --extensions" and updates nothing. These commands
+# accept --approve after their arguments, and 'install -l'/'config -l' still
+# need it to write project settings, so it moves to the end rather than being
+# dropped. The tool prompt stays out: it is context for a chat session.
+case "${1:-}" in
+    install|remove|uninstall|update|list|config|auth|mcp)
+        exec "$PI" "$@" --approve
+        ;;
+esac
+
 exec "$PI" --approve ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"
