@@ -60,8 +60,6 @@ fi
 # question -- pi's interactive project-trust prompt -- so project-local
 # extensions, skills, prompt templates, and themes load without stopping for
 # input. That is a real trust decision, and the sandbox is where to make it.
-echo >&2 "$USER: running pi ($PI) --approve (trusts project-local files)"
-
 # pi recognises its package subcommands only at argv[1]. With a global flag in
 # front, pi reads the subcommand as a chat message and the subcommand's own
 # flags as unknown extension flags, so 'pi --approve update --extensions' dies
@@ -75,9 +73,13 @@ echo >&2 "$USER: running pi ($PI) --approve (trusts project-local files)"
 # would warn about a missing prompt file for a command that never uses one.
 case "${1:-}" in
     install|remove|uninstall|update|list|config)
+        echo >&2 "$USER: running pi ($PI) --approve (trusts project-local files)"
         exec "$PI" "$@" --approve
         ;;
     auth|mcp)
+        # The banner has to match what runs: this branch passes no --approve,
+        # so it must not claim the project-trust decision either.
+        echo >&2 "$USER: running pi ($PI) (subcommand, no --approve)"
         exec "$PI" "$@"
         ;;
 esac
@@ -88,4 +90,5 @@ if [[ -n "$TOOL_PROMPT" ]]; then
     EXTRA_ARGS+=(--append-system-prompt "$TOOL_PROMPT")
 fi
 
+echo >&2 "$USER: running pi ($PI) --approve (trusts project-local files)"
 exec "$PI" --approve ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"

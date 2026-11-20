@@ -723,12 +723,13 @@ STUB
             SV_TEST_STUB_ARGV="$argv" \
             PATH="$dir/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
             ${STUB_ENV[@]+"${STUB_ENV[@]}"} \
-            "$wrapper" "$@" >/dev/null 2>&1
+            "$wrapper" "$@" >/dev/null 2>"$dir/stderr"
         STUB_STATUS=$?
         set -e
         STUB_ARGV=""
         STUB_ARGC=0
         STUB_PERMISSION=$(cat "$argv.permission" 2>/dev/null || true)
+        STUB_STDERR=$(cat "$dir/stderr" 2>/dev/null || true)
         if [[ -s "$argv" ]]; then
             STUB_ARGV=$(paste -sd' ' "$argv")
             STUB_ARGC=$(wc -l < "$argv" | tr -d ' ')
@@ -813,6 +814,36 @@ STUB
         fi
     }
     queue_test test_pi_wrapper_subcommand_args
+
+    # The startup banner is the only hint a user gets about the trust decision,
+    # so it must claim it exactly when the run carries --approve. Match the
+    # claim, not the word: the pass-through banner says "no --approve".
+    test_pi_wrapper_banner_matches_argv() {
+        local failures="" spec
+        STUB_ENV=()
+        for spec in "mcp list" "update --extensions"; do
+            # shellcheck disable=SC2086 # deliberate word splitting of the spec
+            stub_agent_argv "$SCRIPT_DIR/../guest/home/bin/pi" $spec
+            case "$STUB_ARGV" in
+                *--approve*)
+                    [[ "$STUB_STDERR" == *"(trusts project-local files)"* ]] \
+                        || failures+=" [$spec -> banner omits the trust claim]"
+                    ;;
+                *)
+                    [[ "$STUB_STDERR" != *"(trusts project-local files)"* ]] \
+                        || failures+=" [$spec -> banner claims a trust decision that is not made]"
+                    ;;
+            esac
+        done
+        if [[ -z "$failures" ]]; then
+            pass "pi wrapper banner matches the flags it passes"
+        else
+            fail "pi wrapper banner matches the flags it passes" \
+                "banner claims the trust decision only on runs that make it" \
+                "${failures# }"
+        fi
+    }
+    queue_test test_pi_wrapper_banner_matches_argv
 
     # mcp and auth reject --approve, so nothing may be appended to them --
     # including after a "--" separator, where 'pi mcp add <server> -- <command>'
