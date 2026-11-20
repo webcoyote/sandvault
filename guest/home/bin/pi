@@ -65,29 +65,20 @@ echo >&2 "$USER: running pi ($PI) --approve (trusts project-local files)"
 # pi recognises its package subcommands only at argv[1]. With a global flag in
 # front, pi reads the subcommand as a chat message and the subcommand's own
 # flags as unknown extension flags, so 'pi --approve update --extensions' dies
-# with "Unknown option: --extensions" and updates nothing. These commands
-# accept --approve after their arguments, and 'install -l'/'config -l' still
-# need it to write project settings, so it moves into the argument list rather
-# than being dropped. Everything after a "--" separator is forwarded to a
-# command instead of parsed ('pi mcp add <server> -- <command>'), so there the
-# flag goes in front of the separator. The tool prompt stays out: it is context
-# for a chat session, and reading it here would warn about a missing prompt
-# file for a command that never uses one.
+# with "Unknown option: --extensions" and updates nothing.
+#
+# The package commands and config parse --approve themselves, and 'install -l'
+# and 'config -l' need it to write project settings, so it goes after their
+# arguments. `mcp` and `auth` reject the flag outright ("Unknown option
+# --approve."), so their arguments pass through untouched. The tool prompt
+# stays out of both: it is context for a chat session, and reading it here
+# would warn about a missing prompt file for a command that never uses one.
 case "${1:-}" in
-    install|remove|uninstall|update|list|config|auth|mcp)
-        SV_PI_ARGS=()
-        SV_APPROVE_PLACED="false"
-        for sv_arg in "$@"; do
-            if [[ "$sv_arg" == "--" && "$SV_APPROVE_PLACED" == "false" ]]; then
-                SV_PI_ARGS+=(--approve)
-                SV_APPROVE_PLACED="true"
-            fi
-            SV_PI_ARGS+=("$sv_arg")
-        done
-        if [[ "$SV_APPROVE_PLACED" == "false" ]]; then
-            SV_PI_ARGS+=(--approve)
-        fi
-        exec "$PI" "${SV_PI_ARGS[@]}"
+    install|remove|uninstall|update|list|config)
+        exec "$PI" "$@" --approve
+        ;;
+    auth|mcp)
+        exec "$PI" "$@"
         ;;
 esac
 

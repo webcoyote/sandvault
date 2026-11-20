@@ -712,6 +712,7 @@ EOF
         cat > "$stub" <<'STUB'
 #!/bin/bash
 for arg in "$@"; do printf '%q\n' "$arg"; done > "$SV_TEST_STUB_ARGV"
+printf '%s' "${OPENCODE_PERMISSION:-}" > "$SV_TEST_STUB_ARGV.permission"
 STUB
         chmod +x "$dir/bin/brew" "$stub"
         set +e
@@ -727,6 +728,7 @@ STUB
         set -e
         STUB_ARGV=""
         STUB_ARGC=0
+        STUB_PERMISSION=$(cat "$argv.permission" 2>/dev/null || true)
         if [[ -s "$argv" ]]; then
             STUB_ARGV=$(paste -sd' ' "$argv")
             STUB_ARGC=$(wc -l < "$argv" | tr -d ' ')
@@ -752,7 +754,11 @@ STUB
     # and opencode 1.19.6 (whose aliases auth and plug are separate words). A
     # subcommand missing from a wrapper's case arm is a subcommand the wrapper
     # mangles with a launch flag, so every listed one is driven through.
-    PI_SUBCOMMANDS="install remove uninstall update list config auth mcp"
+    # pi's package commands and config parse --approve; mcp and auth reject it
+    # ("Unknown option --approve."), so they are pass-through like the other
+    # agents.
+    PI_APPROVE_SUBCOMMANDS="install remove uninstall update list config"
+    PI_PASSTHROUGH_SUBCOMMANDS="auth mcp"
     GEMINI_SUBCOMMANDS="mcp extensions extension skills skill hooks hook gemma models"
     OPENCODE_SUBCOMMANDS="completion acp mcp attach run debug providers auth agent upgrade uninstall serve web models stats export import github pr session plugin plug db"
 
@@ -790,7 +796,7 @@ STUB
     test_pi_wrapper_subcommand_args() {
         local wrapper="$SCRIPT_DIR/../guest/home/bin/pi"
         local sub failures=""
-        for sub in $PI_SUBCOMMANDS; do
+        for sub in $PI_APPROVE_SUBCOMMANDS; do
             STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
             stub_agent_argv "$wrapper" "$sub" list
             if [[ "$STUB_ARGV" != "$sub list --approve" || "$STUB_ARGC" != "3" ]]; then
@@ -808,15 +814,36 @@ STUB
     }
     queue_test test_pi_wrapper_subcommand_args
 
-    # 'pi mcp add <server> -- <command>' forwards everything after -- to the
-    # command, so a trailing --approve would be handed to that command instead
-    # of being parsed by pi. The trust flag goes before the separator.
+    # mcp and auth reject --approve, so nothing may be appended to them --
+    # including after a "--" separator, where 'pi mcp add <server> -- <command>'
+    # would otherwise hand a stray --approve to the forwarded command.
+    test_pi_wrapper_subcommands_without_approve() {
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/pi"
+        local sub failures=""
+        for sub in $PI_PASSTHROUGH_SUBCOMMANDS; do
+            STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
+            stub_agent_argv "$wrapper" "$sub" list
+            if [[ "$STUB_ARGV" != "$sub list" || "$STUB_ARGC" != "2" ]]; then
+                failures+=" [$sub -> status $STUB_STATUS: $STUB_ARGV (${STUB_ARGC:-0} args)]"
+            fi
+        done
+        STUB_ENV=()
+        if [[ -z "$failures" ]]; then
+            pass "pi wrapper passes mcp and auth arguments through untouched"
+        else
+            fail "pi wrapper passes mcp and auth arguments through untouched" \
+                "every subcommand arrives as '<subcommand> list' with 2 args" \
+                "${failures# }"
+        fi
+    }
+    queue_test test_pi_wrapper_subcommands_without_approve
+
     test_pi_wrapper_double_dash() {
         STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
         stub_agent_argv "$SCRIPT_DIR/../guest/home/bin/pi" mcp add myserver -- mycommand --flag
         STUB_ENV=()
-        assert_stub_argv "pi wrapper keeps --approve before a -- separator" \
-            "mcp add myserver --approve -- mycommand --flag" 7
+        assert_stub_argv "pi wrapper appends nothing after a -- separator" \
+            "mcp add myserver -- mycommand --flag" 6
     }
     queue_test test_pi_wrapper_double_dash
 
@@ -835,10 +862,27 @@ STUB
     # mcp list' prints the mcp help instead of listing servers. The browser and
     # iOS tool prompts inject --prompt, so that path needs the same guard.
     test_opencode_wrapper_subcommand_args() {
-        assert_wrapper_passes_subcommands \
-            "opencode wrapper leaves --prompt off subcommand runs" \
-            "$SCRIPT_DIR/../guest/home/bin/opencode" \
-            "$OPENCODE_SUBCOMMANDS"
+        local wrapper="$SCRIPT_DIR/../guest/home/bin/opencode"
+        local sub failures=""
+        for sub in $OPENCODE_SUBCOMMANDS; do
+            STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
+            stub_agent_argv "$wrapper" "$sub" list
+            # OPENCODE_PERMISSION must survive the early exit: the subcommand
+            # branch exists to keep arguments clean, not to drop the permission
+            # setting that 'opencode run' and 'opencode attach' rely on.
+            if [[ "$STUB_ARGV" != "$sub list" || "$STUB_ARGC" != "2" \
+                || "$STUB_PERMISSION" != '{"*":"allow"}' ]]; then
+                failures+=" [$sub -> status $STUB_STATUS: $STUB_ARGV (${STUB_ARGC:-0} args), OPENCODE_PERMISSION=[$STUB_PERMISSION]]"
+            fi
+        done
+        STUB_ENV=()
+        if [[ -z "$failures" ]]; then
+            pass "opencode wrapper leaves --prompt off subcommand runs"
+        else
+            fail "opencode wrapper leaves --prompt off subcommand runs" \
+                "every subcommand arrives as '<subcommand> list' with 2 args and OPENCODE_PERMISSION='{\"*\":\"allow\"}'" \
+                "${failures# }"
+        fi
     }
     queue_test test_opencode_wrapper_subcommand_args
 
