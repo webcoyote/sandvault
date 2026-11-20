@@ -695,7 +695,10 @@ EOF
     # The stub harness keeps the agent installed on this machine out of the
     # test: each wrapper prefers "$HOMEBREW_PREFIX/bin/<agent>" once brew is on
     # PATH, so a throwaway prefix with a recording stub wins every branch.
-    # STUB_ENV carries optional extra environment for one call.
+    # STUB_ENV carries optional extra environment for one call. The stub
+    # records each argument with %q so STUB_ARGV keeps argument boundaries, and
+    # STUB_ARGC counts them, so forwarding "mcp list" as one argument cannot
+    # pass as two.
     STUB_ENV=()
     stub_agent_argv() {
         local wrapper="$1"
@@ -708,7 +711,7 @@ EOF
         printf '#!/bin/bash\nexit 0\n' > "$dir/bin/brew"
         cat > "$stub" <<'STUB'
 #!/bin/bash
-printf '%s\n' "$@" > "$SV_TEST_STUB_ARGV"
+for arg in "$@"; do printf '%q\n' "$arg"; done > "$SV_TEST_STUB_ARGV"
 STUB
         chmod +x "$dir/bin/brew" "$stub"
         set +e
@@ -723,44 +726,96 @@ STUB
         STUB_STATUS=$?
         set -e
         STUB_ARGV=""
+        STUB_ARGC=0
         if [[ -s "$argv" ]]; then
             STUB_ARGV=$(paste -sd' ' "$argv")
+            STUB_ARGC=$(wc -l < "$argv" | tr -d ' ')
         fi
         rm -rf "$dir"
+    }
+
+    # Assert the recorded argv exactly, argument count included.
+    assert_stub_argv() {
+        local name="$1"
+        local expected="$2"
+        local expected_count="$3"
+        if [[ "$STUB_ARGV" == "$expected" && "$STUB_ARGC" == "$expected_count" ]]; then
+            pass "$name"
+        else
+            fail "$name" \
+                "$expected (${expected_count} args)" \
+                "status $STUB_STATUS: $STUB_ARGV (${STUB_ARGC:-0} args)"
+        fi
+    }
+
+    # Subcommand tables, read off each CLI's own --help: pi 1.6.x, gemini-cli,
+    # and opencode 1.19.6 (whose aliases auth and plug are separate words). A
+    # subcommand missing from a wrapper's case arm is a subcommand the wrapper
+    # mangles with a launch flag, so every listed one is driven through.
+    PI_SUBCOMMANDS="install remove uninstall update list config auth mcp"
+    GEMINI_SUBCOMMANDS="mcp extensions extension skills skill hooks hook gemma models"
+    OPENCODE_SUBCOMMANDS="completion acp mcp attach run debug providers auth agent upgrade uninstall serve web models stats export import github pr session plugin plug db"
+
+    # Drive every subcommand of one wrapper with a browser tool prompt active:
+    # the prompt is what makes these wrappers inject their context flags, so a
+    # pass here also proves nothing else was slipped in front of the
+    # subcommand.
+    assert_wrapper_passes_subcommands() {
+        local name="$1"
+        local wrapper="$2"
+        local subcommands="$3"
+        local sub failures=""
+        for sub in $subcommands; do
+            STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
+            stub_agent_argv "$wrapper" "$sub" list
+            if [[ "$STUB_ARGV" != "$sub list" || "$STUB_ARGC" != "2" ]]; then
+                failures+=" [$sub -> status $STUB_STATUS: $STUB_ARGV (${STUB_ARGC:-0} args)]"
+            fi
+        done
+        STUB_ENV=()
+        if [[ -z "$failures" ]]; then
+            pass "$name"
+        else
+            fail "$name" \
+                "every subcommand arrives as '<subcommand> list' with 2 args" \
+                "${failures# }"
+        fi
     }
 
     # pi rejects --extensions when --approve comes first, so the trust flag has
     # to follow the subcommand's own arguments. It cannot simply be dropped:
     # 'install -l' and 'config -l' write project settings, which pi refuses
-    # without --approve.
+    # without --approve. pi is therefore the one wrapper that keeps a flag --
+    # at the end -- and this test pins that position on every subcommand.
     test_pi_wrapper_subcommand_args() {
         local wrapper="$SCRIPT_DIR/../guest/home/bin/pi"
+        local sub failures=""
+        for sub in $PI_SUBCOMMANDS; do
+            STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
+            stub_agent_argv "$wrapper" "$sub" list
+            if [[ "$STUB_ARGV" != "$sub list --approve" || "$STUB_ARGC" != "3" ]]; then
+                failures+=" [$sub -> status $STUB_STATUS: $STUB_ARGV (${STUB_ARGC:-0} args)]"
+            fi
+        done
         STUB_ENV=()
-        stub_agent_argv "$wrapper" update --extensions
-        if [[ "$STUB_ARGV" == "update --extensions --approve" ]]; then
+        if [[ -z "$failures" ]]; then
             pass "pi wrapper puts subcommand args before --approve"
         else
             fail "pi wrapper puts subcommand args before --approve" \
-                "update --extensions --approve" \
-                "status $STUB_STATUS: $STUB_ARGV"
+                "every subcommand arrives as '<subcommand> list --approve' with 3 args" \
+                "${failures# }"
         fi
     }
     queue_test test_pi_wrapper_subcommand_args
 
     # gemini-cli answers 'gemini --yolo mcp list' by starting the agent with
-    # "mcp list" as the initial prompt, and its subcommands reject --yolo, so
+    # "mcp list" as its initial prompt, and its subcommands reject --yolo, so
     # the flag has to be left off subcommand runs entirely.
     test_gemini_wrapper_subcommand_args() {
-        local wrapper="$SCRIPT_DIR/../guest/home/bin/gemini"
-        STUB_ENV=()
-        stub_agent_argv "$wrapper" mcp list
-        if [[ "$STUB_ARGV" == "mcp list" ]]; then
-            pass "gemini wrapper leaves --yolo off subcommand runs"
-        else
-            fail "gemini wrapper leaves --yolo off subcommand runs" \
-                "mcp list" \
-                "status $STUB_STATUS: $STUB_ARGV"
-        fi
+        assert_wrapper_passes_subcommands \
+            "gemini wrapper leaves --yolo off subcommand runs" \
+            "$SCRIPT_DIR/../guest/home/bin/gemini" \
+            "$GEMINI_SUBCOMMANDS"
     }
     queue_test test_gemini_wrapper_subcommand_args
 
@@ -768,35 +823,43 @@ STUB
     # mcp list' prints the mcp help instead of listing servers. The browser and
     # iOS tool prompts inject --prompt, so that path needs the same guard.
     test_opencode_wrapper_subcommand_args() {
-        local wrapper="$SCRIPT_DIR/../guest/home/bin/opencode"
-        STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
-        stub_agent_argv "$wrapper" mcp list
-        STUB_ENV=()
-        if [[ "$STUB_ARGV" == "mcp list" ]]; then
-            pass "opencode wrapper leaves --prompt off subcommand runs"
-        else
-            fail "opencode wrapper leaves --prompt off subcommand runs" \
-                "mcp list" \
-                "status $STUB_STATUS: $STUB_ARGV"
-        fi
+        assert_wrapper_passes_subcommands \
+            "opencode wrapper leaves --prompt off subcommand runs" \
+            "$SCRIPT_DIR/../guest/home/bin/opencode" \
+            "$OPENCODE_SUBCOMMANDS"
     }
     queue_test test_opencode_wrapper_subcommand_args
 
-    # The guard above must not turn into "drop the launch flags": an
-    # interactive 'sv gemini' still has to arrive in yolo mode.
+    # The guards above must not decay into "drop the launch flags": an
+    # interactive launch still has to arrive with them.
     test_gemini_wrapper_wires_yolo() {
-        local wrapper="$SCRIPT_DIR/../guest/home/bin/gemini"
         STUB_ENV=()
-        stub_agent_argv "$wrapper"
-        if [[ "$STUB_ARGV" == "--yolo" ]]; then
-            pass "gemini wrapper passes --yolo for interactive runs"
-        else
-            fail "gemini wrapper passes --yolo for interactive runs" \
-                "--yolo" \
-                "status $STUB_STATUS: $STUB_ARGV"
-        fi
+        stub_agent_argv "$SCRIPT_DIR/../guest/home/bin/gemini"
+        assert_stub_argv "gemini wrapper passes --yolo for interactive runs" --yolo 1
     }
     queue_test test_gemini_wrapper_wires_yolo
+
+    test_pi_wrapper_wires_approve() {
+        STUB_ENV=()
+        stub_agent_argv "$SCRIPT_DIR/../guest/home/bin/pi"
+        assert_stub_argv "pi wrapper passes --approve for interactive runs" --approve 1
+    }
+    queue_test test_pi_wrapper_wires_approve
+
+    # opencode's tool prompt is one (multi-line) argument after --prompt.
+    test_opencode_wrapper_passes_tool_prompt() {
+        STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
+        stub_agent_argv "$SCRIPT_DIR/../guest/home/bin/opencode"
+        STUB_ENV=()
+        if [[ "$STUB_ARGV" == --prompt\ * && "$STUB_ARGC" == "2" ]]; then
+            pass "opencode wrapper passes --prompt for interactive runs"
+        else
+            fail "opencode wrapper passes --prompt for interactive runs" \
+                "--prompt <one argument>, 2 args" \
+                "status $STUB_STATUS: (${STUB_ARGC:-0} args)"
+        fi
+    }
+    queue_test test_opencode_wrapper_passes_tool_prompt
 
     # Guard the dispatch mapping: a typo in (or removal of) the p|pi) case arm
     # would pass the wrapper static tests but break 'sv pi'. Assert sv has a
