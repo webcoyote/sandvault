@@ -847,25 +847,13 @@ STUB
 
     # mcp and auth reject --approve, so nothing may be appended to them --
     # including after a "--" separator, where 'pi mcp add <server> -- <command>'
-    # would otherwise hand a stray --approve to the forwarded command.
+    # would otherwise hand a stray --approve to the forwarded command. Same
+    # assertion as the other agents' pass-through path, so it stays in one place.
     test_pi_wrapper_subcommands_without_approve() {
-        local wrapper="$SCRIPT_DIR/../guest/home/bin/pi"
-        local sub failures=""
-        for sub in $PI_PASSTHROUGH_SUBCOMMANDS; do
-            STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
-            stub_agent_argv "$wrapper" "$sub" list
-            if [[ "$STUB_ARGV" != "$sub list" || "$STUB_ARGC" != "2" ]]; then
-                failures+=" [$sub -> status $STUB_STATUS: $STUB_ARGV (${STUB_ARGC:-0} args)]"
-            fi
-        done
-        STUB_ENV=()
-        if [[ -z "$failures" ]]; then
-            pass "pi wrapper passes mcp and auth arguments through untouched"
-        else
-            fail "pi wrapper passes mcp and auth arguments through untouched" \
-                "every subcommand arrives as '<subcommand> list' with 2 args" \
-                "${failures# }"
-        fi
+        assert_wrapper_passes_subcommands \
+            "pi wrapper passes mcp and auth arguments through untouched" \
+            "$SCRIPT_DIR/../guest/home/bin/pi" \
+            "$PI_PASSTHROUGH_SUBCOMMANDS"
     }
     queue_test test_pi_wrapper_subcommands_without_approve
 
