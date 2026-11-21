@@ -55,16 +55,40 @@ if [[ -z "${PI:-}" || ! -x "$PI" ]]; then
     exit 1
 fi
 
+# Unlike the other agents, pi needs no permission-bypass flag: it runs its
+# read/bash/edit/write tools without prompting. --approve answers a different
+# question -- pi's interactive project-trust prompt -- so project-local
+# extensions, skills, prompt templates, and themes load without stopping for
+# input. That is a real trust decision, and the sandbox is where to make it.
+# pi recognises its package subcommands only at argv[1]. With a global flag in
+# front, pi reads the subcommand as a chat message and the subcommand's own
+# flags as unknown extension flags, so 'pi --approve update --extensions' dies
+# with "Unknown option: --extensions" and updates nothing.
+#
+# The package commands and config parse --approve themselves, and 'install -l'
+# and 'config -l' need it to write project settings, so it goes after their
+# arguments. `mcp` and `auth` reject the flag outright ("Unknown option
+# --approve."), so their arguments pass through untouched. The tool prompt
+# stays out of both: it is context for a chat session, and reading it here
+# would warn about a missing prompt file for a command that never uses one.
+case "${1:-}" in
+    install|remove|uninstall|update|list|config)
+        echo >&2 "$USER: running pi ($PI) --approve (trusts project-local files)"
+        exec "$PI" "$@" --approve
+        ;;
+    auth|mcp)
+        # The banner has to match what runs: this branch passes no --approve,
+        # so it must not claim the project-trust decision either.
+        echo >&2 "$USER: running pi ($PI) (subcommand, no --approve)"
+        exec "$PI" "$@"
+        ;;
+esac
+
 TOOL_PROMPT=$(sv_tool_prompt)
 EXTRA_ARGS=()
 if [[ -n "$TOOL_PROMPT" ]]; then
     EXTRA_ARGS+=(--append-system-prompt "$TOOL_PROMPT")
 fi
 
-# Unlike the other agents, pi needs no permission-bypass flag: it runs its
-# read/bash/edit/write tools without prompting. --approve answers a different
-# question -- pi's interactive project-trust prompt -- so project-local
-# extensions, skills, prompt templates, and themes load without stopping for
-# input. That is a real trust decision, and the sandbox is where to make it.
 echo >&2 "$USER: running pi ($PI) --approve (trusts project-local files)"
 exec "$PI" --approve ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"

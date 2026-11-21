@@ -96,12 +96,25 @@ if [[ -z "${OPENCODE:-}" || ! -x "$OPENCODE" ]]; then
     exit 1
 fi
 
+export OPENCODE_PERMISSION='{"*":"allow"}'
+
+# opencode resolves a subcommand only when no global option comes first:
+# 'opencode --prompt X mcp list' prints the mcp help instead of listing
+# servers, and the subcommands reject --prompt. The browser and iOS tool
+# prompts inject --prompt, so leave the launch flags off subcommand runs. The
+# permission variable is environment rather than argv, and still applies.
+case "${1:-}" in
+    completion|acp|mcp|attach|run|debug|providers|auth|agent|upgrade|uninstall|serve|web|models|stats|export|import|github|pr|session|plugin|plug|db)
+        echo >&2 "$USER: running opencode with OPENCODE_PERMISSION='${OPENCODE_PERMISSION}' (subcommand, no --prompt)"
+        exec "$OPENCODE" "$@"
+        ;;
+esac
+
 TOOL_PROMPT=$(sv_tool_prompt)
 EXTRA_ARGS=()
 if [[ -n "$TOOL_PROMPT" ]]; then
     EXTRA_ARGS+=(--prompt "$TOOL_PROMPT")
 fi
 
-export OPENCODE_PERMISSION='{"*":"allow"}'
 echo >&2 "$USER: running opencode with OPENCODE_PERMISSION='${OPENCODE_PERMISSION}'"
 exec "$OPENCODE" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@"
