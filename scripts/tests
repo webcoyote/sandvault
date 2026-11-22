@@ -1781,10 +1781,10 @@ STUB_EOF
             return
         fi
 
-        # sv-clone should have added a 'sandvault' remote to the local repo.
-        remote_output="$(git -C "$src_repository" remote get-url sandvault 2>/dev/null)"
-        if [[ "$remote_output" != "$clone_path" ]]; then
-            fail "local repository gets sandvault remote" "$clone_path" "$remote_output"
+        # SV_CLONE_WORKSPACE_ROOT is set (via sv_clone_cmd), so sv-clone
+        # should have skipped adding a 'sandvault' remote to the local repo.
+        if git -C "$src_repository" remote get-url sandvault &>/dev/null; then
+            fail "test-mode sv-clone does not add sandvault remote" "no remote" "remote exists"
             return
         fi
 

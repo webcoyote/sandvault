@@ -410,7 +410,7 @@ fi
 ###############################################################################
 # Add sandvault remote to local repository (if cloning from local)
 ###############################################################################
-if [[ -n "$LOCAL_REPOSITORY" ]]; then
+if [[ -n "$LOCAL_REPOSITORY" && -z "${SV_CLONE_WORKSPACE_ROOT:-}" ]]; then
     if git -C "$LOCAL_REPOSITORY" remote get-url sandvault &>/dev/null; then
         git -C "$LOCAL_REPOSITORY" remote set-url sandvault "$REPO_DIR"
     else
