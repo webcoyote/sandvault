@@ -404,6 +404,22 @@ run_tests() {
     }
     queue_test test_profile_default_names_unchanged
 
+    test_profiles_list_includes_default() {
+        local output
+        output=$("$SV_BASE" profiles list 2>&1)
+        if [[ "$output" == *"(default)"* ]]; then
+            pass "profiles list shows (default)"
+        else
+            # The default sandbox may not exist on this machine; skip.
+            if ! dscl . -read "/Users/$SANDVAULT_USER" &>/dev/null 2>&1; then
+                pass "profiles list shows (default) [skipped: no default sandbox]"
+            else
+                fail "profiles list shows (default)" "(default) in output" "$output"
+            fi
+        fi
+    }
+    queue_test test_profiles_list_includes_default
+
     test_opencode_wrapper_uses_skip_permissions() {
         if [[ -x "$SCRIPT_DIR/../guest/home/bin/opencode" ]] \
             && grep -F -- "OPENCODE_PERMISSION" \

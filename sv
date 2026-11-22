@@ -781,6 +781,57 @@ configure_shared_folder_permssions() {
     fi
 }
 
+# List sandboxes owned by $HOST_USER.  An account "sandvault-$HOST_USER" or
+# "sandvault-$HOST_USER-*" is owned when its like-named group lists
+# $HOST_USER as a member.  Outputs one line per sandbox: the profile name
+# ("" for the default, the suffix otherwise).
+owned_profiles() {
+    local acct prefix profile
+    prefix="sandvault-$HOST_USER"
+    while IFS= read -r acct; do
+        [[ -n "$acct" ]] || continue
+        # Check group membership — the owner was added by dseditgroup -a.
+        if ! dseditgroup -o checkmember -m "$HOST_USER" "$acct" &>/dev/null; then
+            continue
+        fi
+        if [[ "$acct" == "$prefix" ]]; then
+            echo ""   # default profile
+        else
+            profile="${acct#"$prefix-"}"
+            echo "$profile"
+        fi
+    done < <(dscl . -list /Users 2>/dev/null | grep -E "^${prefix}$|^${prefix}-" || true)
+}
+
+list_profiles() {
+    local found=false profile
+    while IFS= read -r profile; do
+        found=true
+        if [[ -z "$profile" ]]; then
+            echo "(default)"
+        else
+            echo "$profile"
+        fi
+    done < <(owned_profiles)
+    if [[ "$found" == "false" ]]; then
+        info "No profiles found for $HOST_USER"
+    fi
+}
+
+# Collision guard: abort if the target account already exists and is owned
+# by a different host user (section 4 of the design spec).
+collision_guard() {
+    # Only matters when building — if the account doesn't exist yet, no
+    # collision is possible.
+    if ! dscl . -read "/Groups/$SANDVAULT_GROUP" &>/dev/null 2>&1; then
+        return 0
+    fi
+    if dseditgroup -o checkmember -m "$HOST_USER" "$SANDVAULT_GROUP" &>/dev/null; then
+        return 0
+    fi
+    abort "Account $SANDVAULT_USER already exists and is not owned by $HOST_USER"
+}
+
 uninstall() {
     info "Uninstalling..."
     force_cleanup_sandvault_processes
@@ -889,6 +940,7 @@ show_help() {
     echo "  hd, herdr  [PATH]    Open herdr agent multiplexer in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
+    echo "  profiles [list]      List sandboxes owned by this user"
     echo "  u, uninstall         Remove sandvault; keep shared files"
     echo ""
     echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, herdr, shell)"
@@ -1043,6 +1095,17 @@ case "${1:-}" in
         ;;
     b|build)
         COMMAND=build
+        ;;
+    profiles)
+        case "${2:-}" in
+            list|ls|"")
+                list_profiles
+                ;;
+            *)
+                abort "unknown profiles subcommand: ${2:-}"
+                ;;
+        esac
+        exit 0
         ;;
     u|uninstall)
         if [[ "$NESTED" == "true" ]]; then
@@ -1257,6 +1320,7 @@ release_id_alloc_lock() {
 }
 
 if [[ "$REBUILD" == "true" ]]; then
+    collision_guard
     debug "Creating $SANDVAULT_USER user and $SANDVAULT_GROUP group..."
 
     acquire_id_alloc_lock
