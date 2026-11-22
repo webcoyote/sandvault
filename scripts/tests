@@ -363,6 +363,47 @@ run_tests() {
     }
     queue_test test_help_lists_pi
 
+    # Profile name validation tests (spec step 2)
+    test_profile_invalid_names_rejected() {
+        local name status got=""
+        for name in Work a-b ../x 12345678901234567; do
+            status=0
+            # shellcheck disable=SC2310 # deliberate || status=$?
+            sv_cmd --profile "$name" --version 2>/dev/null || status=$?
+            if [[ "$status" -eq 0 ]]; then
+                got+="$name accepted (should reject)"$'\n'
+            fi
+        done
+        if [[ -z "$got" ]]; then
+            pass "invalid profile names rejected"
+        else
+            fail "invalid profile names rejected" "non-zero exit for each" "$got"
+        fi
+    }
+    queue_test test_profile_invalid_names_rejected
+
+    test_profile_flag_beats_env() {
+        local output
+        output=$(SV_PROFILE=envname sv_cmd --profile cliarg --help 2>&1)
+        if [[ "$output" == *"--profile"* ]]; then
+            pass "--profile flag beats SV_PROFILE env"
+        else
+            fail "--profile flag beats SV_PROFILE env" "help output" "$output"
+        fi
+    }
+    queue_test test_profile_flag_beats_env
+
+    test_profile_default_names_unchanged() {
+        local output
+        output=$(unset SV_PROFILE; sv_cmd --version 2>&1)
+        if [[ "$output" == *"version"* ]]; then
+            pass "default names unchanged without profile"
+        else
+            fail "default names unchanged without profile" "version output" "$output"
+        fi
+    }
+    queue_test test_profile_default_names_unchanged
+
     test_opencode_wrapper_uses_skip_permissions() {
         if [[ -x "$SCRIPT_DIR/../guest/home/bin/opencode" ]] \
             && grep -F -- "OPENCODE_PERMISSION" \

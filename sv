@@ -120,19 +120,74 @@ fi
 readonly NESTED
 readonly SV_SESSION_ID
 
+# Early --profile parse: profile must be known before resource constants are
+# defined, because nearly all of them depend on it.  Scan argv (and
+# SANDVAULT_ARGS) for --profile NAME / -P NAME, then fall back to SV_PROFILE
+# from the environment.  The flag wins over the environment.
+_sv_early_profile=""
+_sv_scan=("$@")
+if [[ -n "${SANDVAULT_ARGS:-}" ]]; then
+    while IFS= read -r _arg; do _sv_scan+=("$_arg")
+    done < <(xargs -n1 printf '%s\n' <<< "$SANDVAULT_ARGS")
+fi
+_sv_i=0
+while (( _sv_i < ${#_sv_scan[@]} )); do
+    case "${_sv_scan[$_sv_i]}" in
+        --profile|-P)
+            (( _sv_i + 1 < ${#_sv_scan[@]} )) || { echo "--profile requires a name" >&2; exit 1; }
+            _sv_early_profile="${_sv_scan[$(( _sv_i + 1 ))]}"
+            break
+            ;;
+        --profile=*)
+            _sv_early_profile="${_sv_scan[$_sv_i]#--profile=}"
+            break
+            ;;
+        -P*)
+            _sv_early_profile="${_sv_scan[$_sv_i]#-P}"
+            break
+            ;;
+        --) break ;;
+        *) ;;
+    esac
+    (( _sv_i++ )) || true
+done
+unset _sv_scan _sv_i _arg
+
+# Apply: flag wins over environment
+if [[ -n "$_sv_early_profile" ]]; then
+    SV_PROFILE="$_sv_early_profile"
+else
+    SV_PROFILE="${SV_PROFILE:-}"
+fi
+unset _sv_early_profile
+
+# Validate profile name
+if [[ -n "$SV_PROFILE" ]]; then
+    if ! [[ "$SV_PROFILE" =~ ^[a-z0-9]{1,16}$ ]]; then
+        echo "Invalid profile name '$SV_PROFILE': must match [a-z0-9]{1,16}" >&2
+        exit 1
+    fi
+fi
+
 # Each user on the computer can have their own sandvault.
 # shellcheck source=helpers/sv-identity.sh
 source "$WORKSPACE/helpers/sv-identity.sh"
-readonly HOST_USER
-readonly SANDVAULT_USER="sandvault-$HOST_USER"
+readonly HOST_USER SV_PROFILE SV_SUFFIX
+
+# Derived account name must fit in 64 characters (Unix socket path limit).
+readonly SANDVAULT_USER="sandvault-$HOST_USER$SV_SUFFIX"
+if (( ${#SANDVAULT_USER} > 64 )); then
+    echo "Derived account name '$SANDVAULT_USER' exceeds 64 characters" >&2
+    exit 1
+fi
 # The sandvault user is a local account reached via the Mac's own sshd, so SSH
 # connections are loopback. Use the IPv4 loopback literal rather than $HOSTNAME
 # or "localhost": some machines (e.g. company-issued Macs with auto-generated
 # names) have a hostname that does not resolve, and even "localhost" depends on
 # /etc/hosts. A literal address skips name resolution entirely. See issue #188.
 readonly SSH_HOST="127.0.0.1"
-readonly SANDVAULT_GROUP="sandvault-$HOST_USER"
-readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
+readonly SANDVAULT_GROUP="sandvault-$HOST_USER$SV_SUFFIX"
+readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER$SV_SUFFIX"
 # Sandvault-private subdir of $SHARED_WORKSPACE. Holds setup scripts, scratch
 # state, deploy keys, and agentsview symlinks — anything sandvault manages on
 # behalf of the host. Uninstall is `rm -rf` of this directory.
@@ -167,10 +222,14 @@ readonly SUDOERS_BUILD_HOME_SCRIPT_NAME="/var/sandvault/buildhome-$SANDVAULT_USE
 # Installation marker file
 readonly INSTALL_ORG="$HOME/.config/codeofhonor"
 readonly INSTALL_PRODUCT="$INSTALL_ORG/sandvault"
-readonly INSTALL_MARKER="$INSTALL_PRODUCT/install"
+readonly INSTALL_MARKER="$INSTALL_PRODUCT/install$SV_SUFFIX"
 
 # Per-session state (logs, migration markers)
-readonly SESSION_DIR="$HOME/.local/state/sandvault"
+if [[ -n "$SV_PROFILE" ]]; then
+    readonly SESSION_DIR="$HOME/.local/state/sandvault/$SV_PROFILE"
+else
+    readonly SESSION_DIR="$HOME/.local/state/sandvault"
+fi
 # One-shot migration markers. Each marker means "this migration already
 # ran on this host"; presence skips the migration on subsequent runs.
 readonly ACL_LEGACY_STRIPPED_MARKER="$SESSION_DIR/acl-legacy-stripped"
@@ -184,19 +243,23 @@ IOS_BRIDGE_SCRATCH_DIR=""
 IOS_SIM_UDID=""
 
 readonly SSH_DIR="$HOME/.ssh"
-readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
+readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault$SV_SUFFIX"
 readonly SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
 
 # Additional public keys allowed to SSH into the sandvault user, one key per
 # file. Kept in the host user's config directory so it survives upgrades and so
 # the (untrusted) sandvault user cannot grant itself extra access.
-readonly AUTHORIZED_KEYS_DIR="$INSTALL_PRODUCT/authorized_keys.d"
+if [[ -n "$SV_PROFILE" ]]; then
+    readonly AUTHORIZED_KEYS_DIR="$INSTALL_PRODUCT/authorized_keys.d/$SV_PROFILE"
+else
+    readonly AUTHORIZED_KEYS_DIR="$INSTALL_PRODUCT/authorized_keys.d"
+fi
 
 # Generated authorized_keys for the sandvault user, installed by the build-home
 # script. Kept in the host user's config directory, not $WORKSPACE, because
 # $WORKSPACE may be a shared install (e.g. Homebrew) that this user cannot
 # write and that other host users also use.
-readonly GUEST_AUTHORIZED_KEYS="$INSTALL_PRODUCT/authorized_keys"
+readonly GUEST_AUTHORIZED_KEYS="$INSTALL_PRODUCT/authorized_keys$SV_SUFFIX"
 
 # Sandbox profile to restrict /Volumes access (external drives)
 # Stored in /var/sandvault/ so sandvault user cannot modify it
@@ -798,6 +861,7 @@ show_help() {
     echo "Usage: sv [options] command [-- args ...]"
     echo ""
     echo "Options:"
+    echo "  -P, --profile NAME   Use a named profile (separate sandbox, keys, workspace)"
     echo "  -s, --ssh            Connect via SSH [default: use account impersonation]"
     echo "  -r, --rebuild        Rebuild configuration and file permissions/ACLs"
     echo "  -v, --verbose        Enable verbose output"
@@ -830,6 +894,7 @@ show_help() {
     echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, herdr, shell)"
     echo ""
     echo "Environment:"
+    echo "  SV_PROFILE           Default profile name (--profile flag overrides)"
     echo "  SANDVAULT_ARGS       Default arguments (prepended to command line)"
     echo "                       Example: export SANDVAULT_ARGS=\"--verbose --ssh --browser\""
     exit 0
@@ -857,6 +922,14 @@ while [[ $# -gt 0 ]]; do
                 shift
             done
             break
+            ;;
+        --profile|-P)
+            # Already parsed in early --profile scan; skip the value.
+            shift; shift
+            ;;
+        --profile=*|-P?*)
+            # Already parsed in early --profile scan; skip.
+            shift
             ;;
         -s|--ssh)
             MODE=ssh
@@ -1845,6 +1918,13 @@ if [[ "$MODE" == "ssh" ]]; then
     EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/\\*")
 else
     EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/*")
+fi
+
+# Pass identity so sandbox-side scripts can resolve the host user and profile
+# without ambiguous prefix-stripping.  See design spec section 3.
+EXTRA_ENV+=("SV_HOST_USER=$HOST_USER")
+if [[ -n "$SV_PROFILE" ]]; then
+    EXTRA_ENV+=("SV_PROFILE=$SV_PROFILE")
 fi
 
 if [[ "$NATIVE_INSTALL" == "true" ]]; then
