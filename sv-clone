@@ -160,11 +160,8 @@ fi
 ###############################################################################
 # Determine user and workspace paths
 ###############################################################################
-if [[ "$USER" == sandvault-* ]]; then
-    HOST_USER="${USER#sandvault-}"
-else
-    HOST_USER="$USER"
-fi
+# shellcheck source=helpers/sv-identity.sh
+source "$WORKSPACE/helpers/sv-identity.sh"
 readonly HOST_USER
 # SV_CLONE_WORKSPACE_ROOT relocates the workspace so the test suite can clone
 # into a throwaway directory instead of the real one — see scripts/tests.  It

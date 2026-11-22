@@ -10,13 +10,8 @@ SV_BASE="$SCRIPT_DIR/../sv"
 # Prevent user's SANDVAULT_ARGS from interfering with test expectations.
 unset SANDVAULT_ARGS
 
-# Each user on the computer can have their own sandvault.
-# Inside sandvault, USER will be sandvault-<name>, where name is the host-users's name.
-if [[ "$USER" == sandvault-* ]]; then
-    HOST_USER="${USER#sandvault-}"
-else
-    HOST_USER="$USER"
-fi
+# shellcheck source=../helpers/sv-identity.sh
+source "$SCRIPT_DIR/../helpers/sv-identity.sh"
 HOST_HOME="$(dscl . -read "/Users/$HOST_USER" NFSHomeDirectory | cut -d' ' -f2)"
 SANDVAULT_USER="sandvault-$HOST_USER"
 SANDVAULT_HOME="/Users/$SANDVAULT_USER"
@@ -1321,6 +1316,7 @@ STUB
         code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
         # shellcheck disable=SC2016 # single quotes intentional: matching literal "$HERDR" "$@"
         if ! grep -Eq '^exec "\$HERDR" "\$@"$' <<< "$code"; then
+            # shellcheck disable=SC2016
             fail "herdr wrapper passes arguments through" \
                 'exec "$HERDR" "$@" with no injected flags' "$wrapper"
         elif grep -q 'command -v herdr' <<< "$code"; then

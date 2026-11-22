@@ -33,12 +33,8 @@ source "$WORKSPACE/helpers/sv-logging.sh"
 # shellcheck source=helpers/agentsview-paths.sh
 source "$WORKSPACE/helpers/agentsview-paths.sh"
 
-# Re-derive identity vars (mirror of sv:153-161).
-if [[ "$USER" == sandvault-* ]]; then
-    HOST_USER="${USER#sandvault-}"
-else
-    HOST_USER="$USER"
-fi
+# shellcheck source=helpers/sv-identity.sh
+source "$WORKSPACE/helpers/sv-identity.sh"
 readonly HOST_USER
 readonly SANDVAULT_USER="sandvault-$HOST_USER"
 readonly SANDVAULT_GROUP="sandvault-$HOST_USER"

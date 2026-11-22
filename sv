@@ -121,12 +121,8 @@ readonly NESTED
 readonly SV_SESSION_ID
 
 # Each user on the computer can have their own sandvault.
-# Inside sandvault, USER will be sandvault-<name>, where name is the host-users's name.
-if [[ "$USER" == sandvault-* ]]; then
-    HOST_USER="${USER#sandvault-}"
-else
-    HOST_USER="$USER"
-fi
+# shellcheck source=helpers/sv-identity.sh
+source "$WORKSPACE/helpers/sv-identity.sh"
 readonly HOST_USER
 readonly SANDVAULT_USER="sandvault-$HOST_USER"
 # The sandvault user is a local account reached via the Mac's own sshd, so SSH
