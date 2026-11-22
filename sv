@@ -51,7 +51,7 @@ configure_ssh_access() {
             -f "$SSH_KEYFILE_PRIV" \
             -N "" \
             -q \
-            -C "${HOST_USER}-to-sandvault@${SSH_HOST}"
+            -C "${HOST_USER}-to-${SANDVAULT_USER}@${SSH_HOST}"
     fi
 
     # Generate SANDVAULT_USER authorized_keys: every file in AUTHORIZED_KEYS_DIR
@@ -60,6 +60,8 @@ configure_ssh_access() {
     mkdir -p "$AUTHORIZED_KEYS_DIR"
     tmp_authorized_keys="$(mktemp)"
     for key_file in "$AUTHORIZED_KEYS_DIR"/*; do
+        # Skip non-files (profile subdirectories live alongside key files
+        # in the default profile's authorized_keys.d/).
         [[ -f "$key_file" ]] || continue
         # "ssh-keygen -l" reports the public half of a private key too, so check
         # for that separately: copying one into the guest would hand the
