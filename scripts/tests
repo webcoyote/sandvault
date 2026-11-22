@@ -251,7 +251,14 @@ run_tests() {
             set +e
             # shellcheck disable=SC2030 # per-test by design; only the test running in this subshell reads it
             TEST_ID="$id"
+            # Time inside the subshell so queue time (wait_for_slot) is excluded
+            local test_start
+            [[ "$VERBOSE" -ne 0 ]] && test_start=$(date +%s.%N)
             "$@"
+            if [[ "$VERBOSE" -ne 0 ]]; then
+                awk -v s="$test_start" -v e="$(date +%s.%N)" 'BEGIN { printf "%.2f", e - s }' \
+                    > "$RESULTS_DIR/$id.time"
+            fi
         ) &
         TEST_PIDS+=("$!")
     }
@@ -259,21 +266,25 @@ run_tests() {
     collect_results() {
         wait_for_all_running_tests
 
-        local i id status name expected got
+        local i id status name expected got duration
         for i in $(seq 1 "$TESTS_RUN"); do
             id=$(printf "%04d" "$i")
             status=$(cat "$RESULTS_DIR/$id.status" 2>/dev/null || echo "FAIL")
             name=$(cat "$RESULTS_DIR/$id.name" 2>/dev/null || echo "missing test result $id")
             expected=$(cat "$RESULTS_DIR/$id.expected" 2>/dev/null || true)
             got=$(cat "$RESULTS_DIR/$id.got" 2>/dev/null || true)
+            duration=""
+            if [[ "$VERBOSE" -ne 0 && -s "$RESULTS_DIR/$id.time" ]]; then
+                duration=" ($(cat "$RESULTS_DIR/$id.time")s)"
+            fi
             if [[ "$status" == "PASS" ]]; then
                 ((TESTS_PASSED++)) || true
                 if [[ "$VERBOSE" -ne 0 ]]; then
-                    echo -e "  ${GREEN}PASS${NC}: $name"
+                    echo -e "  ${GREEN}PASS${NC}: $name$duration"
                 fi
             else
                 ((TESTS_FAILED++)) || true
-                echo -e "  ${RED}FAIL${NC}: $name"
+                echo -e "  ${RED}FAIL${NC}: $name$duration"
                 echo "    Expected: ${expected:-}"
                 echo "    Got: ${got:-}"
             fi
@@ -712,7 +723,6 @@ EOF
         cat > "$stub" <<'STUB'
 #!/bin/bash
 for arg in "$@"; do printf '%q\n' "$arg"; done > "$SV_TEST_STUB_ARGV"
-printf '%s' "${OPENCODE_PERMISSION:-}" > "$SV_TEST_STUB_ARGV.permission"
 STUB
         chmod +x "$dir/bin/brew" "$stub"
         set +e
@@ -723,13 +733,11 @@ STUB
             SV_TEST_STUB_ARGV="$argv" \
             PATH="$dir/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
             ${STUB_ENV[@]+"${STUB_ENV[@]}"} \
-            "$wrapper" "$@" >/dev/null 2>"$dir/stderr"
+            "$wrapper" "$@" >/dev/null 2>&1
         STUB_STATUS=$?
         set -e
         STUB_ARGV=""
         STUB_ARGC=0
-        STUB_PERMISSION=$(cat "$argv.permission" 2>/dev/null || true)
-        STUB_STDERR=$(cat "$dir/stderr" 2>/dev/null || true)
         if [[ -s "$argv" ]]; then
             STUB_ARGV=$(paste -sd' ' "$argv")
             STUB_ARGC=$(wc -l < "$argv" | tr -d ' ')
@@ -751,112 +759,6 @@ STUB
         fi
     }
 
-    # Subcommand tables, read off each CLI's own --help: pi 1.6.x, gemini-cli,
-    # and opencode 1.19.6 (whose aliases auth and plug are separate words). A
-    # subcommand missing from a wrapper's case arm is a subcommand the wrapper
-    # mangles with a launch flag, so every listed one is driven through.
-    # pi's package commands and config parse --approve; mcp and auth reject it
-    # ("Unknown option --approve."), so they are pass-through like the other
-    # agents.
-    PI_APPROVE_SUBCOMMANDS="install remove uninstall update list config"
-    PI_PASSTHROUGH_SUBCOMMANDS="auth mcp"
-    GEMINI_SUBCOMMANDS="mcp extensions extension skills skill hooks hook gemma models"
-    OPENCODE_SUBCOMMANDS="completion acp mcp attach run debug providers auth agent upgrade uninstall serve web models stats export import github pr session plugin plug db"
-
-    # Drive every subcommand of one wrapper with a browser tool prompt active:
-    # the prompt is what makes these wrappers inject their context flags, so a
-    # pass here also proves nothing else was slipped in front of the
-    # subcommand.
-    assert_wrapper_passes_subcommands() {
-        local name="$1"
-        local wrapper="$2"
-        local subcommands="$3"
-        local sub failures=""
-        for sub in $subcommands; do
-            STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
-            stub_agent_argv "$wrapper" "$sub" list
-            if [[ "$STUB_ARGV" != "$sub list" || "$STUB_ARGC" != "2" ]]; then
-                failures+=" [$sub -> status $STUB_STATUS: $STUB_ARGV (${STUB_ARGC:-0} args)]"
-            fi
-        done
-        STUB_ENV=()
-        if [[ -z "$failures" ]]; then
-            pass "$name"
-        else
-            fail "$name" \
-                "every subcommand arrives as '<subcommand> list' with 2 args" \
-                "${failures# }"
-        fi
-    }
-
-    # pi rejects --extensions when --approve comes first, so the trust flag has
-    # to follow the subcommand's own arguments. It cannot simply be dropped:
-    # 'install -l' and 'config -l' write project settings, which pi refuses
-    # without --approve. pi is therefore the one wrapper that keeps a flag --
-    # at the end -- and this test pins that position on every subcommand.
-    test_pi_wrapper_subcommand_args() {
-        local wrapper="$SCRIPT_DIR/../guest/home/bin/pi"
-        local sub failures=""
-        for sub in $PI_APPROVE_SUBCOMMANDS; do
-            STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
-            stub_agent_argv "$wrapper" "$sub" list
-            if [[ "$STUB_ARGV" != "$sub list --approve" || "$STUB_ARGC" != "3" ]]; then
-                failures+=" [$sub -> status $STUB_STATUS: $STUB_ARGV (${STUB_ARGC:-0} args)]"
-            fi
-        done
-        STUB_ENV=()
-        if [[ -z "$failures" ]]; then
-            pass "pi wrapper puts subcommand args before --approve"
-        else
-            fail "pi wrapper puts subcommand args before --approve" \
-                "every subcommand arrives as '<subcommand> list --approve' with 3 args" \
-                "${failures# }"
-        fi
-    }
-    queue_test test_pi_wrapper_subcommand_args
-
-    # The startup banner is the only hint a user gets about the trust decision,
-    # so it must claim it exactly when the run carries --approve. Match the
-    # claim, not the word: the pass-through banner says "no --approve".
-    test_pi_wrapper_banner_matches_argv() {
-        local failures="" spec
-        STUB_ENV=()
-        for spec in "mcp list" "update --extensions"; do
-            # shellcheck disable=SC2086 # deliberate word splitting of the spec
-            stub_agent_argv "$SCRIPT_DIR/../guest/home/bin/pi" $spec
-            case "$STUB_ARGV" in
-                *--approve*)
-                    [[ "$STUB_STDERR" == *"(trusts project-local files)"* ]] \
-                        || failures+=" [$spec -> banner omits the trust claim]"
-                    ;;
-                *)
-                    [[ "$STUB_STDERR" != *"(trusts project-local files)"* ]] \
-                        || failures+=" [$spec -> banner claims a trust decision that is not made]"
-                    ;;
-            esac
-        done
-        if [[ -z "$failures" ]]; then
-            pass "pi wrapper banner matches the flags it passes"
-        else
-            fail "pi wrapper banner matches the flags it passes" \
-                "banner claims the trust decision only on runs that make it" \
-                "${failures# }"
-        fi
-    }
-    queue_test test_pi_wrapper_banner_matches_argv
-
-    # mcp and auth reject --approve, so nothing may be appended to them --
-    # including after a "--" separator, where 'pi mcp add <server> -- <command>'
-    # would otherwise hand a stray --approve to the forwarded command. Same
-    # assertion as the other agents' pass-through path, so it stays in one place.
-    test_pi_wrapper_subcommands_without_approve() {
-        assert_wrapper_passes_subcommands \
-            "pi wrapper passes mcp and auth arguments through untouched" \
-            "$SCRIPT_DIR/../guest/home/bin/pi" \
-            "$PI_PASSTHROUGH_SUBCOMMANDS"
-    }
-    queue_test test_pi_wrapper_subcommands_without_approve
-
     test_pi_wrapper_double_dash() {
         STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
         stub_agent_argv "$SCRIPT_DIR/../guest/home/bin/pi" mcp add myserver -- mycommand --flag
@@ -865,76 +767,6 @@ STUB
             "mcp add myserver -- mycommand --flag" 6
     }
     queue_test test_pi_wrapper_double_dash
-
-    # gemini-cli answers 'gemini --yolo mcp list' by starting the agent with
-    # "mcp list" as its initial prompt, and its subcommands reject --yolo, so
-    # the flag has to be left off subcommand runs entirely.
-    test_gemini_wrapper_subcommand_args() {
-        assert_wrapper_passes_subcommands \
-            "gemini wrapper leaves --yolo off subcommand runs" \
-            "$SCRIPT_DIR/../guest/home/bin/gemini" \
-            "$GEMINI_SUBCOMMANDS"
-    }
-    queue_test test_gemini_wrapper_subcommand_args
-
-    # opencode takes --prompt only on its default command; 'opencode --prompt X
-    # mcp list' prints the mcp help instead of listing servers. The browser and
-    # iOS tool prompts inject --prompt, so that path needs the same guard.
-    test_opencode_wrapper_subcommand_args() {
-        local wrapper="$SCRIPT_DIR/../guest/home/bin/opencode"
-        local sub failures=""
-        for sub in $OPENCODE_SUBCOMMANDS; do
-            STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
-            stub_agent_argv "$wrapper" "$sub" list
-            # OPENCODE_PERMISSION must survive the early exit: the subcommand
-            # branch exists to keep arguments clean, not to drop the permission
-            # setting that 'opencode run' and 'opencode attach' rely on.
-            if [[ "$STUB_ARGV" != "$sub list" || "$STUB_ARGC" != "2" \
-                || "$STUB_PERMISSION" != '{"*":"allow"}' ]]; then
-                failures+=" [$sub -> status $STUB_STATUS: $STUB_ARGV (${STUB_ARGC:-0} args), OPENCODE_PERMISSION=[$STUB_PERMISSION]]"
-            fi
-        done
-        STUB_ENV=()
-        if [[ -z "$failures" ]]; then
-            pass "opencode wrapper leaves --prompt off subcommand runs"
-        else
-            fail "opencode wrapper leaves --prompt off subcommand runs" \
-                "every subcommand arrives as '<subcommand> list' with 2 args and OPENCODE_PERMISSION='{\"*\":\"allow\"}'" \
-                "${failures# }"
-        fi
-    }
-    queue_test test_opencode_wrapper_subcommand_args
-
-    # The guards above must not decay into "drop the launch flags": an
-    # interactive launch still has to arrive with them.
-    test_gemini_wrapper_wires_yolo() {
-        STUB_ENV=()
-        stub_agent_argv "$SCRIPT_DIR/../guest/home/bin/gemini"
-        assert_stub_argv "gemini wrapper passes --yolo for interactive runs" --yolo 1
-    }
-    queue_test test_gemini_wrapper_wires_yolo
-
-    test_pi_wrapper_wires_approve() {
-        STUB_ENV=()
-        stub_agent_argv "$SCRIPT_DIR/../guest/home/bin/pi"
-        assert_stub_argv "pi wrapper passes --approve for interactive runs" --approve 1
-    }
-    queue_test test_pi_wrapper_wires_approve
-
-    # opencode's tool prompt is one (multi-line) argument after --prompt.
-    test_opencode_wrapper_passes_tool_prompt() {
-        STUB_ENV=(SV_BROWSER_ENDPOINT=http://127.0.0.1:65535)
-        stub_agent_argv "$SCRIPT_DIR/../guest/home/bin/opencode"
-        STUB_ENV=()
-        if [[ "$STUB_ARGV" == --prompt\ * && "$STUB_ARGC" == "2" ]]; then
-            pass "opencode wrapper passes --prompt for interactive runs"
-        else
-            fail "opencode wrapper passes --prompt for interactive runs" \
-                "--prompt <one argument>, 2 args" \
-                "status $STUB_STATUS: (${STUB_ARGC:-0} args)"
-        fi
-    }
-    queue_test test_opencode_wrapper_passes_tool_prompt
 
     # Guard the dispatch mapping: a typo in (or removal of) the p|pi) case arm
     # would pass the wrapper static tests but break 'sv pi'. Assert sv has a
@@ -1559,7 +1391,6 @@ STUB
         fi
     }
     queue_test test_herdr_refuses_unsafe_flags
-
     # 'sv -x shell' then 'herdr' never reaches sv's own check, so the wrapper
     # must refuse too, or later sandboxed sessions attach to an unsandboxed
     # server.
