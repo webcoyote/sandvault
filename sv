@@ -888,6 +888,131 @@ uninstall() {
     fi
 }
 
+# Remove every owned sandbox, then sweep orphaned per-profile host files
+# (keys, authorized_keys.d/<p>/, markers, session dirs).
+uninstall_all() {
+    local profile suffix acct
+    local prefix="sandvault-$HOST_USER"
+
+    # Pass 1: uninstall every owned sandbox using the normal uninstall path.
+    # We re-derive the constants for each profile inline.
+    while IFS= read -r profile; do
+        if [[ -n "$profile" ]]; then suffix="-$profile"; else suffix=""; fi
+        acct="${prefix}${suffix}"
+        info "Uninstalling ${profile:-(default)} ($acct)..."
+
+        # Re-derive per-profile constants for this iteration
+        local p_user="$acct"
+        local p_group="$acct"
+        local p_workspace="/Users/Shared/sv-$HOST_USER${suffix}"
+        local p_private="$p_workspace/_sandvault"
+        local p_sudoers="/etc/sudoers.d/50-nopasswd-for-${p_user//./_}"
+        local p_sudoers_legacy="/etc/sudoers.d/50-nopasswd-for-$p_user"
+        local p_build_home="/var/sandvault/buildhome-$p_user"
+        local p_sandbox="/var/sandvault/sandbox-$p_user.sb"
+        local p_install_marker="$INSTALL_PRODUCT/install${suffix}"
+        local p_ssh_priv="$SSH_DIR/id_ed25519_sandvault${suffix}"
+        local p_ssh_pub="${p_ssh_priv}.pub"
+        local p_guest_ak="$INSTALL_PRODUCT/authorized_keys${suffix}"
+        local p_session_dir
+        if [[ -n "$profile" ]]; then
+            p_session_dir="$HOME/.local/state/sandvault/$profile"
+        else
+            p_session_dir="$HOME/.local/state/sandvault"
+        fi
+
+        # Kill processes
+        local p_uid
+        if p_uid=$(dscl . -read "/Users/$p_user" UniqueID 2>/dev/null | awk '{print $2}') && [[ -n "$p_uid" ]]; then
+            sudo launchctl bootout "user/$p_uid" 2>/dev/null || true
+            sudo /usr/bin/pkill -9 -u "$p_user" 2>/dev/null || true
+        fi
+
+        # Remove install marker
+        rm -rf "$p_install_marker"
+
+        # Remove sudoers, build script, sandbox profile
+        sudo rm -rf "$p_sudoers" "$p_sudoers_legacy"
+        sudo rm -rf "$p_build_home" "$p_sandbox"
+
+        # Remove ACLs on workspace
+        if [[ -d "$p_workspace" ]]; then
+            sudo chmod -RN "$p_workspace" 2>/dev/null || true
+            sudo chown -R "$HOST_USER:$(id -gn)" "$p_workspace" 2>/dev/null || true
+            sudo chmod -R u=rwX,go= "$p_workspace" 2>/dev/null || true
+        fi
+
+        # Remove group membership and user/group
+        sudo dseditgroup -o edit -d "$HOST_USER" -t user "$p_group" 2>/dev/null || true
+        sudo dseditgroup -o edit -d "$p_user" -t user com.apple.access_ssh 2>/dev/null || true
+        sudo dscl . -delete "/Users/$p_user" &>/dev/null || true
+        sudo dscl . -delete "/Groups/$p_group" &>/dev/null || true
+        sudo rm -rf "/Users/$p_user"
+
+        # Remove SSH keys
+        rm -rf "$p_ssh_priv" "$p_ssh_pub"
+
+        # Remove authorized_keys and per-profile subdir
+        rm -rf "$p_guest_ak"
+        if [[ -n "$profile" ]]; then
+            rm -rf "$INSTALL_PRODUCT/authorized_keys.d/$profile"
+        fi
+
+        # Remove session state
+        rm -rf "$p_session_dir"
+
+        # Remove workspace (keep if not empty)
+        rm -rf "$p_private"
+        rm -f "$p_workspace/SANDVAULT-README.md"
+        rmdir "$p_workspace" 2>/dev/null || true
+        if [[ -d "$p_workspace" ]]; then
+            info "Keeping $p_workspace (not empty)"
+        fi
+    done < <(owned_profiles)
+
+    # Pass 2: sweep orphaned per-profile host files that might remain if
+    # the account was already deleted but host files weren't cleaned up.
+    local orphan
+    # SSH keys
+    for orphan in "$SSH_DIR"/id_ed25519_sandvault-*; do
+        [[ -f "$orphan" ]] || continue
+        rm -f "$orphan" "${orphan}.pub"
+        trace "Swept orphan key: $orphan"
+    done
+    # authorized_keys.d profile subdirs
+    for orphan in "$INSTALL_PRODUCT/authorized_keys.d"/*/; do
+        [[ -d "$orphan" ]] || continue
+        rm -rf "$orphan"
+        trace "Swept orphan authorized_keys.d: $orphan"
+    done
+    # authorized_keys-<profile> files
+    for orphan in "$INSTALL_PRODUCT"/authorized_keys-*; do
+        [[ -f "$orphan" ]] || continue
+        rm -f "$orphan"
+        trace "Swept orphan authorized_keys: $orphan"
+    done
+    # install-<profile> markers
+    for orphan in "$INSTALL_PRODUCT"/install-*; do
+        [[ -f "$orphan" ]] || continue
+        rm -f "$orphan"
+        trace "Swept orphan install marker: $orphan"
+    done
+    # Session dirs (profile subdirs of ~/.local/state/sandvault/)
+    for orphan in "$HOME/.local/state/sandvault"/*/; do
+        [[ -d "$orphan" ]] || continue
+        rm -rf "$orphan"
+        trace "Swept orphan session dir: $orphan"
+    done
+
+    # Clean up parent dirs if now empty
+    sudo rmdir "$(dirname "$INSTALL_PRODUCT/x")" 2>/dev/null || true
+    rmdir "$INSTALL_PRODUCT" &>/dev/null || true
+    rmdir "$INSTALL_ORG" &>/dev/null || true
+    sudo rmdir /var/sandvault 2>/dev/null || true
+
+    info "All profiles removed"
+}
+
 
 ###############################################################################
 # Parse command line
@@ -943,7 +1068,8 @@ show_help() {
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  profiles [list]      List sandboxes owned by this user"
-    echo "  u, uninstall         Remove sandvault; keep shared files"
+    echo "  u, uninstall         Remove sandvault (current profile); keep shared files"
+    echo "  uninstall --all      Remove all owned sandboxes and sweep orphan files"
     echo ""
     echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, herdr, shell)"
     echo ""
@@ -1116,7 +1242,16 @@ case "${1:-}" in
         if [[ "$NO_BUILD" == "true" ]]; then
             abort "--no-build set: refusing to uninstall"
         fi
-        uninstall
+        if [[ "${2:-}" == "--all" ]]; then
+            uninstall_all
+        else
+            uninstall
+            # After single-profile uninstall, hint at remaining profiles.
+            _remaining=$(owned_profiles | wc -l)
+            if (( _remaining > 0 )); then
+                info "$_remaining profile(s) still installed; use 'sv uninstall --all' to remove everything"
+            fi
+        fi
         exit 0
         ;;
     *)
