@@ -1487,6 +1487,7 @@ STUB
         fi
         local code
         code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        # shellcheck disable=SC2016 # single quotes intentional: matching literal "$HERDR" "$@"
         if ! grep -Eq '^exec "\$HERDR" "\$@"$' <<< "$code"; then
             fail "herdr wrapper passes arguments through" \
                 'exec "$HERDR" "$@" with no injected flags' "$wrapper"
@@ -1507,6 +1508,7 @@ STUB
         fi
         local code
         code=$(grep -vE '^[[:space:]]*#' "$wrapper" | sed 's/[[:space:]]#.*$//')
+        # shellcheck disable=SC2016 # single quotes intentional: matching literal "$HOME"
         if ! grep -F -- 'https://herdr.dev/install.sh' <<< "$code" &>/dev/null; then
             fail "herdr wrapper native-installs from herdr.dev" \
                 'curl -fsSL https://herdr.dev/install.sh' "$wrapper"
@@ -1541,6 +1543,7 @@ STUB
         local flag output status got=""
         for flag in -x -b -i -I; do
             status=0
+            # shellcheck disable=SC2310 # failure is captured in status, not fatal
             output=$(sv_cmd "$flag" hd 2>&1) || status=$?
             # Must be the last line: a warning followed by some later failure
             # would still start (or attach to) the server.
@@ -1577,7 +1580,9 @@ STUB
     # set it: herdr is not supported in a nested session, by design.
     test_sv_exports_no_sandbox() {
         local plain unsandboxed
+        # shellcheck disable=SC2310 # unset var yields empty output; failure is not fatal
         plain=$(unset SV_NO_SANDBOX; sv_cmd s -- /usr/bin/printenv SV_NO_SANDBOX 2>/dev/null || true)
+        # shellcheck disable=SC2310 # unset var yields empty output; failure is not fatal
         unsandboxed=$(sv_cmd -x s -- /usr/bin/printenv SV_NO_SANDBOX 2>/dev/null || true)
         if [[ -n "${SV_SESSION_ID:-}" ]]; then
             if [[ "$plain" == "true" && "$unsandboxed" == "true" ]]; then
@@ -2381,66 +2386,26 @@ STUB_EOF
     # Agent Args Tests
     ###############################################################################
 
-    test_codex_unicode_args() {
-        local stub_dir="$SHARED_WORKSPACE/user/.local/bin"
+    # Agent and shell commands share quote_zsh_args (sv's ZSH_COMMAND), so a
+    # plain printf exercises the same unicode/spaced-arg quoting without
+    # stubbing an agent binary into the user's shared config directory.
+    test_unicode_args() {
         local output
         local prompt="Reply with exactly 🍺 and no quotation marks."
         local status
 
-        CODEX_TEST_STUB_LINK="$stub_dir/codex"
-        CODEX_TEST_STUB_TARGET=""
-        # shellcheck disable=SC2031 # runs inside queue_test's subshell, which set TEST_ID
-        CODEX_TEST_BACKUP="$RESULTS_DIR/codex-$TEST_ID.backup"
-        cleanup_codex_unicode_args() {
-            if [[ -n "$CODEX_TEST_STUB_TARGET" ]]; then
-                rm -f "$CODEX_TEST_STUB_LINK" "$CODEX_TEST_STUB_TARGET"
-            fi
-            if [[ -e "$CODEX_TEST_BACKUP" || -L "$CODEX_TEST_BACKUP" ]]; then
-                mv "$CODEX_TEST_BACKUP" "$CODEX_TEST_STUB_LINK"
-                # shellcheck disable=SC2310 # best-effort restore; cleanup must not abort
-                sv_cmd s -- /bin/cp -p "$CODEX_TEST_STUB_LINK" "$SANDVAULT_HOME/.local/bin/codex" &>/dev/null || true
-            elif [[ -n "$CODEX_TEST_STUB_TARGET" ]]; then
-                # shellcheck disable=SC2310 # best-effort cleanup; must not abort
-                sv_cmd s -- /bin/rm -f "$SANDVAULT_HOME/.local/bin/codex" &>/dev/null || true
-            fi
-        }
-        trap cleanup_codex_unicode_args EXIT
-        trap 'exit 1' HUP INT TERM
-
-        mkdir -p "$stub_dir"
-        if [[ -e "$CODEX_TEST_STUB_LINK" || -L "$CODEX_TEST_STUB_LINK" ]]; then
-            mv "$CODEX_TEST_STUB_LINK" "$CODEX_TEST_BACKUP"
-        fi
-        CODEX_TEST_STUB_TARGET=$(mktemp "$stub_dir/codex-test-stub.XXXXXX")
-        cat > "$CODEX_TEST_STUB_TARGET" <<'CODEX_TEST_STUB'
-#!/bin/bash
-set -Eeuo pipefail
-printf 'codex-test-stub-argc:%s\n' "$#"
-for arg in "$@"; do
-    printf 'codex-test-stub-arg:<%s>\n' "$arg"
-done
-CODEX_TEST_STUB
-        chmod +x "$CODEX_TEST_STUB_TARGET"
-        ln -s "$(basename "$CODEX_TEST_STUB_TARGET")" "$CODEX_TEST_STUB_LINK"
-
         set +e
-        output=$(/usr/bin/script -q /dev/null "${SV_CMD[@]}" --no-build codex -- "🍺" "$prompt" 2>&1)
+        output=$(/usr/bin/script -q /dev/null "${SV_CMD[@]}" --no-build s -- /usr/bin/printf 'unicode-arg:<%s>\n' "🍺" "$prompt" 2>&1)
         status=$?
         set -e
 
-        trap - HUP INT TERM
-        cleanup_codex_unicode_args
-        trap - EXIT
-
-        if [[ "$status" -eq 0 && "$output" == *"codex-test-stub-arg:<🍺>"* && "$output" == *"codex-test-stub-arg:<$prompt>"* ]]; then
-            pass "sv codex -- preserves unicode args"
+        if [[ "$status" -eq 0 && "$output" == *"unicode-arg:<🍺>"* && "$output" == *"unicode-arg:<$prompt>"* ]]; then
+            pass "sv s -- preserves unicode args"
         else
-            fail "sv codex -- preserves unicode args" "codex-test-stub-arg:<🍺> and codex-test-stub-arg:<$prompt>" "$status | $output"
+            fail "sv s -- preserves unicode args" "unicode-arg:<🍺> and unicode-arg:<$prompt>" "$status | $output"
         fi
     }
-    wait_for_all_running_tests
-    queue_test test_codex_unicode_args
-    wait_for_all_running_tests
+    queue_test test_unicode_args
 
     ###############################################################################
     # Agentsview Export Tests
