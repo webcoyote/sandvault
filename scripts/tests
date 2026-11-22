@@ -13,9 +13,9 @@ unset SANDVAULT_ARGS
 # shellcheck source=../helpers/sv-identity.sh
 source "$SCRIPT_DIR/../helpers/sv-identity.sh"
 HOST_HOME="$(dscl . -read "/Users/$HOST_USER" NFSHomeDirectory | cut -d' ' -f2)"
-SANDVAULT_USER="sandvault-$HOST_USER"
+SANDVAULT_USER="sandvault-$HOST_USER$SV_SUFFIX"
 SANDVAULT_HOME="/Users/$SANDVAULT_USER"
-SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
+SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER$SV_SUFFIX"
 
 [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
 

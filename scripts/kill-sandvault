@@ -16,18 +16,32 @@ abort () {
     exit 1
 }
 
+# Parse --profile / -P
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --profile|-P) SV_PROFILE="${2:?--profile requires a name}"; shift 2 ;;
+        --profile=*)  SV_PROFILE="${1#--profile=}"; shift ;;
+        -P?*)         SV_PROFILE="${1#-P}"; shift ;;
+        *)            abort "unknown option: $1" ;;
+    esac
+done
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../helpers/sv-identity.sh
 source "$SCRIPT_DIR/../helpers/sv-identity.sh"
 
-SANDVAULT_USER="sandvault-$HOST_USER"
+SANDVAULT_USER="sandvault-$HOST_USER$SV_SUFFIX"
 if ! SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}') ; then
     abort "$SANDVAULT_USER does not exist"
 fi
 
 # Stop host-side browser instances (each sandvault session runs its own).
 # Sandvault supports both Chrome and Lightpanda backends.
-BROWSER_STATE_DIR="$HOME/.local/state/sandvault"
+if [[ -n "$SV_PROFILE" ]]; then
+    BROWSER_STATE_DIR="$HOME/.local/state/sandvault/$SV_PROFILE"
+else
+    BROWSER_STATE_DIR="$HOME/.local/state/sandvault"
+fi
 kill_browser() {
     local label="$1"
     local pid="$2"

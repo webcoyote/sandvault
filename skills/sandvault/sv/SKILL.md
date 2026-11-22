@@ -72,3 +72,7 @@ sandboxed Claude as its initial prompt via the `--` separator
 pass-through (`sv-clone` → `sv` → sandbox zshrc → `claude`).
 
 If `sv-clone` is not on PATH, the installed sandvault is out of date — tell the user to upgrade (e.g. `brew upgrade sandvault`) and retry. The old `sv --clone` flag has been removed in favor of the standalone `sv-clone` script.
+
+### Profiles
+
+If `SV_PROFILE` is set in the environment, use `--profile $SV_PROFILE` with both `sv-clone` and in the handoff path. The workspace becomes `/Users/Shared/sv-$USER-$SV_PROFILE/` instead of `/Users/Shared/sv-$USER/`.

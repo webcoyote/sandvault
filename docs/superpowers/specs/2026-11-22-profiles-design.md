@@ -1,6 +1,6 @@
 # Sandvault profiles
 
-**Status:** Draft (design)
+**Status:** Implemented
 **Date:** 2026-11-22
 **Issue:** #328
 
