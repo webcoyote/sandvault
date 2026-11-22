@@ -2136,6 +2136,88 @@ STUB_EOF
     queue_test test_sv_clone_dash_w_upgrades_read_only_key
     wait_for_all_running_tests
 
+    # Re-running sv-clone on an existing clone is a normal host workflow, but
+    # the sandbox can write the clone's .git/config between runs. Plant both
+    # attacks, then re-run as the host:
+    #   - core.alternateRefsCommand (plus an alternates file) runs a command
+    #     during fetch. It must never run as the host user, or any guest can
+    #     escape the sandbox by waiting for the next sv-clone.
+    #   - remote.origin.url aimed at another GitHub repo must not redirect the
+    #     deploy key (and, with -w, write access) to that repo.
+    test_sv_clone_rerun_ignores_guest_config() {
+        local src_repository clone_path key_file stub_dir log_file state_file
+        local marker_dir alt_repo expected_repo_path output status
+
+        src_repository="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel)"
+        clone_path="$CLONE_WORKSPACE/repos/$(basename "$src_repository")"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$(basename "$src_repository")"
+        expected_repo_path="$(github_repo_path "$(git -C "$src_repository" remote get-url origin)")"
+        stub_dir="$(mktemp -d)"
+        log_file="$(mktemp)"
+        state_file="$(mktemp)"
+        # World-writable (sticky) so the planted command can leave a marker
+        # whichever account it runs as.
+        marker_dir="$(mktemp -d /tmp/sv-clone-marker.XXXXXX)"
+        chmod 1777 "$marker_dir"
+        alt_repo="$CLONE_WORKSPACE/alt.git"
+
+        sv_cmd s -- rm -rf "$clone_path" "$alt_repo" >/dev/null 2>&1
+        sv_cmd s -- rm -f "$key_file" "$key_file.pub" >/dev/null 2>&1
+
+        set +e
+        output=$(sv_clone_cmd "$src_repository" -- --no-build shell -- true 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            fail "sv-clone re-run ignores guest config" "initial clone exits 0" "$status | $output"
+            return
+        fi
+
+        git init -q --bare "$alt_repo"
+        echo "$alt_repo/objects" > "$clone_path/.git/objects/info/alternates"
+        # The marker is named after SV_CLONE_TEST_CONTEXT, which is set only
+        # in sv-clone's own (host) environment: sv starts sandboxed commands
+        # with `env -i`, so a sandboxed run sees it unset. This tells host
+        # from sandbox even when the suite runs nested, where both are the
+        # same account.
+        git -C "$clone_path" config core.alternateRefsCommand \
+            "sh -c 'touch \"$marker_dir/\${SV_CLONE_TEST_CONTEXT:-sandbox}\"' x"
+        git -C "$clone_path" config remote.origin.url "git@github.com:sv-test-attacker/evil.git"
+
+        make_gh_stub "$stub_dir"
+        export GH_STUB_LOG="$log_file"
+        export GH_STUB_STATE="$state_file"
+
+        set +e
+        output=$(SV_CLONE_TEST_CONTEXT=host PATH="$stub_dir:$PATH" \
+            sv_clone_cmd -k "$src_repository" -- --no-build shell -- true 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            fail "sv-clone re-run ignores guest config" "re-run exits 0" "$status | $output"
+            return
+        fi
+
+        if [[ -e "$marker_dir/host" ]]; then
+            fail "sv-clone re-run never runs guest-configured commands as the host" \
+                "no $marker_dir/host" "planted core.alternateRefsCommand ran in sv-clone's host context"
+            return
+        fi
+
+        if grep -q 'sv-test-attacker' "$log_file" || ! grep -q -- "-R $expected_repo_path" "$log_file"; then
+            fail "sv-clone re-run takes the deploy-key repo from host input" \
+                "gh calls only for $expected_repo_path" "$(cat "$log_file")"
+            return
+        fi
+
+        pass "sv-clone re-run ignores guest-written repo config"
+        sv_cmd s -- rm -rf "$clone_path" "$alt_repo" >/dev/null 2>&1
+        sv_cmd s -- rm -f "$key_file" "$key_file.pub" >/dev/null 2>&1
+        rm -rf "$stub_dir" "$log_file" "$state_file" "$marker_dir"
+    }
+    queue_test test_sv_clone_rerun_ignores_guest_config
+    wait_for_all_running_tests
+
     # Test that -k with no gh CLI on PATH prints the public key for manual
     # setup and does not rewrite the origin to SSH.
     test_sv_clone_dash_k_no_gh() {
