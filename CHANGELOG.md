@@ -2,7 +2,21 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
-## [Unreleased]
+## [1.40.0] - 2026-11-23
+
+### Added
+
+- Add profiles: `sv --profile NAME` (or `SV_PROFILE`) runs the agent in a separate sandbox with its own home, Keychain, shared workspace, and SSH keys, and profiles cannot read each other's files. Without a profile, `sv` works as before. `sv profiles list` shows every sandbox you own, `sv uninstall --all` removes all of them and cleans up leftover files, and `sv-clone --profile NAME` clones into that profile's workspace ([#366](https://github.com/webcoyote/sandvault/pull/366))
+
+### Fixed
+
+- Fix a security issue where code inside the sandbox could tamper with a cloned repo's git config so that re-running `sv-clone` sent the deploy key to a different repository or ran commands on the host. Fetches now run inside the sandbox, and the repo URL comes from the host ([#365](https://github.com/webcoyote/sandvault/pull/365))
+- Fix agent subcommands such as `pi update`, `gemini mcp list`, and `opencode mcp list` failing or being treated as chat prompts when run inside the sandbox. pi only gets `--approve` on commands that accept it, so `pi mcp` and `pi auth` work again, and its startup banner now matches the flags it actually passes ([#360](https://github.com/webcoyote/sandvault/pull/360)) — thanks @jesserobbins!
+
+### Thanks to 2 contributors!
+
+- [@jesserobbins](https://github.com/jesserobbins)
+- [@webcoyote](https://github.com/webcoyote)
 
 ### Added
 
