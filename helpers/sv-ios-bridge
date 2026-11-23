@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import signal
 import subprocess
 import sys
@@ -87,6 +88,47 @@ BLOCKED_URL_SCHEMES = frozenset({"file", "data", "javascript", "about"})
 SIMPLE_STR_RE = re.compile(r"^[\x20-\x7e]{1,512}$")
 
 UDID = ""  # Set by main() before the server starts.
+
+# Shared scratch directory (screenshots and /view targets); set by main().
+SCRATCH_DIR = None
+
+# Subdirectory of the scratch dir that the bridge chdirs into. The scratch dir
+# is under $SHARED_WORKSPACE/_sandvault, which the sandbox user can write, so a
+# host process must not run `iosef` there: the guest could plant `.iosef/` as a
+# symlink and have the host write wherever it points. Keeping the working
+# directory host-only means `iosef --local` still isolates its state per bridge
+# without trusting anything inside the shared tree.
+HOST_WORK_DIR_NAME = ".work"
+
+
+def prepare_host_work_dir(scratch_dir):
+    """Return a host-only working directory inside scratch_dir, creating it.
+
+    Anything already at that path is writable by the sandbox user, so it may be
+    a symlink or a directory the guest planted; replace it with a real directory
+    owned by this user, mode 0700.
+    """
+    work = os.path.join(scratch_dir, HOST_WORK_DIR_NAME)
+    try:
+        st = os.lstat(work)
+    except FileNotFoundError:
+        st = None
+    if st is not None and (
+        stat.S_ISLNK(st.st_mode)
+        or not stat.S_ISDIR(st.st_mode)
+        or st.st_uid != os.getuid()
+    ):
+        os.unlink(work)
+        st = None
+    if st is None:
+        os.mkdir(work)
+        os.chmod(work, 0o700)
+    return work
+
+
+def screenshot_path(prefix, suffix):
+    """Path for a screenshot in the shared scratch dir (not the host work dir)."""
+    return os.path.join(SCRATCH_DIR, f"{prefix}-{uuid.uuid4().hex}.{suffix}")
 
 # Readiness state, updated by the boot-watcher thread.
 # _ready_event is set once boot completes (success or failure).
@@ -454,9 +496,7 @@ class Handler(BaseHTTPRequestHandler):
         # Detect actual image format from magic bytes so the file extension
         # is correct.  iosef may produce JPEG despite no explicit guarantee.
         ext = _image_ext(src_path)
-        out_path = os.path.join(
-            os.getcwd(), f"screenshot-view-{uuid.uuid4().hex}.{ext}"
-        )
+        out_path = screenshot_path("screenshot-view", ext)
         try:
             os.rename(src_path, out_path)
         except OSError:
@@ -477,9 +517,7 @@ class Handler(BaseHTTPRequestHandler):
         # pixel resolution (3× points) and works headless — no visible
         # Simulator.app window required.
         # Save to the bridge scratch dir (not tmp) so the agent can read it.
-        out_path = os.path.join(
-            os.getcwd(), f"screenshot-pixels-{uuid.uuid4().hex}.png"
-        )
+        out_path = screenshot_path("screenshot-pixels", "png")
         argv = ["xcrun", "simctl", "io", UDID, "screenshot", out_path]
         rc, stdout, stderr = run_argv(argv)
         if rc != 0 or not os.path.exists(out_path):
@@ -587,6 +625,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global SCRATCH_DIR
     p = argparse.ArgumentParser()
     p.add_argument("--udid", required=True)
     p.add_argument("--host", default="127.0.0.1")
@@ -617,7 +656,8 @@ def main():
 
         atexit.register(_cleanup_scratch)
 
-    os.chdir(scratch_dir)
+    SCRATCH_DIR = scratch_dir
+    os.chdir(prepare_host_work_dir(scratch_dir))
 
     # Watch boot progress in the background; the bridge can serve /ready
     # immediately and rejects other endpoints with 503 until ready.
