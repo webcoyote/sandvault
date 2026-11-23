@@ -1917,7 +1917,13 @@ case "$1" in
                         ;;
                     add)
                         shift 3
-                        shift # public key path, unused by the stub
+                        # Keep the key body the script handed us, so a test can
+                        # assert what was uploaded rather than just that an add
+                        # happened.
+                        if [[ -f "$1" ]]; then
+                            cp "$1" "$GH_STUB_STATE.received"
+                        fi
+                        shift # public key path
                         title=""
                         write=false
                         while [[ $# -gt 0 ]]; do
@@ -2216,6 +2222,29 @@ STUB_EOF
             return
         fi
 
+        # The upload must be bound to what was verified: a path inside the
+        # guest-writable workspace can be swapped between the check and the
+        # `gh` call.
+        if [[ "$add_line" == *"$CLONE_WORKSPACE"* ]]; then
+            fail "sv-clone -k uploads the verified copy" \
+                "the add line names a host-private file, not a workspace path" \
+                "$add_line"
+            return
+        fi
+
+        # The key that reached gh must be the one derived from the private half,
+        # not whatever sits in the guest-writable workspace at upload time.
+        if [[ ! -f "$state_file.received" ]]; then
+            fail "sv-clone -k uploads the verified key" "gh received a key body" "nothing recorded"
+            return
+        fi
+        if [[ "$(cat "$state_file.received")" != "$(ssh-keygen -y -f "$key_file" | awk '{print $1, $2}')" ]]; then
+            fail "sv-clone -k uploads the verified key" \
+                "uploaded body matches ssh-keygen -y of the private half" \
+                "$(cat "$state_file.received")"
+            return
+        fi
+
         # Re-running -k against a repo whose key is already registered
         # (per the stub's state file) should still (re)activate the SSH
         # origin and sshCommand — idempotent, not a silent no-op. Remove
@@ -2247,6 +2276,104 @@ STUB_EOF
         rm -rf "$stub_dir" "$log_file" "$state_file"
     }
     queue_test test_sv_clone_dash_k_read_only
+    wait_for_all_running_tests
+
+    # The deploy key pair lives in the shared workspace, which the sandbox user
+    # can write. Verifying that the two halves agree catches a replaced public
+    # half; comparing them against a host-owned record catches both halves being
+    # replaced. Either way the host must not hand a key it did not create to
+    # `gh repo deploy-key add`, because it uploads with the user's token.
+    test_sv_clone_deploy_key_is_verified() {
+        local workdir body fn run record_dir priv other rc
+        body=$(sed -n '/^deploy_public_body() {$/,/^}$/p' "$SCRIPT_DIR/../sv-clone")
+        fn=$(sed -n '/^verify_deploy_keypair() {$/,/^}$/p' "$SCRIPT_DIR/../sv-clone")
+        if [[ -z "$body" || -z "$fn" ]]; then
+            fail "deploy key is verified before use" \
+                "deploy_public_body and verify_deploy_keypair in sv-clone" "function not found"
+            return
+        fi
+
+        workdir="$(mktemp -d)"; record_dir="$(mktemp -d)"
+        priv="$workdir/deploy_probe"
+        ssh-keygen -t ed25519 -f "$priv" -N "" -q -C "sandvault-deploy-probe@test"
+
+        run="$workdir/run"
+        {
+            echo '#!/bin/bash'
+            echo 'set -Eeuo pipefail'
+            echo 'abort() { echo "ABORT: $*" >&2; exit 1; }'
+            echo 'debug() { :; }'
+            echo 'info() { :; }'
+            echo 'warn() { echo "WARN: $*" >&2; }'
+            printf '%s\n' "$body"
+            printf '%s\n' "$fn"
+            echo 'verify_deploy_keypair'
+            echo 'cp "$DEPLOY_KEY_PUB_VERIFIED" "$PUBLISHED_COPY"'
+            echo 'stat -f "%Lp" "$DEPLOY_KEY_PUB_VERIFIED" > "$PUBLISHED_MODE"'
+        } > "$run"
+        chmod +x "$run"
+        verify() {
+            REPOSITORY_NAME=probe \
+                DEPLOY_KEY_DIR="$workdir" \
+                DEPLOY_KEY_PRIV="$priv" \
+                DEPLOY_KEY_PUB="$priv.pub" \
+                DEPLOY_KEY_RECORD_DIR="$record_dir" \
+                PUBLISHED_COPY="$workdir/published" \
+                PUBLISHED_MODE="$workdir/published.mode" \
+                /bin/bash "$run" 2>&1
+        }
+
+        # 1. A pair the host just generated, with no record yet: accepted, and
+        #    the record adopted so later runs can spot a replacement.
+        rc=0; verify >"$workdir/out1" || rc=$?
+        if (( rc != 0 )); then
+            fail "deploy key is verified before use" \
+                "a freshly generated pair verifies" "exit $rc: $(cat "$workdir/out1")"
+            rm -rf "$workdir" "$record_dir"; return
+        fi
+        if [[ ! -f "$record_dir/deploy_probe.pub" ]]; then
+            fail "deploy key is verified before use" \
+                "host-owned record written on first sight" "no record"
+            rm -rf "$workdir" "$record_dir"; return
+        fi
+        if [[ "$(cat "$workdir/published" 2>/dev/null)" != "$(ssh-keygen -y -f "$priv" | awk '{print $1, $2}')" ]]; then
+            fail "deploy key is verified before use" \
+                "the published key is the one derived from the private half" \
+                "$(cat "$workdir/published" 2>/dev/null)"
+            rm -rf "$workdir" "$record_dir"; return
+        fi
+        if [[ "$(cat "$workdir/published.mode" 2>/dev/null)" != "600" ]]; then
+            fail "deploy key is verified before use" \
+                "published key is host-private (0600)" \
+                "$(cat "$workdir/published.mode" 2>/dev/null)"
+            rm -rf "$workdir" "$record_dir"; return
+        fi
+
+        # 2. Public half replaced, private half untouched (the cheap attack).
+        other="$(mktemp -d)"
+        ssh-keygen -t ed25519 -f "$other/plant" -N "" -q -C "sandbox@plant"
+        cp "$other/plant.pub" "$priv.pub"
+        rc=0; verify >"$workdir/out2" || rc=$?
+        if (( rc == 0 )); then
+            fail "deploy key is verified before use" \
+                "a replaced public half is rejected" "accepted it"
+            rm -rf "$workdir" "$record_dir" "$other"; return
+        fi
+
+        # 3. Both halves replaced, so they agree with each other but not with
+        #    the host's record (the attack that a pair check alone misses).
+        cp "$other/plant" "$priv"; cp "$other/plant.pub" "$priv.pub"
+        rc=0; verify >"$workdir/out3" || rc=$?
+        if (( rc == 0 )); then
+            fail "deploy key is verified before use" \
+                "a pair that disagrees with the host record is rejected" "accepted it"
+            rm -rf "$workdir" "$record_dir" "$other"; return
+        fi
+
+        pass "deploy key is verified before use (pair, then host record)"
+        rm -rf "$workdir" "$record_dir" "$other"
+    }
+    queue_test test_sv_clone_deploy_key_is_verified
     wait_for_all_running_tests
 
     # Test that -w generates a deploy key with write access.
