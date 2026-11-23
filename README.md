@@ -181,6 +181,32 @@ For local Git repositories, sandvault also wires remotes:
 - This lets you run `git fetch sandvault` from the original local Git repository to pull commits made in the sandvault Git repository.
 
 
+## Profiles
+
+Profiles let you run separate sandboxes with isolated credentials, SSH keys, and workspaces. Each profile gets its own macOS user account.
+
+```bash
+# Run Claude Code in the "work" profile
+sv --profile work claude
+
+# List all profiles owned by this user
+sv profiles list
+
+# Clone a repo into a profile's workspace
+sv-clone --profile work https://github.com/org/repo.git
+
+# Remove a specific profile
+sv --profile work uninstall
+
+# Remove all profiles and sweep orphan files
+sv uninstall --all
+```
+
+You can also set a default profile via the `SV_PROFILE` environment variable. The `--profile` flag overrides it.
+
+Profile names must match `[a-z0-9]{1,16}`. With no profile selected, behavior is exactly as before.
+
+
 ## Native Install
 
 By default, SandVault installs AI tools via Homebrew on the host side. With `--native-install` (`-N`), tools are instead installed inside the sandbox using their own installers:

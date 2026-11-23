@@ -110,6 +110,18 @@ while [[ $# -gt 0 ]]; do
             ((SV_VERBOSE+=3)) || true
             shift
             ;;
+        --profile|-P)
+            SV_PROFILE="${2:?--profile requires a name}"
+            shift 2
+            ;;
+        --profile=*)
+            SV_PROFILE="${1#--profile=}"
+            shift
+            ;;
+        -P?*)
+            SV_PROFILE="${1#-P}"
+            shift
+            ;;
         -k|--repo-deploy-key)
             DEPLOY_KEY=true
             shift
@@ -126,6 +138,7 @@ while [[ $# -gt 0 ]]; do
             echo "launch an sv session there."
             echo ""
             echo "Options:"
+            echo "  -P, --profile NAME      Use a named profile (separate sandbox)"
             echo "  -k, --repo-deploy-key   Create a deploy key for this repo and upload it"
             echo "                          to GitHub (read-only)"
             echo "  -w, --allow-repo-write  Allow the deploy key to push to this repo"
@@ -160,16 +173,13 @@ fi
 ###############################################################################
 # Determine user and workspace paths
 ###############################################################################
-if [[ "$USER" == sandvault-* ]]; then
-    HOST_USER="${USER#sandvault-}"
-else
-    HOST_USER="$USER"
-fi
+# shellcheck source=helpers/sv-identity.sh
+source "$WORKSPACE/helpers/sv-identity.sh"
 readonly HOST_USER
 # SV_CLONE_WORKSPACE_ROOT relocates the workspace so the test suite can clone
 # into a throwaway directory instead of the real one — see scripts/tests.  It
 # is not part of the supported interface; unset, this is the normal location.
-readonly SHARED_WORKSPACE="${SV_CLONE_WORKSPACE_ROOT:-/Users/Shared/sv-$HOST_USER}"
+readonly SHARED_WORKSPACE="${SV_CLONE_WORKSPACE_ROOT:-/Users/Shared/sv-$HOST_USER$SV_SUFFIX}"
 readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
 
 if [[ ! -d "$SHARED_WORKSPACE" ]]; then
@@ -455,5 +465,11 @@ if [[ "$REPO_DIR_INSERTED" == false ]]; then
     LAUNCH_ARGS+=("$REPO_DIR")
 fi
 
+# Pass --profile through to sv if set
+SV_PROFILE_ARGS=()
+if [[ -n "$SV_PROFILE" ]]; then
+    SV_PROFILE_ARGS=("--profile" "$SV_PROFILE")
+fi
+
 info "Starting sandvault in $REPO_DIR..."
-exec "$SV" "${LAUNCH_ARGS[@]}"
+exec "$SV" "${SV_PROFILE_ARGS[@]+"${SV_PROFILE_ARGS[@]}"}" "${LAUNCH_ARGS[@]}"

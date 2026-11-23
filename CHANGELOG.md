@@ -2,6 +2,17 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Profiles**: `sv --profile work cl` runs the agent in a separate sandbox (`sandvault-$USER-work`) with its own home, Keychain, shared workspace, and SSH keys. Profiles cannot read each other's files. ([#328](https://github.com/webcoyote/sandvault/issues/328))
+  - `--profile NAME` flag (or `SV_PROFILE` env var) selects a profile; without it, behavior is unchanged
+  - `sv profiles list` shows all sandboxes owned by the current user
+  - `sv uninstall --all` removes every owned sandbox and sweeps orphan files
+  - `sv-clone --profile NAME` clones into the profile's workspace
+  - `scripts/kill-sandvault --profile NAME` kills a specific profile's processes
+
 ## [1.39.0] - 2026-11-11
 
 ### Fixed

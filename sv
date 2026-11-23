@@ -51,7 +51,7 @@ configure_ssh_access() {
             -f "$SSH_KEYFILE_PRIV" \
             -N "" \
             -q \
-            -C "${HOST_USER}-to-sandvault@${SSH_HOST}"
+            -C "${HOST_USER}-to-${SANDVAULT_USER}@${SSH_HOST}"
     fi
 
     # Generate SANDVAULT_USER authorized_keys: every file in AUTHORIZED_KEYS_DIR
@@ -60,6 +60,8 @@ configure_ssh_access() {
     mkdir -p "$AUTHORIZED_KEYS_DIR"
     tmp_authorized_keys="$(mktemp)"
     for key_file in "$AUTHORIZED_KEYS_DIR"/*; do
+        # Skip non-files (profile subdirectories live alongside key files
+        # in the default profile's authorized_keys.d/).
         [[ -f "$key_file" ]] || continue
         # "ssh-keygen -l" reports the public half of a private key too, so check
         # for that separately: copying one into the guest would hand the
@@ -120,23 +122,74 @@ fi
 readonly NESTED
 readonly SV_SESSION_ID
 
-# Each user on the computer can have their own sandvault.
-# Inside sandvault, USER will be sandvault-<name>, where name is the host-users's name.
-if [[ "$USER" == sandvault-* ]]; then
-    HOST_USER="${USER#sandvault-}"
-else
-    HOST_USER="$USER"
+# Early --profile parse: profile must be known before resource constants are
+# defined, because nearly all of them depend on it.  Scan argv (and
+# SANDVAULT_ARGS) for --profile NAME / -P NAME, then fall back to SV_PROFILE
+# from the environment.  The flag wins over the environment.
+_sv_early_profile=""
+_sv_scan=("$@")
+if [[ -n "${SANDVAULT_ARGS:-}" ]]; then
+    while IFS= read -r _arg; do _sv_scan+=("$_arg")
+    done < <(xargs -n1 printf '%s\n' <<< "$SANDVAULT_ARGS")
 fi
-readonly HOST_USER
-readonly SANDVAULT_USER="sandvault-$HOST_USER"
+_sv_i=0
+while (( _sv_i < ${#_sv_scan[@]} )); do
+    case "${_sv_scan[$_sv_i]}" in
+        --profile|-P)
+            (( _sv_i + 1 < ${#_sv_scan[@]} )) || { echo "--profile requires a name" >&2; exit 1; }
+            _sv_early_profile="${_sv_scan[$(( _sv_i + 1 ))]}"
+            break
+            ;;
+        --profile=*)
+            _sv_early_profile="${_sv_scan[$_sv_i]#--profile=}"
+            break
+            ;;
+        -P*)
+            _sv_early_profile="${_sv_scan[$_sv_i]#-P}"
+            break
+            ;;
+        --) break ;;
+        *) ;;
+    esac
+    (( _sv_i++ )) || true
+done
+unset _sv_scan _sv_i _arg
+
+# Apply: flag wins over environment
+if [[ -n "$_sv_early_profile" ]]; then
+    SV_PROFILE="$_sv_early_profile"
+else
+    SV_PROFILE="${SV_PROFILE:-}"
+fi
+unset _sv_early_profile
+
+# Validate profile name
+if [[ -n "$SV_PROFILE" ]]; then
+    if ! [[ "$SV_PROFILE" =~ ^[a-z0-9]{1,16}$ ]]; then
+        echo "Invalid profile name '$SV_PROFILE': must match [a-z0-9]{1,16}" >&2
+        exit 1
+    fi
+fi
+
+# Each user on the computer can have their own sandvault.
+# shellcheck source=helpers/sv-identity.sh
+source "$WORKSPACE/helpers/sv-identity.sh"
+readonly HOST_USER SV_PROFILE SV_SUFFIX
+
+# Derived account name must fit in 64 characters (Unix socket path limit).
+readonly SANDVAULT_USER="sandvault-$HOST_USER$SV_SUFFIX"
+if (( ${#SANDVAULT_USER} > 64 )); then
+    echo "Derived account name '$SANDVAULT_USER' exceeds 64 characters" >&2
+    exit 1
+fi
 # The sandvault user is a local account reached via the Mac's own sshd, so SSH
 # connections are loopback. Use the IPv4 loopback literal rather than $HOSTNAME
 # or "localhost": some machines (e.g. company-issued Macs with auto-generated
 # names) have a hostname that does not resolve, and even "localhost" depends on
 # /etc/hosts. A literal address skips name resolution entirely. See issue #188.
 readonly SSH_HOST="127.0.0.1"
-readonly SANDVAULT_GROUP="sandvault-$HOST_USER"
-readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
+readonly SANDVAULT_GROUP="sandvault-$HOST_USER$SV_SUFFIX"
+readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER$SV_SUFFIX"
 # Sandvault-private subdir of $SHARED_WORKSPACE. Holds setup scripts, scratch
 # state, deploy keys, and agentsview symlinks — anything sandvault manages on
 # behalf of the host. Uninstall is `rm -rf` of this directory.
@@ -171,10 +224,14 @@ readonly SUDOERS_BUILD_HOME_SCRIPT_NAME="/var/sandvault/buildhome-$SANDVAULT_USE
 # Installation marker file
 readonly INSTALL_ORG="$HOME/.config/codeofhonor"
 readonly INSTALL_PRODUCT="$INSTALL_ORG/sandvault"
-readonly INSTALL_MARKER="$INSTALL_PRODUCT/install"
+readonly INSTALL_MARKER="$INSTALL_PRODUCT/install$SV_SUFFIX"
 
 # Per-session state (logs, migration markers)
-readonly SESSION_DIR="$HOME/.local/state/sandvault"
+if [[ -n "$SV_PROFILE" ]]; then
+    readonly SESSION_DIR="$HOME/.local/state/sandvault/$SV_PROFILE"
+else
+    readonly SESSION_DIR="$HOME/.local/state/sandvault"
+fi
 # One-shot migration markers. Each marker means "this migration already
 # ran on this host"; presence skips the migration on subsequent runs.
 readonly ACL_LEGACY_STRIPPED_MARKER="$SESSION_DIR/acl-legacy-stripped"
@@ -188,19 +245,23 @@ IOS_BRIDGE_SCRATCH_DIR=""
 IOS_SIM_UDID=""
 
 readonly SSH_DIR="$HOME/.ssh"
-readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
+readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault$SV_SUFFIX"
 readonly SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
 
 # Additional public keys allowed to SSH into the sandvault user, one key per
 # file. Kept in the host user's config directory so it survives upgrades and so
 # the (untrusted) sandvault user cannot grant itself extra access.
-readonly AUTHORIZED_KEYS_DIR="$INSTALL_PRODUCT/authorized_keys.d"
+if [[ -n "$SV_PROFILE" ]]; then
+    readonly AUTHORIZED_KEYS_DIR="$INSTALL_PRODUCT/authorized_keys.d/$SV_PROFILE"
+else
+    readonly AUTHORIZED_KEYS_DIR="$INSTALL_PRODUCT/authorized_keys.d"
+fi
 
 # Generated authorized_keys for the sandvault user, installed by the build-home
 # script. Kept in the host user's config directory, not $WORKSPACE, because
 # $WORKSPACE may be a shared install (e.g. Homebrew) that this user cannot
 # write and that other host users also use.
-readonly GUEST_AUTHORIZED_KEYS="$INSTALL_PRODUCT/authorized_keys"
+readonly GUEST_AUTHORIZED_KEYS="$INSTALL_PRODUCT/authorized_keys$SV_SUFFIX"
 
 # Sandbox profile to restrict /Volumes access (external drives)
 # Stored in /var/sandvault/ so sandvault user cannot modify it
@@ -722,6 +783,57 @@ configure_shared_folder_permssions() {
     fi
 }
 
+# List sandboxes owned by $HOST_USER.  An account "sandvault-$HOST_USER" or
+# "sandvault-$HOST_USER-*" is owned when its like-named group lists
+# $HOST_USER as a member.  Outputs one line per sandbox: the profile name
+# ("" for the default, the suffix otherwise).
+owned_profiles() {
+    local acct prefix profile
+    prefix="sandvault-$HOST_USER"
+    while IFS= read -r acct; do
+        [[ -n "$acct" ]] || continue
+        # Check group membership — the owner was added by dseditgroup -a.
+        if ! dseditgroup -o checkmember -m "$HOST_USER" "$acct" &>/dev/null; then
+            continue
+        fi
+        if [[ "$acct" == "$prefix" ]]; then
+            echo ""   # default profile
+        else
+            profile="${acct#"$prefix-"}"
+            echo "$profile"
+        fi
+    done < <(dscl . -list /Users 2>/dev/null | grep -E "^${prefix}$|^${prefix}-" || true)
+}
+
+list_profiles() {
+    local found=false profile
+    while IFS= read -r profile; do
+        found=true
+        if [[ -z "$profile" ]]; then
+            echo "(default)"
+        else
+            echo "$profile"
+        fi
+    done < <(owned_profiles)
+    if [[ "$found" == "false" ]]; then
+        info "No profiles found for $HOST_USER"
+    fi
+}
+
+# Collision guard: abort if the target account already exists and is owned
+# by a different host user (section 4 of the design spec).
+collision_guard() {
+    # Only matters when building — if the account doesn't exist yet, no
+    # collision is possible.
+    if ! dscl . -read "/Groups/$SANDVAULT_GROUP" &>/dev/null 2>&1; then
+        return 0
+    fi
+    if dseditgroup -o checkmember -m "$HOST_USER" "$SANDVAULT_GROUP" &>/dev/null; then
+        return 0
+    fi
+    abort "Account $SANDVAULT_USER already exists and is not owned by $HOST_USER"
+}
+
 uninstall() {
     info "Uninstalling..."
     force_cleanup_sandvault_processes
@@ -776,6 +888,131 @@ uninstall() {
     fi
 }
 
+# Remove every owned sandbox, then sweep orphaned per-profile host files
+# (keys, authorized_keys.d/<p>/, markers, session dirs).
+uninstall_all() {
+    local profile suffix acct
+    local prefix="sandvault-$HOST_USER"
+
+    # Pass 1: uninstall every owned sandbox using the normal uninstall path.
+    # We re-derive the constants for each profile inline.
+    while IFS= read -r profile; do
+        if [[ -n "$profile" ]]; then suffix="-$profile"; else suffix=""; fi
+        acct="${prefix}${suffix}"
+        info "Uninstalling ${profile:-(default)} ($acct)..."
+
+        # Re-derive per-profile constants for this iteration
+        local p_user="$acct"
+        local p_group="$acct"
+        local p_workspace="/Users/Shared/sv-$HOST_USER${suffix}"
+        local p_private="$p_workspace/_sandvault"
+        local p_sudoers="/etc/sudoers.d/50-nopasswd-for-${p_user//./_}"
+        local p_sudoers_legacy="/etc/sudoers.d/50-nopasswd-for-$p_user"
+        local p_build_home="/var/sandvault/buildhome-$p_user"
+        local p_sandbox="/var/sandvault/sandbox-$p_user.sb"
+        local p_install_marker="$INSTALL_PRODUCT/install${suffix}"
+        local p_ssh_priv="$SSH_DIR/id_ed25519_sandvault${suffix}"
+        local p_ssh_pub="${p_ssh_priv}.pub"
+        local p_guest_ak="$INSTALL_PRODUCT/authorized_keys${suffix}"
+        local p_session_dir
+        if [[ -n "$profile" ]]; then
+            p_session_dir="$HOME/.local/state/sandvault/$profile"
+        else
+            p_session_dir="$HOME/.local/state/sandvault"
+        fi
+
+        # Kill processes
+        local p_uid
+        if p_uid=$(dscl . -read "/Users/$p_user" UniqueID 2>/dev/null | awk '{print $2}') && [[ -n "$p_uid" ]]; then
+            sudo launchctl bootout "user/$p_uid" 2>/dev/null || true
+            sudo /usr/bin/pkill -9 -u "$p_user" 2>/dev/null || true
+        fi
+
+        # Remove install marker
+        rm -rf "$p_install_marker"
+
+        # Remove sudoers, build script, sandbox profile
+        sudo rm -rf "$p_sudoers" "$p_sudoers_legacy"
+        sudo rm -rf "$p_build_home" "$p_sandbox"
+
+        # Remove ACLs on workspace
+        if [[ -d "$p_workspace" ]]; then
+            sudo chmod -RN "$p_workspace" 2>/dev/null || true
+            sudo chown -R "$HOST_USER:$(id -gn)" "$p_workspace" 2>/dev/null || true
+            sudo chmod -R u=rwX,go= "$p_workspace" 2>/dev/null || true
+        fi
+
+        # Remove group membership and user/group
+        sudo dseditgroup -o edit -d "$HOST_USER" -t user "$p_group" 2>/dev/null || true
+        sudo dseditgroup -o edit -d "$p_user" -t user com.apple.access_ssh 2>/dev/null || true
+        sudo dscl . -delete "/Users/$p_user" &>/dev/null || true
+        sudo dscl . -delete "/Groups/$p_group" &>/dev/null || true
+        sudo rm -rf "/Users/$p_user"
+
+        # Remove SSH keys
+        rm -rf "$p_ssh_priv" "$p_ssh_pub"
+
+        # Remove authorized_keys and per-profile subdir
+        rm -rf "$p_guest_ak"
+        if [[ -n "$profile" ]]; then
+            rm -rf "$INSTALL_PRODUCT/authorized_keys.d/$profile"
+        fi
+
+        # Remove session state
+        rm -rf "$p_session_dir"
+
+        # Remove workspace (keep if not empty)
+        rm -rf "$p_private"
+        rm -f "$p_workspace/SANDVAULT-README.md"
+        rmdir "$p_workspace" 2>/dev/null || true
+        if [[ -d "$p_workspace" ]]; then
+            info "Keeping $p_workspace (not empty)"
+        fi
+    done < <(owned_profiles)
+
+    # Pass 2: sweep orphaned per-profile host files that might remain if
+    # the account was already deleted but host files weren't cleaned up.
+    local orphan
+    # SSH keys
+    for orphan in "$SSH_DIR"/id_ed25519_sandvault-*; do
+        [[ -f "$orphan" ]] || continue
+        rm -f "$orphan" "${orphan}.pub"
+        trace "Swept orphan key: $orphan"
+    done
+    # authorized_keys.d profile subdirs
+    for orphan in "$INSTALL_PRODUCT/authorized_keys.d"/*/; do
+        [[ -d "$orphan" ]] || continue
+        rm -rf "$orphan"
+        trace "Swept orphan authorized_keys.d: $orphan"
+    done
+    # authorized_keys-<profile> files
+    for orphan in "$INSTALL_PRODUCT"/authorized_keys-*; do
+        [[ -f "$orphan" ]] || continue
+        rm -f "$orphan"
+        trace "Swept orphan authorized_keys: $orphan"
+    done
+    # install-<profile> markers
+    for orphan in "$INSTALL_PRODUCT"/install-*; do
+        [[ -f "$orphan" ]] || continue
+        rm -f "$orphan"
+        trace "Swept orphan install marker: $orphan"
+    done
+    # Session dirs (profile subdirs of ~/.local/state/sandvault/)
+    for orphan in "$HOME/.local/state/sandvault"/*/; do
+        [[ -d "$orphan" ]] || continue
+        rm -rf "$orphan"
+        trace "Swept orphan session dir: $orphan"
+    done
+
+    # Clean up parent dirs if now empty
+    sudo rmdir "$(dirname "$INSTALL_PRODUCT/x")" 2>/dev/null || true
+    rmdir "$INSTALL_PRODUCT" &>/dev/null || true
+    rmdir "$INSTALL_ORG" &>/dev/null || true
+    sudo rmdir /var/sandvault 2>/dev/null || true
+
+    info "All profiles removed"
+}
+
 
 ###############################################################################
 # Parse command line
@@ -802,6 +1039,7 @@ show_help() {
     echo "Usage: sv [options] command [-- args ...]"
     echo ""
     echo "Options:"
+    echo "  -P, --profile NAME   Use a named profile (separate sandbox, keys, workspace)"
     echo "  -s, --ssh            Connect via SSH [default: use account impersonation]"
     echo "  -r, --rebuild        Rebuild configuration and file permissions/ACLs"
     echo "  -v, --verbose        Enable verbose output"
@@ -829,11 +1067,14 @@ show_help() {
     echo "  hd, herdr  [PATH]    Open herdr agent multiplexer in sandvault"
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
-    echo "  u, uninstall         Remove sandvault; keep shared files"
+    echo "  profiles [list]      List sandboxes owned by this user"
+    echo "  u, uninstall         Remove sandvault (current profile); keep shared files"
+    echo "  uninstall --all      Remove all owned sandboxes and sweep orphan files"
     echo ""
     echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, pi, muse, herdr, shell)"
     echo ""
     echo "Environment:"
+    echo "  SV_PROFILE           Default profile name (--profile flag overrides)"
     echo "  SANDVAULT_ARGS       Default arguments (prepended to command line)"
     echo "                       Example: export SANDVAULT_ARGS=\"--verbose --ssh --browser\""
     exit 0
@@ -861,6 +1102,14 @@ while [[ $# -gt 0 ]]; do
                 shift
             done
             break
+            ;;
+        --profile|-P)
+            # Already parsed in early --profile scan; skip the value.
+            shift; shift
+            ;;
+        --profile=*|-P?*)
+            # Already parsed in early --profile scan; skip.
+            shift
             ;;
         -s|--ssh)
             MODE=ssh
@@ -975,6 +1224,17 @@ case "${1:-}" in
     b|build)
         COMMAND=build
         ;;
+    profiles)
+        case "${2:-}" in
+            list|ls|"")
+                list_profiles
+                ;;
+            *)
+                abort "unknown profiles subcommand: ${2:-}"
+                ;;
+        esac
+        exit 0
+        ;;
     u|uninstall)
         if [[ "$NESTED" == "true" ]]; then
             abort "sandvault running recursively; cannot uninstall"
@@ -982,7 +1242,16 @@ case "${1:-}" in
         if [[ "$NO_BUILD" == "true" ]]; then
             abort "--no-build set: refusing to uninstall"
         fi
-        uninstall
+        if [[ "${2:-}" == "--all" ]]; then
+            uninstall_all
+        else
+            uninstall
+            # After single-profile uninstall, hint at remaining profiles.
+            _remaining=$(owned_profiles | wc -l)
+            if (( _remaining > 0 )); then
+                info "$_remaining profile(s) still installed; use 'sv uninstall --all' to remove everything"
+            fi
+        fi
         exit 0
         ;;
     *)
@@ -1188,6 +1457,7 @@ release_id_alloc_lock() {
 }
 
 if [[ "$REBUILD" == "true" ]]; then
+    collision_guard
     debug "Creating $SANDVAULT_USER user and $SANDVAULT_GROUP group..."
 
     acquire_id_alloc_lock
@@ -1849,6 +2119,13 @@ if [[ "$MODE" == "ssh" ]]; then
     EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/\\*")
 else
     EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/*")
+fi
+
+# Pass identity so sandbox-side scripts can resolve the host user and profile
+# without ambiguous prefix-stripping.  See design spec section 3.
+EXTRA_ENV+=("SV_HOST_USER=$HOST_USER")
+if [[ -n "$SV_PROFILE" ]]; then
+    EXTRA_ENV+=("SV_PROFILE=$SV_PROFILE")
 fi
 
 if [[ "$NATIVE_INSTALL" == "true" ]]; then
