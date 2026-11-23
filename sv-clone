@@ -77,6 +77,53 @@ git_repo() {
         -C "$REPO_DIR" "$@"
 }
 
+# The deploy key pair lives in the shared workspace, which the sandbox user can
+# write, and the public half is what `gh repo deploy-key add` uploads under the
+# host user's token. Verify the halves agree before anything uses them.
+deploy_public_body() {
+    awk 'NR==1 {print $1, $2}' "$1" 2>/dev/null
+}
+verify_deploy_keypair() {
+    local derived record
+    if [[ ! -f "$DEPLOY_KEY_PRIV" || ! -f "$DEPLOY_KEY_PUB" ]]; then
+        abort "deploy key for $REPOSITORY_NAME is incomplete: remove $DEPLOY_KEY_DIR to regenerate it"
+    fi
+    derived="$(ssh-keygen -y -f "$DEPLOY_KEY_PRIV" 2>/dev/null | awk 'NR==1 {print $1, $2}')" || derived=""
+    if [[ -z "$derived" || "$derived" != "$(deploy_public_body "$DEPLOY_KEY_PUB")" ]]; then
+        abort "deploy key for $REPOSITORY_NAME does not match its public half; the shared workspace may have been modified. Remove $DEPLOY_KEY_DIR to regenerate it"
+    fi
+
+    # Agreement above only proves the two files agree with each other, which a
+    # guest that replaced both halves also achieves. Compare against the copy
+    # the host made, which the guest cannot reach. A pair the host just
+    # generated is recorded as the new truth.
+    record="${DEPLOY_KEY_RECORD_DIR:-$HOME/.config/codeofhonor/sandvault/deploy_keys}/deploy_${REPOSITORY_NAME}.pub"
+    if [[ -f "$record" && "${DEPLOY_KEY_GENERATED:-false}" != "true" ]]; then
+        if [[ "$(deploy_public_body "$record")" != "$derived" ]]; then
+            abort "deploy key for $REPOSITORY_NAME is not the pair this host created (differs from $record); the shared workspace may have been modified. Remove $DEPLOY_KEY_DIR and $record to regenerate it"
+        fi
+    else
+        mkdir -p "$(dirname "$record")"
+        chmod 0700 "$(dirname "$record")"
+        # Write through a host-owned temp file: the record is what later runs
+        # compare against, so it must never be half-written.
+        printf '%s\n' "$derived" > "$record.tmp.$$"
+        chmod 0644 "$record.tmp.$$"
+        mv -f "$record.tmp.$$" "$record"
+        info "Recorded deploy key for $REPOSITORY_NAME at $record"
+    fi
+
+    # Publish the verified key to a host-private file and upload *that*. Reading
+    # $DEPLOY_KEY_PUB again at the `gh repo deploy-key add` call would reopen the
+    # window this check exists to close: the guest can swap the file between the
+    # check and the upload.
+    DEPLOY_KEY_PUB_VERIFIED="$(mktemp "${TMPDIR:-/tmp}/sv-deploy-key.XXXXXX")"
+    printf '%s\n' "$derived" > "$DEPLOY_KEY_PUB_VERIFIED"
+    chmod 0600 "$DEPLOY_KEY_PUB_VERIFIED"
+    trap 'rm -f "$DEPLOY_KEY_PUB_VERIFIED"' EXIT
+}
+
+
 
 ###############################################################################
 # Parse command line
@@ -294,6 +341,10 @@ fi
 
 if [[ -n "$GITHUB_REPO_PATH" ]]; then
     DEPLOY_KEY_DIR="$SV_PRIVATE_DIR/.ssh"
+    # Host-owned copy of each deploy key's public half. The pair under
+    # $DEPLOY_KEY_DIR is writable by the sandbox user, so this copy is what
+    # proves which pair the host created. Overridable so tests stay hermetic.
+    DEPLOY_KEY_RECORD_DIR="${SV_DEPLOY_KEY_RECORD_DIR:-$HOME/.config/codeofhonor/sandvault/deploy_keys}"
     DEPLOY_KEY_TITLE="sandvault-deploy-${REPOSITORY_NAME}@${HOSTNAME}"
     DEPLOY_SSH_URL="git@github.com:${GITHUB_REPO_PATH}.git"
 
@@ -305,10 +356,13 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
             -N "" \
             -q \
             -C "$DEPLOY_KEY_TITLE"
+        DEPLOY_KEY_GENERATED=true
         info "Generated deploy key for $REPOSITORY_NAME"
     else
         debug "Deploy key already exists for $REPOSITORY_NAME"
     fi
+
+    verify_deploy_keypair
 
     # Only rewrite the origin to SSH and configure core.sshCommand once the
     # key is confirmed usable. Doing this unconditionally would strand a
@@ -335,7 +389,7 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
             EXISTING_KEY_READONLY="${EXISTING_KEY_LINE##*$'\t'}"
             if [[ "$DEPLOY_KEY_WRITE" == true && "$EXISTING_KEY_READONLY" == "true" ]]; then
                 if gh repo deploy-key delete "$EXISTING_KEY_ID" -R "$GITHUB_REPO_PATH" 2>/dev/null \
-                    && gh repo deploy-key add "$DEPLOY_KEY_PUB" \
+                    && gh repo deploy-key add "$DEPLOY_KEY_PUB_VERIFIED" \
                         --title "$DEPLOY_KEY_TITLE" --allow-write \
                         -R "$GITHUB_REPO_PATH" 2>/dev/null; then
                     activate_deploy_key
@@ -354,7 +408,7 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
         else
             GH_ADD_ARGS=(--title "$DEPLOY_KEY_TITLE" -R "$GITHUB_REPO_PATH")
             [[ "$DEPLOY_KEY_WRITE" == true ]] && GH_ADD_ARGS+=(--allow-write)
-            if gh repo deploy-key add "$DEPLOY_KEY_PUB" "${GH_ADD_ARGS[@]}" 2>/dev/null; then
+            if gh repo deploy-key add "$DEPLOY_KEY_PUB_VERIFIED" "${GH_ADD_ARGS[@]}" 2>/dev/null; then
                 activate_deploy_key
                 if [[ "$DEPLOY_KEY_WRITE" == true ]]; then
                     DEPLOY_KEY_ACCESS="write"
@@ -368,7 +422,7 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
                 echo ""
                 info "Deploy key for $REPOSITORY_NAME — add manually:"
                 echo "──────────────────────────────────────────────────────────"
-                cat "$DEPLOY_KEY_PUB"
+                cat "$DEPLOY_KEY_PUB_VERIFIED"
                 echo "──────────────────────────────────────────────────────────"
                 info "https://github.com/$GITHUB_REPO_PATH/settings/keys"
                 echo ""
@@ -378,7 +432,7 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
         echo ""
         info "Deploy key for $REPOSITORY_NAME — add manually (or install gh CLI for auto-setup):"
         echo "──────────────────────────────────────────────────────────"
-        cat "$DEPLOY_KEY_PUB"
+        cat "$DEPLOY_KEY_PUB_VERIFIED"
         echo "──────────────────────────────────────────────────────────"
         info "https://github.com/$GITHUB_REPO_PATH/settings/keys"
         echo ""
