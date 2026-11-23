@@ -514,6 +514,68 @@ run_tests() {
     }
     queue_test test_codex_code_mode_host_warmup_present
 
+    # The merge copies $SHARED_WORKSPACE/user over the deployed home, and the
+    # sandbox user can write that source. It must not be able to overwrite the
+    # prompt text the wrappers read (sv_tool_prompt -> --append-system-prompt)
+    # or the script that assembles it, while still being able to stage its own
+    # tools under user/bin.
+    test_configure_merge_leaves_prompts_alone() {
+        local workdir home shared fn run output status
+        workdir="$(mktemp -d)"
+        home="$workdir/home"
+        shared="$workdir/shared"
+        mkdir -p "$home/bin/prompts" "$shared/user/bin/prompts"
+        printf 'TRUSTED\n' > "$home/bin/prompts/browser.md"
+        printf 'TRUSTED\n' > "$home/bin/sv-tool-prompts.sh"
+        printf 'POISONED\n' > "$shared/user/bin/prompts/browser.md"
+        printf 'POISONED\n' > "$shared/user/bin/sv-tool-prompts.sh"
+        printf '#!/bin/sh\n' > "$shared/user/bin/mytool"
+
+        fn=$(sed -n '/^merge_user_config() {$/,/^}$/p' "$SCRIPT_DIR/../guest/home/configure")
+        if [[ -z "$fn" ]]; then
+            fail "configure merge leaves the prompt files alone" \
+                "merge_user_config in guest/home/configure" "function not found"
+            rm -rf "$workdir"; return
+        fi
+
+        run="$workdir/run"
+        {
+            echo '#!/bin/bash'
+            echo 'set -Eeuo pipefail'
+            echo 'debug() { :; }'
+            printf '%s\n' "$fn"
+            echo 'merge_user_config'
+        } > "$run"
+        chmod +x "$run"
+
+        set +e
+        output=$(HOME="$home" SHARED_WORKSPACE="$shared" /bin/bash "$run" 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            fail "configure merge leaves the prompt files alone" \
+                "merge succeeds" "exit $status: $output"
+            rm -rf "$workdir"; return
+        fi
+
+        if [[ "$(cat "$home/bin/prompts/browser.md")" != 'TRUSTED' ]]; then
+            fail "configure merge leaves the prompt files alone" \
+                "prompt text stays the deployed copy" \
+                "got: $(cat "$home/bin/prompts/browser.md")"
+        elif [[ "$(cat "$home/bin/sv-tool-prompts.sh")" != 'TRUSTED' ]]; then
+            fail "configure merge leaves the prompt files alone" \
+                "the prompt assembly script stays the deployed copy" \
+                "got: $(cat "$home/bin/sv-tool-prompts.sh")"
+        elif [[ ! -f "$home/bin/mytool" ]]; then
+            fail "configure merge leaves the prompt files alone" \
+                "user/bin is still merged" "user/bin/mytool missing"
+        else
+            pass "configure merge leaves the prompt files alone"
+        fi
+        rm -rf "$workdir"
+    }
+    queue_test test_configure_merge_leaves_prompts_alone
+
     test_configure_tolerates_already_unlocked_keychain() {
         local output status stub_dir test_home
         test_home="$(mktemp -d)"
