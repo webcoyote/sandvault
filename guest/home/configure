@@ -38,6 +38,32 @@ abort () {
     exit 1
 }
 
+# Merge $SHARED_WORKSPACE/user into $HOME. The sandbox user can write that
+# source, and $HOME/bin is on PATH ahead of the deployed wrappers, so the merge
+# would otherwise let it replace the prompt text the wrappers feed to the agent
+# as a system prompt (sv_tool_prompt) and the script that assembles it. Keep the
+# rest of user/bin mergeable: staging a tool there is a documented feature.
+merge_user_config() {
+    [[ -n "${SHARED_WORKSPACE:-}" ]] || return 0
+    debug "Copying $SHARED_WORKSPACE/user contents to $HOME"
+    mkdir -p "$SHARED_WORKSPACE/user"
+    /usr/bin/rsync \
+        --archive \
+        --copy-links \
+        --exclude='.git' \
+        --exclude='.gitattributes' \
+        --exclude='.gitignore' \
+        --exclude='configure' \
+        --exclude='.zshenv' \
+        --exclude='.zprofile' \
+        --exclude='.zshrc' \
+        --exclude='.zlogin' \
+        --exclude='.zlogout' \
+        --exclude='bin/prompts' \
+        --exclude='bin/sv-tool-prompts.sh' \
+        "$SHARED_WORKSPACE/user/" "$HOME/"
+}
+
 
 ###############################################################################
 # Create keychain to avoid error dialog
@@ -134,23 +160,7 @@ defaults write com.apple.dt.Xcode IDECustomDerivedDataLocation ".DerivedData"
 # Copy user directory contents to $HOME
 ###############################################################################
 # Use system rsync to avoid Homebrew dependencies; Homebrew rsync has different options
-if [[ -n "${SHARED_WORKSPACE:-}" ]]; then
-    debug "Copying $SHARED_WORKSPACE/user contents to $HOME"
-    mkdir -p "$SHARED_WORKSPACE/user"
-    /usr/bin/rsync \
-        --archive \
-        --copy-links \
-        --exclude='.git' \
-        --exclude='.gitattributes' \
-        --exclude='.gitignore' \
-        --exclude='configure' \
-        --exclude='.zshenv' \
-        --exclude='.zprofile' \
-        --exclude='.zshrc' \
-        --exclude='.zlogin' \
-        --exclude='.zlogout' \
-        "$SHARED_WORKSPACE/user/" "$HOME/"
-fi
+merge_user_config
 
 
 ###############################################################################
