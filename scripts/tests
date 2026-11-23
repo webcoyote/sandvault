@@ -514,6 +514,54 @@ run_tests() {
     }
     queue_test test_codex_code_mode_host_warmup_present
 
+    # git runs several config values as commands on the host (core.fsmonitor,
+    # core.sshCommand, core.hooksPath, core.pager, [filter] drivers). The clone
+    # directory is guest-writable, and so is any workspace path passed as the
+    # clone source, so every host-side git call goes through one helper that
+    # neutralizes those keys.
+    test_sv_clone_host_git_ignores_local_config() {
+        local workdir src fn marker output status
+        workdir="$(mktemp -d)"
+        src="$workdir/src"
+        marker="$workdir/host-git-ran"
+        fn=$(sed -n '/^git_safe() {$/,/^}$/p' "$SCRIPT_DIR/../sv-clone")
+        if [[ -z "$fn" ]]; then
+            fail "host-side git ignores a poisoned local config" \
+                "git_safe in sv-clone" "function not found"
+            rm -rf "$workdir"; return
+        fi
+
+        mkdir -p "$src"
+        git -C "$src" init -q
+        git -C "$src" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+        printf '#!/bin/sh\ntouch %s\n' "$marker" > "$workdir/hook"
+        chmod +x "$workdir/hook"
+        git -C "$src" config core.fsmonitor "$workdir/hook"
+        git -C "$src" config core.alternateRefsCommand "$workdir/hook"
+
+        set +e
+        output=$(/bin/bash -c "$(printf '%s\n' "$fn")"$'\ngit_safe "$1" status' -- "$src" 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            fail "host-side git ignores a poisoned local config" \
+                "git_safe runs git" "exit $status: $output"
+            rm -rf "$workdir"; return
+        fi
+        if [[ -e "$marker" ]]; then
+            fail "host-side git ignores a poisoned local config" \
+                "no config-driven command runs" "core.fsmonitor executed"
+        elif grep -q 'git -C "\$LOCAL_REPOSITORY"' "$SCRIPT_DIR/../sv-clone"; then
+            fail "host-side git ignores a poisoned local config" \
+                "every host-side call uses git_safe" \
+                "found a bare 'git -C \"\$LOCAL_REPOSITORY\"' call"
+        else
+            pass "host-side git ignores a poisoned local config"
+        fi
+        rm -rf "$workdir"
+    }
+    queue_test test_sv_clone_host_git_ignores_local_config
+
     test_configure_tolerates_already_unlocked_keychain() {
         local output status stub_dir test_home
         test_home="$(mktemp -d)"
