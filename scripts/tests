@@ -1608,6 +1608,68 @@ STUB
     queue_test assert_sandbox_pipe_contains "can access shared workspace" "ls $SHARED_WORKSPACE" "SANDVAULT-README"
     queue_test assert_sandbox_exit_code "sv s -- touch SANDVAULT-README.md" 0 touch -c "$SHARED_WORKSPACE/SANDVAULT-README.md"
 
+    # The bridge runs as the host user and gives `iosef` a working directory to
+    # keep its state in. That directory sits under $SHARED_WORKSPACE/_sandvault,
+    # which the sandbox user can write, so the sandbox can put a symlink there
+    # and make a host process write wherever it points. The bridge must keep its
+    # own working directory host-only, and keep writing screenshots to the
+    # shared one so the sandbox can still fetch them.
+    test_ios_bridge_host_work_dir() {
+        local workdir output status
+        workdir="$(mktemp -d)"
+
+        set +e
+        output=$(/usr/bin/python3 - "$SCRIPT_DIR/../helpers/sv-ios-bridge" "$workdir" <<'PY' 2>&1
+import importlib.util, os, sys, tempfile
+from importlib.machinery import SourceFileLoader
+
+bridge_path, scratch = sys.argv[1], sys.argv[2]
+loader = SourceFileLoader("sv_ios_bridge", bridge_path)
+spec = importlib.util.spec_from_loader("sv_ios_bridge", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+for name in ("prepare_host_work_dir", "screenshot_path"):
+    if not hasattr(mod, name):
+        sys.exit(f"{name} missing from the bridge")
+
+work = mod.prepare_host_work_dir(scratch)
+if not os.path.isdir(work) or os.path.islink(work):
+    sys.exit(f"host work dir is not a real directory: {work}")
+mode = os.stat(work).st_mode & 0o777
+if mode != 0o700:
+    sys.exit(f"host work dir mode is {oct(mode)}, want 0o700")
+
+planted = os.path.join(scratch, "planted-target")
+os.mkdir(planted)
+os.rmdir(work)  # the guest replaces the host's dir with a link to its own
+os.symlink(planted, work)
+work = mod.prepare_host_work_dir(scratch)
+if os.path.islink(work) or not os.path.isdir(work):
+    sys.exit("a symlink planted at the work dir was followed instead of replaced")
+if os.listdir(planted):
+    sys.exit(f"the planted target gained files: {os.listdir(planted)}")
+
+mod.SCRATCH_DIR = scratch
+os.chdir(tempfile.gettempdir())
+shot = mod.screenshot_path("screenshot-pixels", "png")
+if not shot.startswith(scratch + os.sep):
+    sys.exit(f"screenshot path {shot} escapes the shared scratch dir {scratch}")
+print("ok")
+PY
+)
+        status=$?
+        set -e
+
+        if [[ "$status" -ne 0 ]]; then
+            fail "iOS bridge keeps its working directory host-only" "host-only work dir" "$output"
+        else
+            pass "iOS bridge keeps its working directory host-only"
+        fi
+        rm -rf "$workdir"
+    }
+    queue_test test_ios_bridge_host_work_dir
+
     # Should be able to access home directory
     queue_test assert_sandbox_exit_code "sv s -- touch $SANDVAULT_HOME/README.md" 0 touch -c "$SANDVAULT_HOME/README.md"
 
