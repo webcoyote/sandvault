@@ -1627,13 +1627,42 @@ render_shared_workspace_readme() {
 # it is rewritten whenever the rendered content differs from what is on disk (new
 # version, new profile, first run, deleted file). --no-build leaves the
 # workspace untouched.
-if [[ "$NO_BUILD" == "false" && -d "$SHARED_WORKSPACE" ]]; then
-    workspace_readme="$SHARED_WORKSPACE/SANDVAULT-README.md"
-    workspace_readme_contents="$(render_shared_workspace_readme)"
-    if [[ ! -f "$workspace_readme" || "$(cat "$workspace_readme")" != "$workspace_readme_contents" ]]; then
-        trace "Writing $workspace_readme"
-        render_shared_workspace_readme > "$workspace_readme"
+write_shared_workspace_readme() {
+    local readme contents tmp
+    readme="$SHARED_WORKSPACE/SANDVAULT-README.md"
+    contents="$(render_shared_workspace_readme)"
+    if [[ -f "$readme" && "$(cat "$readme")" == "$contents" ]]; then
+        return 0
     fi
+    trace "Writing $readme"
+    # Write beside the target and rename into place. A rename replaces a symlink
+    # planted at $readme instead of following it, so the sandbox user cannot make
+    # the host truncate a file of its choosing (a plain ">" redirect does).
+    # mktemp's 0600 would leave the README unreadable to the sandbox, which is
+    # the whole point of the file, so set the mode before the rename.
+    tmp="$(mktemp "$SHARED_WORKSPACE/.SANDVAULT-README.XXXXXX")"
+    if ! render_shared_workspace_readme > "$tmp" || ! /bin/chmod 0644 "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    # "mv" treats a directory -- or a symlink to one -- as "move into", not
+    # "replace", so clear a planted link first. Otherwise the file lands inside
+    # a host directory the sandbox chose, and the link survives the write.
+    [[ -L "$readme" ]] && /bin/rm -f "$readme"
+    if ! /bin/mv -f "$tmp" "$readme"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    # Post-condition: the path is now the file, not a link re-planted in the
+    # window above. Fail loudly rather than leave a README that never updates.
+    if [[ ! -f "$readme" || -L "$readme" ]]; then
+        /bin/rm -f "$readme/$(basename "$tmp")"
+        return 1
+    fi
+}
+
+if [[ "$NO_BUILD" == "false" && -d "$SHARED_WORKSPACE" ]]; then
+    write_shared_workspace_readme
 fi
 
 
