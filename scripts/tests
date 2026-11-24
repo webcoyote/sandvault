@@ -677,7 +677,7 @@ PLIST
 
         mkdir -p "$src"
         git -C "$src" init -q
-        git -C "$src" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+        GIT_CONFIG_GLOBAL=/dev/null git -C "$src" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
         printf '#!/bin/sh\ntouch %s\n' "$marker" > "$workdir/hook"
         chmod +x "$workdir/hook"
         git -C "$src" config core.fsmonitor "$workdir/hook"
@@ -2008,6 +2008,25 @@ STUB
         SV_CLONE_WORKSPACE_ROOT="$CLONE_WORKSPACE" "$bash_path" "$SV_CLONE_BASE" "$@"
     }
 
+    # Create a minimal throwaway git repo with a GitHub-shaped origin.
+    # Usage: make_test_repo <variable_name> [owner/repo]
+    # Writes the path into the named variable.  The repo lives under
+    # $CLONE_WORKSPACE so cleanup_clone_workspace sweeps it automatically.
+    # The repo gets one empty commit so git clone / bundle work.
+    # Tests should use this instead of pointing sv-clone at the real
+    # sandvault checkout, which must never have its config mutated.
+    make_test_repo() {
+        local _var="$1"
+        local github_path="${2:-sv-test-org/test-repo}"
+        local dir
+        dir="$(mktemp -d "$CLONE_WORKSPACE/src.XXXXXX")"
+        GIT_CONFIG_GLOBAL=/dev/null git -C "$dir" init -q
+        GIT_CONFIG_GLOBAL=/dev/null git -C "$dir" -c user.email=t@t -c user.name=t \
+            commit -q --allow-empty -m "init"
+        git -C "$dir" remote add origin "git@github.com:${github_path}.git"
+        eval "$_var=\$dir"
+    }
+
     # Create a fake `gh` on PATH that records every invocation (to
     # GH_STUB_LOG) and tracks a minimal deploy-key registry (in
     # GH_STUB_STATE, set by the caller as env vars), so the -k/-w code paths
@@ -2087,29 +2106,15 @@ STUB_EOF
     }
 
     # Test cloning a local repository via sv-clone and wiring remotes.
+    # Uses a throwaway repo so the real checkout's config is never at risk.
     test_sv_clone_local() {
-        local src_repository
-        local clone_name
-        local clone_path
-        local output
-        local status
-        local host_origin
-        local remote_output
-        local expected_upstream
+        local src_repository clone_path output status
+        local host_origin remote_output
+        local github_path="sv-test-org/clone-local"
 
-        src_repository="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null || true)"
-        if [[ -z "$src_repository" ]] || ! git -C "$src_repository" rev-parse --git-dir &>/dev/null; then
-            fail "sv-clone clones local repository" "current repository available" "$src_repository"
-            return
-        fi
+        make_test_repo src_repository "$github_path"
 
-        clone_name="$(basename "$src_repository")"
-        clone_path="$CLONE_WORKSPACE/repos/$clone_name"
-        expected_upstream="$(git -C "$src_repository" remote get-url origin 2>/dev/null || true)"
-        if [[ -z "$expected_upstream" ]]; then
-            fail "sv-clone clones local repository" "source repository has origin remote" "$src_repository"
-            return
-        fi
+        clone_path="$CLONE_WORKSPACE/repos/$(basename "$src_repository")"
 
         # Clean up any previous clone so the test is idempotent.
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
@@ -2134,8 +2139,8 @@ STUB_EOF
 
         # Host origin should still point at the upstream remote.
         host_origin="$(git -C "$src_repository" remote get-url origin 2>/dev/null)"
-        if [[ "$host_origin" != "$expected_upstream" ]]; then
-            fail "local repository keeps origin at upstream" "$expected_upstream" "$host_origin"
+        if [[ "$host_origin" != "git@github.com:${github_path}.git" ]]; then
+            fail "local repository keeps origin at upstream" "git@github.com:${github_path}.git" "$host_origin"
             return
         fi
 
@@ -2146,18 +2151,15 @@ STUB_EOF
             return
         fi
 
-        # The clone's origin should point to the upstream repo. Deploy key
-        # setup may rewrite the URL from HTTPS to SSH, so compare the
-        # owner/repo path rather than the full URL.
+        # The clone's origin should point to the upstream repo.
         set +e
         remote_output=$(git -C "$clone_path" config remote.origin.url 2>&1)
         status=$?
         set -e
-        local actual_repo_path expected_repo_path
+        local actual_repo_path
         actual_repo_path="$(github_repo_path "$remote_output")"
-        expected_repo_path="$(github_repo_path "$expected_upstream")"
-        if [[ "$status" -ne 0 || "$actual_repo_path" != "$expected_repo_path" ]]; then
-            fail "sv-clone clone origin points to upstream" "$expected_upstream" "$status | $remote_output"
+        if [[ "$status" -ne 0 || "$actual_repo_path" != "$github_path" ]]; then
+            fail "sv-clone clone origin points to upstream" "$github_path" "$status | $remote_output"
             return
         fi
 
@@ -2505,11 +2507,14 @@ STUB_EOF
     test_sv_clone_rerun_ignores_guest_config() {
         local src_repository clone_path key_file stub_dir log_file state_file
         local marker_dir alt_repo expected_repo_path output status
+        local github_path="sv-test-org/rerun-test"
+        local repo_name
 
-        src_repository="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel)"
-        clone_path="$CLONE_WORKSPACE/repos/$(basename "$src_repository")"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$(basename "$src_repository")"
-        expected_repo_path="$(github_repo_path "$(git -C "$src_repository" remote get-url origin)")"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
+        expected_repo_path="$github_path"
         stub_dir="$(mktemp -d)"
         log_file="$(mktemp)"
         state_file="$(mktemp)"
