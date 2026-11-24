@@ -67,14 +67,27 @@ source "$WORKSPACE/helpers/sv-logging.sh"
 # git's safe.directory check never fires and otherwise trusts the config.
 # This only covers the config reads/writes below; those keys are not a
 # complete list, so never use git_repo for fetch or other transport commands.
-git_repo() {
+# git runs several config values as commands (core.fsmonitor, core.sshCommand,
+# core.hooksPath, core.pager, core.alternateRefsCommand, [filter] drivers). Any
+# directory the host runs git in may be writable by the sandbox user -- the
+# clone, and any workspace path handed to sv-clone as its source -- so every
+# host-side call goes through this, which neutralizes those keys on the command
+# line (-c wins over repo config).
+git_safe() {
+    local dir="$1"
+    shift
     git \
         -c core.fsmonitor= \
         -c core.sshCommand= \
         -c core.hooksPath=/dev/null \
         -c core.pager=cat \
+        -c core.alternateRefsCommand= \
         -c protocol.ext.allow=never \
-        -C "$REPO_DIR" "$@"
+        -C "$dir" "$@"
+}
+
+git_repo() {
+    git_safe "$REPO_DIR" "$@"
 }
 
 
@@ -193,7 +206,7 @@ fi
 LOCAL_REPOSITORY=""
 if [[ -d "$CLONE_REPOSITORY" ]]; then
     LOCAL_REPOSITORY="$(cd "$CLONE_REPOSITORY" && pwd -P)"
-    REPOSITORY_SOURCE_URL="$(git -C "$LOCAL_REPOSITORY" remote get-url origin 2>/dev/null)" \
+    REPOSITORY_SOURCE_URL="$(git_safe "$LOCAL_REPOSITORY" remote get-url origin 2>/dev/null)" \
         || abort "Local repository $LOCAL_REPOSITORY has no 'origin' remote"
     REPOSITORY_NAME="$(basename "$LOCAL_REPOSITORY")"
 else
@@ -413,7 +426,7 @@ if [[ "$REPO_EXISTED" == true ]]; then
     if [[ -n "$LOCAL_REPOSITORY" ]]; then
         BUNDLE_DIR="$(mktemp -d /tmp/sv-clone.XXXXXX)"
         BUNDLE_FILE="$BUNDLE_DIR/$REPOSITORY_NAME.bundle"
-        git -C "$LOCAL_REPOSITORY" bundle create -q "$BUNDLE_FILE" HEAD
+        git_safe "$LOCAL_REPOSITORY" bundle create -q "$BUNDLE_FILE" HEAD
         chgrp -R "sandvault-$HOST_USER" "$BUNDLE_DIR"
         chmod 0750 "$BUNDLE_DIR"
         chmod 0640 "$BUNDLE_FILE"
@@ -433,10 +446,10 @@ fi
 # Add sandvault remote to local repository (if cloning from local)
 ###############################################################################
 if [[ -n "$LOCAL_REPOSITORY" && -z "${SV_CLONE_WORKSPACE_ROOT:-}" ]]; then
-    if git -C "$LOCAL_REPOSITORY" remote get-url sandvault &>/dev/null; then
-        git -C "$LOCAL_REPOSITORY" remote set-url sandvault "$REPO_DIR"
+    if git_safe "$LOCAL_REPOSITORY" remote get-url sandvault &>/dev/null; then
+        git_safe "$LOCAL_REPOSITORY" remote set-url sandvault "$REPO_DIR"
     else
-        git -C "$LOCAL_REPOSITORY" remote add sandvault "$REPO_DIR"
+        git_safe "$LOCAL_REPOSITORY" remote add sandvault "$REPO_DIR"
     fi
     debug "Added 'sandvault' remote to $LOCAL_REPOSITORY"
 fi
