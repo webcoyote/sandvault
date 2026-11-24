@@ -583,20 +583,41 @@ PLIST
     # compares the version line sv writes with the one on disk, and a machine
     # with no profile at all needs a rewrite too.
     test_sv_rewrites_stale_sandbox_profile() {
-        local got
-        got=$(sed -n '/^profile_needs_rewrite() {$/,/^}$/p' "$SV_BASE")
-        if [[ -z "$got" ]]; then
+        local current dir fn got stale
+        fn=$(sed -n '/^profile_needs_rewrite() {$/,/^}$/p' "$SV_BASE")
+        if [[ -z "$fn" ]]; then
             fail "sv rewrites a stale sandbox profile" "profile_needs_rewrite in sv" "function not found"
             return
         fi
         got=$(
             SB_PROFILE_VERSION=2 SESSION_DIR_UNDER_TEST=1 \
-            /bin/bash -c "$got"'
+            /bin/bash -c "$fn"'
                 printf "%s" "$(profile_needs_rewrite 2 /dev/null; echo $?)"
             '
         )
         if [[ "$got" != "0" ]]; then
             fail "sv rewrites a stale sandbox profile" "a profile with no version line needs a rewrite" "$got"
+            return
+        fi
+        # /dev/null stops at the missing-file branch, so the pair below is what
+        # runs the compare: a profile carrying another version needs a rewrite,
+        # one carrying this version does not.
+        dir="$(mktemp -d)"
+        stale="$dir/stale.sb"
+        current="$dir/current.sb"
+        printf ';; sv-profile-version: 1\n' > "$stale"
+        printf ';; sv-profile-version: 2\n' > "$current"
+        got=$(
+            /bin/bash -c "$fn"'
+                printf "%s%s" \
+                    "$(profile_needs_rewrite 2 "$1"; echo $?)" \
+                    "$(profile_needs_rewrite 2 "$2"; echo $?)"
+            ' _ "$stale" "$current"
+        )
+        rm -rf "$dir"
+        if [[ "$got" != "01" ]]; then
+            fail "sv rewrites a stale sandbox profile" \
+                "01 (a version 1 profile needs a rewrite, a version 2 profile does not)" "$got"
         else
             pass "sv rewrites a stale sandbox profile"
         fi
