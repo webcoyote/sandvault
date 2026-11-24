@@ -1788,7 +1788,7 @@ else
         # --no-build says this run may not touch root owned files, so a stale
         # profile stops the run instead of being rewritten behind the flag.
         if [[ "$NO_BUILD" == "true" ]]; then
-            abort "Sandbox profile is out of date; run 'sv --rebuild build' (needs sudo)"
+            abort "Sandbox profile needs a rewrite; rerun without --no-build: sv --rebuild build (needs sudo)"
         fi
 
         debug "Configuring passwordless access to $SANDVAULT_USER..."
@@ -1946,9 +1946,13 @@ EOF
         # that profile_needs_rewrite compares against the one constant.
         # shellcheck disable=SC2154 # SANDBOX_PROFILE_CONTENT is referenced but not assigned (yes it is)
         SANDBOX_PROFILE_CONTENT="${SANDBOX_PROFILE_CONTENT//__SV_PROFILE_VERSION__/$SV_SANDBOX_PROFILE_VERSION}"
+        # Write a sibling temp file and rename it onto the target: rewriting in
+        # place lets a concurrent session apply a half-written, more permissive
+        # profile, and the rename carries the root owned 0444 mode across.
         # shellcheck disable=SC2154
-        echo "$SANDBOX_PROFILE_CONTENT" | sudo tee "$SANDBOX_PROFILE" > /dev/null
-        sudo /bin/chmod 0444 "$SANDBOX_PROFILE"
+        echo "$SANDBOX_PROFILE_CONTENT" | sudo tee "$SANDBOX_PROFILE.tmp" > /dev/null
+        sudo /bin/chmod 0444 "$SANDBOX_PROFILE.tmp"
+        sudo /bin/mv -f "$SANDBOX_PROFILE.tmp" "$SANDBOX_PROFILE"
     fi
 fi
 
