@@ -519,7 +519,7 @@ run_tests() {
     # whose executable reports its identity to a path the sandbox cannot write,
     # open it from inside, and require that no such file appears.
     test_sandbox_cannot_launch_as_host() {
-        local app marker output status
+        local app live marker output status
         marker="/Users/Shared/sv-launch-probe.$$"
         app="$SHARED_WORKSPACE/sv-launch-probe.app"
         rm -f "$marker"
@@ -544,18 +544,37 @@ PLIST
         output=$(sv_cmd s -- open "$app" 2>&1)
         status=$?
         set -e
-        sleep 3
+        # A launch that the profile lets through can still arrive after the open
+        # call returns, so poll instead of waiting a fixed time: a late launch
+        # must be caught, not slept past.
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [[ -e "$marker" ]] && break
+            sleep 1
+        done
+        # The marker proves nothing if sv aborted before it started the sandboxed
+        # shell (--no-build with a missing profile, or a version mismatch): no
+        # marker appears because the profile under test was never applied.
+        set +e
+        sv_cmd s -- true >/dev/null 2>&1
+        live=$?
+        set -e
         if [[ -e "$marker" ]]; then
             fail "sandbox cannot launch as the host user" \
                 "no host-owned file appears" "the bundle ran as $(cat "$marker")"
+        elif [[ "$live" -ne 0 ]]; then
+            fail "sandbox cannot launch as the host user" \
+                "the sandbox session runs" "sv s -- true exited $live"
         elif [[ "$output" == *"no such file or directory: open"* || "$output" == *"command not found"* ]]; then
             fail "sandbox cannot launch as the host user" \
                 "open runs from inside the sandbox" "the harness ran no open: $status | $output"
         else
             pass "sandbox cannot launch as the host user"
         fi
-        rm -f "$marker"
+        # Cleanup runs as the sandbox user in nested runs, where /Users/Shared is
+        # sticky: the marker can be unremovable, so remove the bundle first and
+        # let the marker removal fail quietly instead of aborting under errexit.
         rm -rf "$app"
+        rm -f "$marker" 2>/dev/null || true
     }
     queue_test test_sandbox_cannot_launch_as_host
 
