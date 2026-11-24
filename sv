@@ -1801,33 +1801,66 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
     (subpath "/Volumes/Macintosh HD"))
 
 ;; Deny mounting disks
-;; diskarbitrationd -- diskutil mount, hdiutil attach, Finder disk handling
-;; NetAuthAgent     -- NetFS: 'open smb://...', Connect to Server
-;; NetAuthSysAgent
-;; appleeventsd     -- disallow osascript telling Finder to do it
 (deny file-mount file-unmount)
+
 ;; Deny every per-user service except the ones a session needs. The sandbox
 ;; user runs in the bootstrap namespace of the host user, so an allowed lookup
-;; lets the host user's service act for the sandbox: `open` on a bundle made
+;; lets the host user's service act for the sandbox: open on a bundle made
 ;; LaunchServices launch it as the host user, outside this profile.
 (deny mach-lookup)
 (allow mach-lookup
-  ;; Preferences and system information.
+  ;; CFPreferences: defaults, plutil, curl and the other CoreFoundation
+  ;; clients look up com.apple.cfprefsd.agent and com.apple.cfprefsd.daemon.
+  ;; Kept as insurance, not as a fix: defaults write, read and delete pass
+  ;; with only com.apple.system. allowed, and a denied preferences lookup
+  ;; falls back to reading the plist, so a client that needs this one fails
+  ;; silently rather than loudly.
   (global-name-prefix "com.apple.cfprefsd")
+  ;; opendirectoryd's libinfo, which carries the prefs path and user and group
+  ;; names: without it id -un and whoami print a uid, id loses group names,
+  ;; dscl fails with eServerError, and defaults writes do not persist.
   (global-name-prefix "com.apple.system.")
   ;; DNS, and the sockets curl, git and node resolve through.
   (global-name-prefix "com.apple.dnssd")
   (global-name-prefix "com.apple.mDNSResponder")
   (global-name-prefix "com.apple.networkd")
   (global-name-prefix "com.apple.SystemConfiguration")
-  ;; TLS trust evaluation.
+  ;; TLS trust evaluation. Measured: the trustd prefix alone does not carry
+  ;; it, and removing that prefix changed nothing for curl, git or python.
+  ;; The name curl needs is TrustEvaluationAgent: with it denied, curl
+  ;; https://example.com fails with (60) unable to get local issuer
+  ;; certificate.
   (global-name-prefix "com.apple.trustd")
-  ;; Keychain reads by `security` and the agent tools.
+  (global-name "com.apple.TrustEvaluationAgent")
+  ;; LaunchServices, which Chrome and Chromium check in with at startup: with
+  ;; it denied, start-chrome (sv --chrome) reports "Chrome exited
+  ;; unexpectedly" and the browser logs nothing. This one name is the narrow
+  ;; grant that restores Chrome, and open on an app bundle is still denied:
+  ;; it fails with kLSNoExecutableErr and launches nothing as the host user.
+  (global-name "com.apple.coreservices.launchservicesd")
+  ;; Keychain access, reads and writes, by security and the agent tools: the
+  ;; lookup reaches the host user's securityd, so a session can add items too.
+  ;; Without it security reports "One or more parameters passed to a function
+  ;; were not valid".
   (global-name "com.apple.SecurityServer")
+  ;; OCSP revocation checks. not measured: no probe failed without it.
   (global-name "com.apple.ocspd")
-  ;; Logging, which the agent tools write through.
-  (global-name-prefix "com.apple.logd")
-  (global-name "com.apple.system.logger"))
+  ;; Logging, which the agent tools write through. not measured: removing it
+  ;; changed nothing, and log show reports "Cannot run while sandboxed" with
+  ;; or without it.
+  (global-name-prefix "com.apple.logd"))
+
+;; Keep these four denied explicitly, after the allow above, so that widening
+;; the allow later cannot quietly re-admit them.
+;; diskarbitrationd -- diskutil mount, hdiutil attach, Finder disk handling
+;; NetAuthAgent     -- NetFS: 'open smb://...', Connect to Server
+;; NetAuthSysAgent
+;; appleeventsd     -- disallow osascript telling Finder to do it
+(deny mach-lookup
+  (global-name "com.apple.DiskArbitration.diskarbitrationd")
+  (global-name "com.apple.NetAuthAgent")
+  (global-name "com.apple.NetAuthSysAgent")
+  (global-name "com.apple.appleeventsd"))
 
 ;; Block raw disk and packet-capture devices regardless of the broader
 ;; /dev write allow below. Defense in depth: /dev/*disk* is already
