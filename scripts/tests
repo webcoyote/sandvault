@@ -517,9 +517,11 @@ run_tests() {
     # LaunchServices answers in the bootstrap namespace of the host user, so a
     # bundle opened from inside the sandbox ran as the host user. Build a bundle
     # whose executable reports its identity to a path the sandbox cannot write,
-    # open it from inside, and require that no such file appears.
+    # open it from inside, and require that no such file appears. A hand-built
+    # bundle only proves its own kLSNoExecutableErr, so a system app is opened by
+    # name as well: the host must gain no Calculator process from it.
     test_sandbox_cannot_launch_as_host() {
-        local app live marker output status
+        local _ app calc_output calc_pids calc_status live live_output marker output status
         marker="/Users/Shared/sv-launch-probe.$$"
         app="$SHARED_WORKSPACE/sv-launch-probe.app"
         rm -f "$marker"
@@ -547,15 +549,16 @@ PLIST
         # A launch that the profile lets through can still arrive after the open
         # call returns, so poll instead of waiting a fixed time: a late launch
         # must be caught, not slept past.
-        for _ in 1 2 3 4 5 6 7 8 9 10; do
+        for _ in $(seq 1 50); do
             [[ -e "$marker" ]] && break
-            sleep 1
+            sleep 0.2
         done
         # The marker proves nothing if sv aborted before it started the sandboxed
-        # shell (--no-build with a missing profile, or a version mismatch): no
-        # marker appears because the profile under test was never applied.
+        # shell (--no-build with a stale profile, or a version mismatch): no
+        # marker appears because the profile under test was never applied, so
+        # keep sv's own message for the failure text.
         set +e
-        sv_cmd s -- true >/dev/null 2>&1
+        live_output=$(sv_cmd s -- true 2>&1)
         live=$?
         set -e
         if [[ -e "$marker" ]]; then
@@ -563,12 +566,35 @@ PLIST
                 "no host-owned file appears" "the bundle ran as $(cat "$marker")"
         elif [[ "$live" -ne 0 ]]; then
             fail "sandbox cannot launch as the host user" \
-                "the sandbox session runs" "sv s -- true exited $live"
+                "the sandbox session runs" "sv s -- true exited $live: $live_output"
         elif [[ "$output" == *"no such file or directory: open"* || "$output" == *"command not found"* ]]; then
             fail "sandbox cannot launch as the host user" \
                 "open runs from inside the sandbox" "the harness ran no open: $status | $output"
         else
-            pass "sandbox cannot launch as the host user"
+            # Opened by name from inside the sandbox. Unsandboxed, the same open
+            # as the sandvault user starts a Calculator owned by $HOST_USER, so an
+            # empty pgrep is what "the launch never reaches the host" means. A
+            # Calculator the host already had open before this run also shows up
+            # here, which is what the recorded pids in the failure text are for.
+            set +e
+            calc_output=$(sv_cmd s -- open -a Calculator 2>&1)
+            calc_status=$?
+            set -e
+            calc_pids=""
+            for _ in $(seq 1 50); do
+                # No match is the pass case, so swallow pgrep's exit 1 (and the
+                # SIGPIPE head can cause) instead of dying under errexit.
+                calc_pids=$(pgrep -u "$HOST_USER" -fl 'Calculator.app' 2>/dev/null | head -3 || true)
+                [[ -z "$calc_pids" ]] || break
+                sleep 0.2
+            done
+            if [[ -n "$calc_pids" ]]; then
+                fail "sandbox cannot launch as the host user" \
+                    "no Calculator process owned by $HOST_USER" \
+                    "open -a Calculator exited $calc_status and the host gained [$calc_pids]: $calc_output"
+            else
+                pass "sandbox cannot launch as the host user (bundle open exit $status: $(printf '%s' "$output" | tr '\n' ' '); open -a Calculator exit $calc_status: $(printf '%s' "$calc_output" | tr '\n' ' '))"
+            fi
         fi
         # Cleanup runs as the sandbox user in nested runs, where /Users/Shared is
         # sticky: the marker can be unremovable, so remove the bundle first and
@@ -583,17 +609,25 @@ PLIST
     # compares the version line sv writes with the one on disk, and a machine
     # with no profile at all needs a rewrite too.
     test_sv_rewrites_stale_sandbox_profile() {
-        local current dir fn got stale
+        local current dir fn got stale version
         fn=$(sed -n '/^profile_needs_rewrite() {$/,/^}$/p' "$SV_BASE")
         if [[ -z "$fn" ]]; then
             fail "sv rewrites a stale sandbox profile" "profile_needs_rewrite in sv" "function not found"
             return
         fi
+        # Read the version sv stamps, so bumping the constant cannot leave this
+        # test asserting a number sv no longer writes.
+        version=$(sed -n 's/^readonly SV_SANDBOX_PROFILE_VERSION="\([0-9][0-9]*\)"$/\1/p' "$SV_BASE")
+        if [[ -z "$version" ]]; then
+            fail "sv rewrites a stale sandbox profile" \
+                "readonly SV_SANDBOX_PROFILE_VERSION in sv" "not found"
+            return
+        fi
         got=$(
             SB_PROFILE_VERSION=2 SESSION_DIR_UNDER_TEST=1 \
             /bin/bash -c "$fn"'
-                printf "%s" "$(profile_needs_rewrite 2 /dev/null; echo $?)"
-            '
+                printf "%s" "$(profile_needs_rewrite "$1" /dev/null; echo $?)"
+            ' _ "$version"
         )
         if [[ "$got" != "0" ]]; then
             fail "sv rewrites a stale sandbox profile" "a profile with no version line needs a rewrite" "$got"
@@ -605,19 +639,19 @@ PLIST
         dir="$(mktemp -d)"
         stale="$dir/stale.sb"
         current="$dir/current.sb"
-        printf ';; sv-profile-version: 1\n' > "$stale"
-        printf ';; sv-profile-version: 2\n' > "$current"
+        printf ';; sv-profile-version: %s\n' "$((version - 1))" > "$stale"
+        printf ';; sv-profile-version: %s\n' "$version" > "$current"
         got=$(
             /bin/bash -c "$fn"'
                 printf "%s%s" \
-                    "$(profile_needs_rewrite 2 "$1"; echo $?)" \
-                    "$(profile_needs_rewrite 2 "$2"; echo $?)"
-            ' _ "$stale" "$current"
+                    "$(profile_needs_rewrite "$3" "$1"; echo $?)" \
+                    "$(profile_needs_rewrite "$3" "$2"; echo $?)"
+            ' _ "$stale" "$current" "$version"
         )
         rm -rf "$dir"
         if [[ "$got" != "01" ]]; then
             fail "sv rewrites a stale sandbox profile" \
-                "01 (a version 1 profile needs a rewrite, a version 2 profile does not)" "$got"
+                "01 (a profile at another version needs a rewrite, one at $version does not)" "$got"
         else
             pass "sv rewrites a stale sandbox profile"
         fi

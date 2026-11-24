@@ -1790,6 +1790,16 @@ else
         if [[ "$NO_BUILD" == "true" ]]; then
             abort "Sandbox profile needs a rewrite; rerun without --no-build: sv --rebuild build (needs sudo)"
         fi
+        # An ordinary run rewrites a stale profile, and only --rebuild used to
+        # ask for a password, so check sudo here: without this the write below
+        # dies inside the tee with "sudo: a password is required" and the ERR
+        # trap, never reaching a message the user can act on.
+        if ! sudo -p "Password required to update the sandbox profile: " /usr/bin/true 2>/dev/null; then
+            if [[ -n "$SV_PROFILE" ]]; then
+                abort "Sandbox profile is stale; run 'sv --rebuild build --profile $SV_PROFILE' (needs sudo)"
+            fi
+            abort "Sandbox profile is stale; run 'sv --rebuild build' (needs sudo)"
+        fi
 
         debug "Configuring passwordless access to $SANDVAULT_USER..."
 
@@ -1841,18 +1851,19 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
   (global-name-prefix "com.apple.mDNSResponder")
   (global-name-prefix "com.apple.networkd")
   (global-name-prefix "com.apple.SystemConfiguration")
-  ;; TLS trust evaluation. Measured: the trustd prefix alone does not carry
-  ;; it, and removing that prefix changed nothing for curl, git or python.
-  ;; The name curl needs is TrustEvaluationAgent: with it denied, curl
+  ;; TLS trust evaluation. Measured: without the com.apple.trustd prefix,
+  ;; curl, git and python3 all verify https://example.com and
+  ;; git ls-remote answers, so the prefix carries none of it. The one name
+  ;; curl needs is TrustEvaluationAgent: with it denied, curl
   ;; https://example.com fails with (60) unable to get local issuer
   ;; certificate.
-  (global-name-prefix "com.apple.trustd")
   (global-name "com.apple.TrustEvaluationAgent")
   ;; LaunchServices, which Chrome and Chromium check in with at startup: with
   ;; it denied, start-chrome (sv --chrome) reports "Chrome exited
   ;; unexpectedly" and the browser logs nothing. This one name is the narrow
-  ;; grant that restores Chrome, and open on an app bundle is still denied:
-  ;; it fails with kLSNoExecutableErr and launches nothing as the host user.
+  ;; grant that restores Chrome, and a launch still does not reach the host:
+  ;; open on the test bundle fails with kLSNoExecutableErr, and open -a
+  ;; Calculator leaves no Calculator process owned by the host user.
   (global-name "com.apple.coreservices.launchservicesd")
   ;; Keychain access, reads and writes, by security and the agent tools: the
   ;; lookup reaches the host user's securityd, so a session can add items too.
@@ -1860,11 +1871,7 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
   ;; were not valid".
   (global-name "com.apple.SecurityServer")
   ;; OCSP revocation checks. not measured: no probe failed without it.
-  (global-name "com.apple.ocspd")
-  ;; Logging, which the agent tools write through. not measured: removing it
-  ;; changed nothing, and log show reports "Cannot run while sandboxed" with
-  ;; or without it.
-  (global-name-prefix "com.apple.logd"))
+  (global-name "com.apple.ocspd"))
 
 ;; Keep these four denied explicitly, after the allow above, so that widening
 ;; the allow later cannot quietly re-admit them.
@@ -1946,13 +1953,25 @@ EOF
         # that profile_needs_rewrite compares against the one constant.
         # shellcheck disable=SC2154 # SANDBOX_PROFILE_CONTENT is referenced but not assigned (yes it is)
         SANDBOX_PROFILE_CONTENT="${SANDBOX_PROFILE_CONTENT//__SV_PROFILE_VERSION__/$SV_SANDBOX_PROFILE_VERSION}"
-        # Write a sibling temp file and rename it onto the target: rewriting in
-        # place lets a concurrent session apply a half-written, more permissive
-        # profile, and the rename carries the root owned 0444 mode across.
+        # Write a fresh root owned temp file beside the target, then rename it
+        # onto the target: rewriting in place lets a concurrent session apply a
+        # half-written, more permissive profile, and a fixed temp name would let
+        # two writers share one inode.
+        SANDBOX_PROFILE_TMP="$(sudo /usr/bin/mktemp "/var/sandvault/.sandbox-$SANDVAULT_USER.XXXXXXXX")"
         # shellcheck disable=SC2154
-        echo "$SANDBOX_PROFILE_CONTENT" | sudo tee "$SANDBOX_PROFILE.tmp" > /dev/null
-        sudo /bin/chmod 0444 "$SANDBOX_PROFILE.tmp"
-        sudo /bin/mv -f "$SANDBOX_PROFILE.tmp" "$SANDBOX_PROFILE"
+        echo "$SANDBOX_PROFILE_CONTENT" | sudo tee "$SANDBOX_PROFILE_TMP" > /dev/null
+        sudo /bin/chmod 0444 "$SANDBOX_PROFILE_TMP"
+        # A profile that fails to parse would be installed and then stick for
+        # good, because its own version line makes it look current, so load it
+        # before the rename.
+        if ! sudo /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE_TMP" /usr/bin/true &>/dev/null; then
+            # Second run only to keep the ERR trap quiet while the text is
+            # captured for the abort message.
+            SANDBOX_PROFILE_ERROR="$(sudo /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE_TMP" /usr/bin/true 2>&1 || true)"
+            sudo rm -f "$SANDBOX_PROFILE_TMP"
+            abort "Sandbox profile does not load: $SANDBOX_PROFILE_ERROR"
+        fi
+        sudo /bin/mv -f "$SANDBOX_PROFILE_TMP" "$SANDBOX_PROFILE"
     fi
 fi
 
