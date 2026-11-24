@@ -1871,6 +1871,12 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
   ;; open on the test bundle fails with kLSNoExecutableErr, and open -a
   ;; Calculator leaves no Calculator process owned by the host user.
   (global-name "com.apple.coreservices.launchservicesd")
+  ;; Chrome's crash handler checks in over its own bootstrap name. With this
+  ;; denied, the handler reports "bootstrap_look_up
+  ;; org.chromium.crashpad.child_port_handshake...: Permission denied (1100)".
+  ;; The name is local to the browser and its children, both inside this
+  ;; profile, so it reaches nothing of the host user's.
+  (global-name-prefix "org.chromium.crashpad.")
   ;; Keychain access, reads and writes, by security and the agent tools: the
   ;; lookup reaches the host user's securityd, so a session can add items too.
   ;; Without it security reports "One or more parameters passed to a function
