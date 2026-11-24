@@ -2265,17 +2265,20 @@ STUB_EOF
     # Test that sv-clone does not generate a deploy key or touch the origin
     # remote unless -k/-w is given.
     test_sv_clone_no_flag_no_deploy_key() {
-        local clone_path key_file origin_after output status
-        local https_repository="https://github.com/webcoyote/sandvault.git"
+        local src_repository clone_path key_file origin_after output status
+        local github_path="sv-test-org/no-flag-test" repo_name
+        local expected_origin="git@github.com:${github_path}.git"
 
-        clone_path="$CLONE_WORKSPACE/repos/sandvault"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
 
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
         sv_cmd s -- rm -f "$key_file" "$key_file.pub" >/dev/null 2>&1
 
         set +e
-        output=$(sv_clone_cmd "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(sv_clone_cmd "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2284,8 +2287,8 @@ STUB_EOF
         fi
 
         origin_after=$(git -C "$clone_path" config remote.origin.url 2>/dev/null || true)
-        if [[ "$origin_after" != "$https_repository" ]]; then
-            fail "sv-clone default clone leaves origin untouched" "$https_repository" "$origin_after"
+        if [[ "$origin_after" != "$expected_origin" ]]; then
+            fail "sv-clone default clone leaves origin untouched" "$expected_origin" "$origin_after"
             return
         fi
 
@@ -2303,12 +2306,15 @@ STUB_EOF
     # Test that -k generates a read-only deploy key, rewrites the origin to
     # SSH, does not request write access, and is idempotent on re-run.
     test_sv_clone_dash_k_read_only() {
-        local clone_path key_file stub_dir log_file state_file
-        local https_repository="https://github.com/webcoyote/sandvault.git"
+        local src_repository clone_path key_file stub_dir log_file state_file
+        local github_path="sv-test-org/key-ro-test" repo_name
+        local expected_ssh="git@github.com:${github_path}.git"
         local output status origin_after ssh_command add_line
 
-        clone_path="$CLONE_WORKSPACE/repos/sandvault"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
         stub_dir="$(mktemp -d)"
         log_file="$(mktemp)"
         state_file="$(mktemp)"
@@ -2321,7 +2327,7 @@ STUB_EOF
         export GH_STUB_STATE="$state_file"
 
         set +e
-        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2335,8 +2341,8 @@ STUB_EOF
         fi
 
         origin_after=$(git -C "$clone_path" config remote.origin.url 2>/dev/null || true)
-        if [[ "$origin_after" != "git@github.com:webcoyote/sandvault.git" ]]; then
-            fail "sv-clone -k rewrites origin to SSH" "git@github.com:webcoyote/sandvault.git" "$origin_after"
+        if [[ "$origin_after" != "$expected_ssh" ]]; then
+            fail "sv-clone -k rewrites origin to SSH" "$expected_ssh" "$origin_after"
             return
         fi
 
@@ -2354,17 +2360,11 @@ STUB_EOF
 
         # Re-running -k against a repo whose key is already registered
         # (per the stub's state file) should still (re)activate the SSH
-        # origin and sshCommand — idempotent, not a silent no-op. Remove
-        # only the local clone (not the deploy key or stub state) first, so
-        # this re-run takes the fresh-HTTPS-clone path rather than the
-        # existing-repo fetch path: that fetch would use the real `ssh`
-        # binary against real github.com, which never actually received
-        # this test's key (only the fake `gh` was told about it), and would
-        # fail on real auth rather than exercising the code we're testing.
+        # origin and sshCommand — idempotent, not a silent no-op.
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
 
         set +e
-        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2373,7 +2373,7 @@ STUB_EOF
         fi
         origin_after=$(git -C "$clone_path" config remote.origin.url 2>/dev/null || true)
         ssh_command=$(git -C "$clone_path" config core.sshCommand 2>/dev/null || true)
-        if [[ "$origin_after" != "git@github.com:webcoyote/sandvault.git" || -z "$ssh_command" ]]; then
+        if [[ "$origin_after" != "$expected_ssh" || -z "$ssh_command" ]]; then
             fail "sv-clone -k re-run reactivates existing key" "origin rewritten + sshCommand set" "$origin_after | $ssh_command"
             return
         fi
@@ -2387,12 +2387,14 @@ STUB_EOF
 
     # Test that -w generates a deploy key with write access.
     test_sv_clone_dash_w_write() {
-        local clone_path key_file stub_dir log_file state_file
-        local https_repository="https://github.com/webcoyote/sandvault.git"
+        local src_repository clone_path key_file stub_dir log_file state_file
+        local github_path="sv-test-org/key-write-test" repo_name
         local output status add_line
 
-        clone_path="$CLONE_WORKSPACE/repos/sandvault"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
         stub_dir="$(mktemp -d)"
         log_file="$(mktemp)"
         state_file="$(mktemp)"
@@ -2405,7 +2407,7 @@ STUB_EOF
         export GH_STUB_STATE="$state_file"
 
         set +e
-        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -w "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -w "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2430,12 +2432,14 @@ STUB_EOF
     # deploy key to write access (delete + re-add) without regenerating the
     # local private key.
     test_sv_clone_dash_w_upgrades_read_only_key() {
-        local clone_path key_file stub_dir log_file state_file
-        local https_repository="https://github.com/webcoyote/sandvault.git"
+        local src_repository clone_path key_file stub_dir log_file state_file
+        local github_path="sv-test-org/key-upgrade-test" repo_name
         local output status key_hash_before key_hash_after
 
-        clone_path="$CLONE_WORKSPACE/repos/sandvault"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
         stub_dir="$(mktemp -d)"
         log_file="$(mktemp)"
         state_file="$(mktemp)"
@@ -2448,7 +2452,7 @@ STUB_EOF
         export GH_STUB_STATE="$state_file"
 
         set +e
-        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 || ! -f "$key_file" ]]; then
@@ -2458,15 +2462,12 @@ STUB_EOF
         key_hash_before=$(shasum "$key_file" | awk '{print $1}')
 
         # Remove only the local clone (not the deploy key or stub state)
-        # before re-running with -w, so this run takes the fresh-HTTPS-clone
-        # path rather than the existing-repo fetch path — see the comment in
-        # test_sv_clone_dash_k_read_only for why that fetch path can't work
-        # against a key this test only registered with the fake `gh`.
+        # before re-running with -w.
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
 
         : > "$log_file"
         set +e
-        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -w "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -w "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2584,12 +2585,15 @@ STUB_EOF
     # Test that -k with no gh CLI on PATH prints the public key for manual
     # setup and does not rewrite the origin to SSH.
     test_sv_clone_dash_k_no_gh() {
-        local clone_path key_file no_gh_path output status origin_after
-        local https_repository="https://github.com/webcoyote/sandvault.git"
+        local src_repository clone_path key_file no_gh_path output status origin_after
+        local github_path="sv-test-org/no-gh-test" repo_name
+        local expected_origin="git@github.com:${github_path}.git"
         local dir path_dirs
 
-        clone_path="$CLONE_WORKSPACE/repos/sandvault"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
 
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
         sv_cmd s -- rm -f "$key_file" "$key_file.pub" >/dev/null 2>&1
@@ -2606,7 +2610,7 @@ STUB_EOF
         done
 
         set +e
-        output=$(PATH="$no_gh_path" sv_clone_cmd -k "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$no_gh_path" sv_clone_cmd -k "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2620,8 +2624,8 @@ STUB_EOF
         fi
 
         origin_after=$(git -C "$clone_path" config remote.origin.url 2>/dev/null || true)
-        if [[ "$origin_after" != "$https_repository" ]]; then
-            fail "sv-clone -k without gh leaves origin untouched" "$https_repository" "$origin_after"
+        if [[ "$origin_after" != "$expected_origin" ]]; then
+            fail "sv-clone -k without gh leaves origin untouched" "$expected_origin" "$origin_after"
             return
         fi
 
