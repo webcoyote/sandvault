@@ -95,9 +95,12 @@ if (verbose) console.log('test-playwright.js');
     log('  PASS');
 
     await context.close();
-    browser.close();
 
     log('All Playwright tests passed.\n');
+    // Playwright's CDP Browser has no disconnect() — close() sends
+    // Browser.close which kills Chrome.  Exit the process instead so the
+    // WebSocket drops without terminating the shared browser.
+    process.exit(0);
 })().catch(err => {
     console.error(`  FAIL: ${err.message}`);
     process.exit(1);
