@@ -234,7 +234,6 @@ readonly REPO_DIR="$SHARED_WORKSPACE/repos/$REPOSITORY_NAME"
 # (with or without those flags) can tell whether an earlier run already
 # activated a deploy key for this repo — see the fetch step below.
 readonly DEPLOY_KEY_PRIV="$SV_PRIVATE_DIR/.ssh/deploy_${REPOSITORY_NAME}"
-readonly DEPLOY_KEY_PUB="$DEPLOY_KEY_PRIV.pub"
 
 debug "Repository: $REPOSITORY_NAME"
 debug "Source URL: $REPOSITORY_SOURCE_URL"
@@ -262,6 +261,13 @@ else
     fi
 fi
 info "Repository ready at $REPO_DIR"
+
+
+# Pass --profile through to sv if set (deploy-key setup and the final launch)
+SV_PROFILE_ARGS=()
+if [[ -n "$SV_PROFILE" ]]; then
+    SV_PROFILE_ARGS=("--profile" "$SV_PROFILE")
+fi
 
 
 ###############################################################################
@@ -306,21 +312,63 @@ if [[ "$DEPLOY_KEY" == true ]]; then
 fi
 
 if [[ -n "$GITHUB_REPO_PATH" ]]; then
-    DEPLOY_KEY_DIR="$SV_PRIVATE_DIR/.ssh"
     DEPLOY_KEY_TITLE="sandvault-deploy-${REPOSITORY_NAME}@${HOSTNAME}"
     DEPLOY_SSH_URL="git@github.com:${GITHUB_REPO_PATH}.git"
 
+    # $SV_PRIVATE_DIR/.ssh is writable by the sandbox user, so the host never opens
+    # files there: a planted symlink (say, the .pub pointed at the host's
+    # ~/.ssh/authorized_keys) would redirect the host's own write or read.
+    # Instead the host generates the pair in a host-private temp dir and the
+    # sandbox installs it with its own permissions; an existing key's public
+    # half is read back through the sandbox as text and validated. Only the
+    # host-owned copy in $DEPLOY_KEY_TMP is ever uploaded or printed.
+    DEPLOY_KEY_TMP="$(mktemp -d)"
+    trap 'rm -rf "$DEPLOY_KEY_TMP"' EXIT
+    DEPLOY_KEY_PUB_HOST="$DEPLOY_KEY_TMP/deploy.pub"
+    sandbox_run() {
+        "$SV" "${SV_PROFILE_ARGS[@]+"${SV_PROFILE_ARGS[@]}"}" --no-build \
+            shell "$SHARED_WORKSPACE" -- "$@"
+    }
+
+    # Only stat() here, which a symlink can't turn into a write.
     if [[ ! -f "$DEPLOY_KEY_PRIV" ]]; then
-        mkdir -p "$DEPLOY_KEY_DIR"
-        chmod 0700 "$DEPLOY_KEY_DIR"
         ssh-keygen -t ed25519 \
-            -f "$DEPLOY_KEY_PRIV" \
+            -f "$DEPLOY_KEY_TMP/deploy" \
             -N "" \
             -q \
             -C "$DEPLOY_KEY_TITLE"
+        # The install script goes to the sandbox shell on stdin, not as
+        # `sv shell -- <args>`: under sudo --login, $ in args is expanded by
+        # the sandbox user's login shell (see sudo(8) -i). It also keeps the
+        # private key out of argv. rm -f first so a planted symlink is
+        # replaced, not followed.
+        printf -v DEPLOY_KEY_PRIV_Q '%q' "$DEPLOY_KEY_PRIV"
+        printf -v DEPLOY_KEY_DIR_Q '%q' "${DEPLOY_KEY_PRIV%/*}"
+        {
+            printf 'set -e\numask 077\nmkdir -p %s\nrm -f %s %s.pub\n' \
+                "$DEPLOY_KEY_DIR_Q" "$DEPLOY_KEY_PRIV_Q" "$DEPLOY_KEY_PRIV_Q"
+            printf "cat > %s <<'SV_DEPLOY_KEY_EOF'\n" "$DEPLOY_KEY_PRIV_Q"
+            cat "$DEPLOY_KEY_TMP/deploy"
+            printf "SV_DEPLOY_KEY_EOF\ncat > %s.pub <<'SV_DEPLOY_KEY_EOF'\n" "$DEPLOY_KEY_PRIV_Q"
+            cat "$DEPLOY_KEY_PUB_HOST"
+            printf 'SV_DEPLOY_KEY_EOF\nchmod 0644 %s.pub\n' "$DEPLOY_KEY_PRIV_Q"
+        } | "$SV" "${SV_PROFILE_ARGS[@]+"${SV_PROFILE_ARGS[@]}"}" --no-build \
+                shell "$SHARED_WORKSPACE" \
+            || abort "Could not install the deploy key inside the sandbox"
+        rm -f "$DEPLOY_KEY_TMP/deploy"   # $DEPLOY_KEY_PUB_HOST stays
         info "Generated deploy key for $REPOSITORY_NAME"
     else
         debug "Deploy key already exists for $REPOSITORY_NAME"
+        # -P "" so a passphrase-protected key fails instead of prompting.
+        DEPLOY_KEY_PUB_LINE="$(sandbox_run ssh-keygen -y -P "" -f "$DEPLOY_KEY_PRIV" \
+            </dev/null 2>/dev/null)" || DEPLOY_KEY_PUB_LINE=""
+        DEPLOY_KEY_PUB_RE='^(ssh-ed25519 [A-Za-z0-9+/]+={0,2})( [^[:cntrl:]]*)?$'
+        if [[ "$DEPLOY_KEY_PUB_LINE" == *$'\n'* || ! "$DEPLOY_KEY_PUB_LINE" =~ $DEPLOY_KEY_PUB_RE ]]; then
+            abort "Existing deploy key $DEPLOY_KEY_PRIV is not a readable ed25519 key; remove it to regenerate"
+        fi
+        printf '%s\n' "${BASH_REMATCH[1]}" > "$DEPLOY_KEY_PUB_HOST"
+        ssh-keygen -l -f "$DEPLOY_KEY_PUB_HOST" >/dev/null 2>&1 \
+            || abort "Existing deploy key $DEPLOY_KEY_PRIV is not a valid public key; remove it to regenerate"
     fi
 
     # Only rewrite the origin to SSH and configure core.sshCommand once the
@@ -348,7 +396,7 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
             EXISTING_KEY_READONLY="${EXISTING_KEY_LINE##*$'\t'}"
             if [[ "$DEPLOY_KEY_WRITE" == true && "$EXISTING_KEY_READONLY" == "true" ]]; then
                 if gh repo deploy-key delete "$EXISTING_KEY_ID" -R "$GITHUB_REPO_PATH" 2>/dev/null \
-                    && gh repo deploy-key add "$DEPLOY_KEY_PUB" \
+                    && gh repo deploy-key add "$DEPLOY_KEY_PUB_HOST" \
                         --title "$DEPLOY_KEY_TITLE" --allow-write \
                         -R "$GITHUB_REPO_PATH" 2>/dev/null; then
                     activate_deploy_key
@@ -367,7 +415,7 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
         else
             GH_ADD_ARGS=(--title "$DEPLOY_KEY_TITLE" -R "$GITHUB_REPO_PATH")
             [[ "$DEPLOY_KEY_WRITE" == true ]] && GH_ADD_ARGS+=(--allow-write)
-            if gh repo deploy-key add "$DEPLOY_KEY_PUB" "${GH_ADD_ARGS[@]}" 2>/dev/null; then
+            if gh repo deploy-key add "$DEPLOY_KEY_PUB_HOST" "${GH_ADD_ARGS[@]}" 2>/dev/null; then
                 activate_deploy_key
                 if [[ "$DEPLOY_KEY_WRITE" == true ]]; then
                     DEPLOY_KEY_ACCESS="write"
@@ -381,7 +429,7 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
                 echo ""
                 info "Deploy key for $REPOSITORY_NAME — add manually:"
                 echo "──────────────────────────────────────────────────────────"
-                cat "$DEPLOY_KEY_PUB"
+                cat "$DEPLOY_KEY_PUB_HOST"
                 echo "──────────────────────────────────────────────────────────"
                 info "https://github.com/$GITHUB_REPO_PATH/settings/keys"
                 echo ""
@@ -391,7 +439,7 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
         echo ""
         info "Deploy key for $REPOSITORY_NAME — add manually (or install gh CLI for auto-setup):"
         echo "──────────────────────────────────────────────────────────"
-        cat "$DEPLOY_KEY_PUB"
+        cat "$DEPLOY_KEY_PUB_HOST"
         echo "──────────────────────────────────────────────────────────"
         info "https://github.com/$GITHUB_REPO_PATH/settings/keys"
         echo ""
@@ -404,6 +452,10 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
             info "Sandbox access to $GITHUB_REPO_PATH: pull ✓  push ✗  (enable: sv-clone -w <url>)"
         fi
     fi
+
+    # The final `exec sv` skips the EXIT trap, so clean up here.
+    rm -rf "$DEPLOY_KEY_TMP"
+    trap - EXIT
 fi
 
 
@@ -427,16 +479,17 @@ if [[ "$REPO_EXISTED" == true ]]; then
         BUNDLE_DIR="$(mktemp -d /tmp/sv-clone.XXXXXX)"
         BUNDLE_FILE="$BUNDLE_DIR/$REPOSITORY_NAME.bundle"
         git_safe "$LOCAL_REPOSITORY" bundle create -q "$BUNDLE_FILE" HEAD
-        chgrp -R "sandvault-$HOST_USER" "$BUNDLE_DIR"
+        # The sandbox user's group is per-profile, like the user (see sv).
+        chgrp -R "sandvault-$HOST_USER$SV_SUFFIX" "$BUNDLE_DIR"
         chmod 0750 "$BUNDLE_DIR"
         chmod 0640 "$BUNDLE_FILE"
         FETCH_STATUS=0
-        "$SV" --no-build shell "$REPO_DIR" -- \
+        "$SV" "${SV_PROFILE_ARGS[@]+"${SV_PROFILE_ARGS[@]}"}" --no-build shell "$REPO_DIR" -- \
             git fetch "$BUNDLE_FILE" || FETCH_STATUS=$?
         rm -rf "$BUNDLE_DIR"
         [[ "$FETCH_STATUS" -eq 0 ]] || abort "Fetch inside the sandbox failed (exit $FETCH_STATUS)"
     else
-        "$SV" --no-build shell "$REPO_DIR" -- \
+        "$SV" "${SV_PROFILE_ARGS[@]+"${SV_PROFILE_ARGS[@]}"}" --no-build shell "$REPO_DIR" -- \
             git fetch origin
     fi
 fi
@@ -476,12 +529,6 @@ for arg in "${SV_ARGS[@]}"; do
 done
 if [[ "$REPO_DIR_INSERTED" == false ]]; then
     LAUNCH_ARGS+=("$REPO_DIR")
-fi
-
-# Pass --profile through to sv if set
-SV_PROFILE_ARGS=()
-if [[ -n "$SV_PROFILE" ]]; then
-    SV_PROFILE_ARGS=("--profile" "$SV_PROFILE")
 fi
 
 info "Starting sandvault in $REPO_DIR..."

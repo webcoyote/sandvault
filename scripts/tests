@@ -2143,7 +2143,10 @@ case "$1" in
                         ;;
                     add)
                         shift 3
-                        shift # public key path, unused by the stub
+                        # Keep the key body sv-clone handed us, so a test can
+                        # assert what was uploaded, not just that an add happened.
+                        [[ -f "$1" ]] && cp "$1" "$GH_STUB_STATE.received"
+                        shift # public key path
                         title=""
                         write=false
                         while [[ $# -gt 0 ]]; do
@@ -2431,6 +2434,18 @@ STUB_EOF
             return
         fi
 
+        # The uploaded file must be a host-owned copy: a path in the
+        # sandbox-writable workspace can be swapped before gh reads it.
+        if [[ "$add_line" == *"$CLONE_WORKSPACE"* ]]; then
+            fail "sv-clone -k uploads a host-owned copy of the key" "no workspace path" "$add_line"
+            return
+        fi
+        if [[ "$(awk '{print $1, $2}' "$state_file.received" 2>/dev/null)" != "$(awk '{print $1, $2}' "$key_file.pub")" ]]; then
+            fail "sv-clone -k uploads the installed key" "$(cat "$key_file.pub")" \
+                "$(cat "$state_file.received" 2>/dev/null)"
+            return
+        fi
+
         # Re-running -k against a repo whose key is already registered
         # (per the stub's state file) should still (re)activate the SSH
         # origin and sshCommand — idempotent, not a silent no-op.
@@ -2453,9 +2468,137 @@ STUB_EOF
 
         pass "sv-clone -k generates read-only key, rewrites origin, is idempotent"
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
-        rm -rf "$stub_dir" "$log_file" "$state_file"
+        rm -rf "$stub_dir" "$log_file" "$state_file" "$state_file.received"
     }
     queue_test test_sv_clone_dash_k_read_only
+    wait_for_all_running_tests
+
+    # The sandbox can plant symlinks at the deploy key paths. sv-clone runs as
+    # the host user, so if it wrote or read through them the sandbox could
+    # overwrite any host file (e.g. ~/.ssh/authorized_keys with a key whose
+    # private half it holds) or upload a host file to GitHub. The key must be
+    # installed by the sandbox, replacing the links rather than following them.
+    test_sv_clone_deploy_key_ignores_planted_symlinks() {
+        local src_repository clone_path key_file stub_dir log_file state_file
+        local github_path="sv-test-org/key-symlink-test" repo_name
+        local victim victim_dir output status installed_pub
+
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
+        stub_dir="$(mktemp -d)"
+        log_file="$(mktemp)"
+        state_file="$(mktemp)"
+        victim_dir="$(mktemp -d)"
+        victim="$victim_dir/authorized_keys"
+        echo "ORIGINAL" > "$victim"
+
+        sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
+        sv_cmd s -- rm -f "$key_file" "$key_file.pub" >/dev/null 2>&1
+        ln -s "$victim_dir/created" "$key_file"   # dangling: looks like "no key yet"
+        ln -s "$victim" "$key_file.pub"
+
+        make_gh_stub "$stub_dir"
+        export GH_STUB_LOG="$log_file"
+        export GH_STUB_STATE="$state_file"
+
+        set +e
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$src_repository" -- --no-build shell -- true 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            fail "deploy key install ignores planted symlinks" "exit 0" "$status | $output"
+            rm -rf "$stub_dir" "$log_file" "$state_file"* "$victim_dir"; return
+        fi
+        if [[ "$(cat "$victim")" != "ORIGINAL" || -e "$victim_dir/created" ]]; then
+            fail "deploy key install ignores planted symlinks" \
+                "symlink targets untouched" "$(cat "$victim"); created=$(ls "$victim_dir")"
+            rm -rf "$stub_dir" "$log_file" "$state_file"* "$victim_dir"; return
+        fi
+        if [[ -L "$key_file" || -L "$key_file.pub" || ! -f "$key_file" ]]; then
+            fail "deploy key install ignores planted symlinks" \
+                "links replaced by real key files" "$(ls -l "$key_file" "$key_file.pub" 2>&1)"
+            rm -rf "$stub_dir" "$log_file" "$state_file"* "$victim_dir"; return
+        fi
+        installed_pub="$(awk '{print $1, $2}' "$key_file.pub")"
+
+        # Existing key, .pub re-pointed at a host file: the upload must come
+        # from the private half (read via the sandbox), not the planted file.
+        sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
+        sv_cmd s -- rm -f "$key_file.pub" >/dev/null 2>&1
+        ln -s "$victim" "$key_file.pub"
+        : > "$state_file"; rm -f "$state_file.received"
+        set +e
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$src_repository" -- --no-build shell -- true 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 || "$(cat "$state_file.received" 2>/dev/null)" != "$installed_pub" ]]; then
+            fail "existing deploy key is read via the sandbox" \
+                "exit 0, uploaded $installed_pub" "$status | $(cat "$state_file.received" 2>/dev/null) | $output"
+            rm -rf "$stub_dir" "$log_file" "$state_file"* "$victim_dir"; return
+        fi
+
+        pass "deploy key install and upload never follow planted symlinks"
+        sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
+        sv_cmd s -- rm -f "$key_file" "$key_file.pub" >/dev/null 2>&1
+        rm -rf "$stub_dir" "$log_file" "$state_file"* "$victim_dir"
+    }
+    queue_test test_sv_clone_deploy_key_ignores_planted_symlinks
+    wait_for_all_running_tests
+
+    # sv-clone --profile NAME clones into that profile's workspace, so the
+    # in-sandbox fetch on a re-run must run as that profile's sandbox user.
+    # Without --profile, sv falls back to the default sandbox user, which
+    # can't reach the profile's clone (or runs git as the wrong user). A
+    # stub sv next to a copy of sv-clone records how sv is invoked.
+    test_sv_clone_fetch_uses_profile() {
+        local src_repository install_dir log_file output status fetch_line
+        local profile="svtestprofile"
+
+        make_test_repo src_repository "sv-test-org/profile-fetch-test"
+        install_dir="$(mktemp -d)"
+        log_file="$(mktemp)"
+        cp "$SV_CLONE_BASE" "$install_dir/sv-clone"
+        cp -R "$SCRIPT_DIR/../helpers" "$install_dir/helpers"
+        printf '#!/bin/bash\necho "sv $*" >> "$SV_STUB_LOG"\n' > "$install_dir/sv"
+        printf '#!/bin/bash\necho "chgrp $*" >> "$SV_STUB_LOG"\n' > "$install_dir/chgrp"
+        chmod +x "$install_dir/sv" "$install_dir/chgrp"
+
+        # First run clones (no fetch); the re-run takes the fetch path.
+        set +e
+        output=$(for _ in 1 2; do
+            PATH="$install_dir:$PATH" SV_STUB_LOG="$log_file" \
+                SV_CLONE_WORKSPACE_ROOT="$CLONE_WORKSPACE" \
+                "$bash_path" "$install_dir/sv-clone" --profile "$profile" "$src_repository" \
+                -- --no-build shell -- true || exit $?
+        done 2>&1)
+        status=$?
+        set -e
+        fetch_line="$(grep -F 'git fetch' "$log_file" | tail -1)"
+        if [[ "$status" -ne 0 || "$fetch_line" != "sv --profile $profile --no-build shell "*" -- git fetch "* ]]; then
+            fail "sv-clone re-run fetches as the --profile sandbox user" \
+                "sv --profile $profile --no-build shell ... -- git fetch ..." \
+                "$status | ${fetch_line:-no fetch} | $output"
+            rm -rf "$install_dir" "$log_file" "$CLONE_WORKSPACE/repos/$(basename "$src_repository")"
+            return
+        fi
+
+        # The bundle dir is 0750, so it must belong to the profile's group or
+        # the profile's sandbox user can't read the bundle it's told to fetch.
+        if ! grep -q "^chgrp -R sandvault-.*-$profile " "$log_file"; then
+            fail "sv-clone re-run bundle is readable by the --profile sandbox user" \
+                "chgrp -R sandvault-<user>-$profile ..." "$(grep '^chgrp' "$log_file")"
+            rm -rf "$install_dir" "$log_file"
+            sv_cmd s -- rm -rf "$CLONE_WORKSPACE/repos/$(basename "$src_repository")" >/dev/null 2>&1
+            return
+        fi
+
+        pass "sv-clone re-run fetches as the --profile sandbox user"
+        rm -rf "$install_dir" "$log_file"
+        sv_cmd s -- rm -rf "$CLONE_WORKSPACE/repos/$(basename "$src_repository")" >/dev/null 2>&1
+    }
+    queue_test test_sv_clone_fetch_uses_profile
     wait_for_all_running_tests
 
     # Test that -w generates a deploy key with write access.
