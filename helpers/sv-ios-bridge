@@ -23,7 +23,6 @@ import json
 import os
 import re
 import shutil
-import stat
 import signal
 import subprocess
 import sys
@@ -90,45 +89,49 @@ SIMPLE_STR_RE = re.compile(r"^[\x20-\x7e]{1,512}$")
 UDID = ""  # Set by main() before the server starts.
 
 # Shared scratch directory (screenshots and /view targets); set by main().
+# It lives under $SHARED_WORKSPACE/_sandvault, which the sandbox user can
+# write, so the guest can rename it and plant a symlink at its path. The
+# bridge therefore never writes there by path: it holds a directory fd opened
+# at startup and moves finished files in through that fd.
 SCRATCH_DIR = None
+SCRATCH_DIR_FD = None
 
-# Subdirectory of the scratch dir that the bridge chdirs into. The scratch dir
-# is under $SHARED_WORKSPACE/_sandvault, which the sandbox user can write, so a
-# host process must not run `iosef` there: the guest could plant `.iosef/` as a
-# symlink and have the host write wherever it points. Keeping the working
-# directory host-only means `iosef --local` still isolates its state per bridge
-# without trusting anything inside the shared tree.
-HOST_WORK_DIR_NAME = ".work"
+# Host-only directory (mkdtemp in the host's $TMPDIR) that the bridge chdirs
+# into, so `iosef --local` keeps ./.iosef/state.json out of the sandbox's
+# reach. Screenshots are also produced here before being published.
+PRIVATE_DIR = None
 
 
-def prepare_host_work_dir(scratch_dir):
-    """Return a host-only working directory inside scratch_dir, creating it.
+def open_scratch_dir(path):
+    """Open the shared scratch dir as a directory fd that later renames or
+    symlink swaps of its path cannot redirect."""
+    return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 
-    Anything already at that path is writable by the sandbox user, so it may be
-    a symlink or a directory the guest planted; replace it with a real directory
-    owned by this user, mode 0700.
+
+def screenshot_name(prefix, suffix):
+    return f"{prefix}-{uuid.uuid4().hex}.{suffix}"
+
+
+def publish_screenshot(src_path, name):
+    """Move src_path into the shared scratch dir as `name`; return its path.
+
+    The destination is resolved through SCRATCH_DIR_FD, never by path, so a
+    symlink the guest planted in place of the scratch dir is not followed.
+    Mode 0644 lets the sandbox read it as "other"; it can delete it via the
+    scratch dir's inherited delete_child ACE.
     """
-    work = os.path.join(scratch_dir, HOST_WORK_DIR_NAME)
+    os.chmod(src_path, 0o644)
     try:
-        st = os.lstat(work)
-    except FileNotFoundError:
-        st = None
-    if st is not None and (
-        stat.S_ISLNK(st.st_mode)
-        or not stat.S_ISDIR(st.st_mode)
-        or st.st_uid != os.getuid()
-    ):
-        os.unlink(work)
-        st = None
-    if st is None:
-        os.mkdir(work)
-        os.chmod(work, 0o700)
-    return work
-
-
-def screenshot_path(prefix, suffix):
-    """Path for a screenshot in the shared scratch dir (not the host work dir)."""
-    return os.path.join(SCRATCH_DIR, f"{prefix}-{uuid.uuid4().hex}.{suffix}")
+        os.rename(src_path, name, dst_dir_fd=SCRATCH_DIR_FD)
+    except OSError:
+        # rename fails across filesystems; fall back to copy + delete
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        dst_fd = os.open(name, flags, 0o644, dir_fd=SCRATCH_DIR_FD)
+        with open(src_path, "rb") as src, os.fdopen(dst_fd, "wb") as dst:
+            os.fchmod(dst_fd, 0o644)
+            shutil.copyfileobj(src, dst)
+        os.unlink(src_path)
+    return os.path.join(SCRATCH_DIR, name)
 
 # Readiness state, updated by the boot-watcher thread.
 # _ready_event is set once boot completes (success or failure).
@@ -363,7 +366,7 @@ class Handler(BaseHTTPRequestHandler):
         rest = list(args[1:])
         try:
             # `--local` makes iosef use ./.iosef/state.json (rooted in this
-            # bridge's per-process scratch directory; see main()) so multiple
+            # bridge's host-only PRIVATE_DIR; see main()) so multiple
             # parallel bridges don't trample each other's state.
             argv = iosef_cmd() + [subcommand, "--local", "--device", UDID] + rest
         except RuntimeError as e:
@@ -496,13 +499,9 @@ class Handler(BaseHTTPRequestHandler):
         # Detect actual image format from magic bytes so the file extension
         # is correct.  iosef may produce JPEG despite no explicit guarantee.
         ext = _image_ext(src_path)
-        out_path = screenshot_path("screenshot-view", ext)
-        try:
-            os.rename(src_path, out_path)
-        except OSError:
-            # rename fails across filesystems; fall back to copy + delete
-            shutil.copy2(src_path, out_path)
-            os.unlink(src_path)
+        out_path = publish_screenshot(
+            src_path, screenshot_name("screenshot-view", ext),
+        )
         if self._wants_json():
             self._send_json(200, {
                 "ok": True, "exit_code": 0,
@@ -516,16 +515,19 @@ class Handler(BaseHTTPRequestHandler):
         # This captures from the simulator framebuffer directly at native
         # pixel resolution (3× points) and works headless — no visible
         # Simulator.app window required.
-        # Save to the bridge scratch dir (not tmp) so the agent can read it.
-        out_path = screenshot_path("screenshot-pixels", "png")
-        argv = ["xcrun", "simctl", "io", UDID, "screenshot", out_path]
+        # simctl writes by path, so capture into the host-only dir and then
+        # publish into the scratch dir (see publish_screenshot).
+        name = screenshot_name("screenshot-pixels", "png")
+        tmp_path = os.path.join(PRIVATE_DIR, name)
+        argv = ["xcrun", "simctl", "io", UDID, "screenshot", tmp_path]
         rc, stdout, stderr = run_argv(argv)
-        if rc != 0 or not os.path.exists(out_path):
+        if rc != 0 or not os.path.exists(tmp_path):
             return self._send_error(
                 500, "screenshot failed",
                 stderr=stderr,
                 stdout=stdout.decode("utf-8", "replace"),
             )
+        out_path = publish_screenshot(tmp_path, name)
         if self._wants_json():
             self._send_json(200, {
                 "ok": True, "exit_code": 0,
@@ -625,7 +627,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global SCRATCH_DIR
+    global SCRATCH_DIR, SCRATCH_DIR_FD, PRIVATE_DIR
     p = argparse.ArgumentParser()
     p.add_argument("--udid", required=True)
     p.add_argument("--host", default="127.0.0.1")
@@ -637,10 +639,7 @@ def main():
     global UDID
     UDID = args.udid
 
-    # Per-bridge scratch directory: each bridge process gets its own cwd so
-    # that iosef's `--local` flag stores state in `./.iosef/state.json` here
-    # instead of in the global `~/.iosef/state.json`. This prevents parallel
-    # sandvault sessions from corrupting each other's iosef state.
+    # Per-bridge scratch directory for screenshots.
     #
     # When launched by `sv`, --scratch-dir points to a directory under
     # $SHARED_WORKSPACE/_sandvault/tmp/ so that screenshots are accessible to
@@ -657,7 +656,15 @@ def main():
         atexit.register(_cleanup_scratch)
 
     SCRATCH_DIR = scratch_dir
-    os.chdir(prepare_host_work_dir(scratch_dir))
+    SCRATCH_DIR_FD = open_scratch_dir(scratch_dir)
+
+    # Per-bridge host-only cwd: iosef's `--local` flag stores state in
+    # `./.iosef/state.json` here instead of the global `~/.iosef/state.json`,
+    # so parallel sandvault sessions don't corrupt each other's state, and
+    # the sandbox can't plant `.iosef` as a symlink (see PRIVATE_DIR).
+    PRIVATE_DIR = tempfile.mkdtemp(prefix="sv-ios-bridge-state-")
+    atexit.register(shutil.rmtree, PRIVATE_DIR, ignore_errors=True)
+    os.chdir(PRIVATE_DIR)
 
     # Watch boot progress in the background; the bridge can serve /ready
     # immediately and rejects other endpoints with 503 until ready.
