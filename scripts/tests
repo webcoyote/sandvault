@@ -1913,6 +1913,79 @@ STUB
     }
     queue_test test_workspace_readme_racing_directory_symlink
 
+    # The bridge runs as the host user and writes screenshots into a scratch
+    # dir under $SHARED_WORKSPACE/_sandvault, which the sandbox user can write.
+    # The sandbox can rename that dir and plant a symlink at its path, which
+    # would make a host process write wherever the link points. Screenshots
+    # must still land in the real scratch dir (readable by the sandbox), and
+    # nothing may be written through the planted link.
+    test_ios_bridge_screenshot_publish() {
+        local workdir output status
+        workdir="$(mktemp -d)"
+
+        set +e
+        output=$(/usr/bin/python3 - "$SCRIPT_DIR/../helpers/sv-ios-bridge" "$workdir" <<'PY' 2>&1
+import importlib.util, os, sys
+from importlib.machinery import SourceFileLoader
+
+bridge_path, root = sys.argv[1], sys.argv[2]
+sys.dont_write_bytecode = True
+loader = SourceFileLoader("sv_ios_bridge", bridge_path)
+spec = importlib.util.spec_from_loader("sv_ios_bridge", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+for name in ("open_scratch_dir", "screenshot_name", "publish_screenshot"):
+    if not hasattr(mod, name):
+        sys.exit(f"{name} missing from the bridge")
+
+scratch = os.path.join(root, "scratch")
+private = os.path.join(root, "private")
+decoy = os.path.join(root, "decoy")
+for d in (scratch, private, decoy):
+    os.mkdir(d)
+
+mod.SCRATCH_DIR = scratch
+mod.SCRATCH_DIR_FD = mod.open_scratch_dir(scratch)
+mod.PRIVATE_DIR = private
+
+# The guest moves the real scratch dir aside and links its path to a decoy.
+moved = os.path.join(root, "scratch-moved")
+os.rename(scratch, moved)
+os.symlink(decoy, scratch)
+
+name = mod.screenshot_name("screenshot-pixels", "png")
+src = os.path.join(private, name)
+with open(src, "wb") as f:
+    f.write(b"\x89PNG")
+os.chmod(src, 0o600)
+mod.publish_screenshot(src, name)
+
+if os.listdir(decoy):
+    sys.exit(f"screenshot followed the planted symlink: {os.listdir(decoy)}")
+landed = os.path.join(moved, name)
+if not os.path.isfile(landed):
+    sys.exit("screenshot did not land in the real scratch dir")
+mode = os.stat(landed).st_mode & 0o777
+if mode != 0o644:
+    sys.exit(f"screenshot mode is {oct(mode)}, want 0o644 so the sandbox can read it")
+if os.path.exists(src):
+    sys.exit("screenshot was left behind in the private dir")
+print("ok")
+PY
+)
+        status=$?
+        set -e
+
+        if [[ "$status" -ne 0 ]]; then
+            fail "iOS bridge publishes screenshots without following planted symlinks" "ok" "$output"
+        else
+            pass "iOS bridge publishes screenshots without following planted symlinks"
+        fi
+        rm -rf "$workdir"
+    }
+    queue_test test_ios_bridge_screenshot_publish
+
     # Should be able to access home directory
     queue_test assert_sandbox_exit_code "sv s -- touch $SANDVAULT_HOME/README.md" 0 touch -c "$SANDVAULT_HOME/README.md"
 
