@@ -36,6 +36,17 @@ quote_zsh_args() {
     /bin/zsh -fc 'for arg; do printf "%s " "${(q)arg}"; done' -- "$@"
 }
 
+# The profile on disk is root owned and only rewritten on a rebuild, so a policy
+# change would never reach an installed machine. Compare the version line this
+# sv writes with the one on disk.
+profile_needs_rewrite() {
+    local want="$1" file="$2" have
+    [[ -f "$file" ]] || return 0
+    have="$(sed -n 's/^;; sv-profile-version: //p' "$file" 2>/dev/null | head -1)"
+    [[ "$have" == "$want" ]] && return 1
+    return 0
+}
+
 configure_ssh_access() {
     local key_file
     local tmp_authorized_keys
@@ -111,6 +122,10 @@ fi
 # Resources
 ###############################################################################
 readonly VERSION="1.40.0"
+
+# Bump when the sandbox policy changes: the profile is root owned, so the
+# version line it carries is how an installed machine learns it is stale.
+readonly SV_SANDBOX_PROFILE_VERSION="2"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -1769,7 +1784,13 @@ else
     if [[ "$NO_BUILD" == "true" && ! -f "$SANDBOX_PROFILE" ]]; then
         abort "Sandbox profile is missing; cannot rebuild because --no-build set"
     fi
-    if [[ "$REBUILD" == "true" || ! -f "$SANDBOX_PROFILE" ]]; then
+    if [[ "$REBUILD" == "true" ]] || profile_needs_rewrite "$SV_SANDBOX_PROFILE_VERSION" "$SANDBOX_PROFILE"; then
+        # --no-build says this run may not touch root owned files, so a stale
+        # profile stops the run instead of being rewritten behind the flag.
+        if [[ "$NO_BUILD" == "true" ]]; then
+            abort "Sandbox profile is out of date; run 'sv --rebuild build' (needs sudo)"
+        fi
+
         debug "Configuring passwordless access to $SANDVAULT_USER..."
 
         # Create sandbox profile to restrict /Volumes access, which prevents
@@ -1781,6 +1802,7 @@ else
 heredoc SANDBOX_PROFILE_CONTENT << EOF
 ;; Sandbox profile for sandvault
 (version 1)
+;; sv-profile-version: __SV_PROFILE_VERSION__
 (allow default)
 
 ;; restrict writes to everything
@@ -1919,6 +1941,11 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
     (literal "/bin/ps")
     (with no-sandbox))
 EOF
+        # The version line marks which policy this profile carries. The
+        # placeholder is filled in here rather than expanded in the heredoc so
+        # that profile_needs_rewrite compares against the one constant.
+        # shellcheck disable=SC2154 # SANDBOX_PROFILE_CONTENT is referenced but not assigned (yes it is)
+        SANDBOX_PROFILE_CONTENT="${SANDBOX_PROFILE_CONTENT//__SV_PROFILE_VERSION__/$SV_SANDBOX_PROFILE_VERSION}"
         # shellcheck disable=SC2154
         echo "$SANDBOX_PROFILE_CONTENT" | sudo tee "$SANDBOX_PROFILE" > /dev/null
         sudo /bin/chmod 0444 "$SANDBOX_PROFILE"
