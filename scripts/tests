@@ -1608,176 +1608,118 @@ STUB
     queue_test assert_sandbox_pipe_contains "can access shared workspace" "ls $SHARED_WORKSPACE" "SANDVAULT-README"
     queue_test assert_sandbox_exit_code "sv s -- touch SANDVAULT-README.md" 0 touch -c "$SHARED_WORKSPACE/SANDVAULT-README.md"
 
-    # The workspace README is the only file that explains the sandbox to someone
-    # who lands in $SHARED_WORKSPACE, so render it with fixture names and check
-    # what they would see: a markdown heading on the first line (not a code block
-    # from indented heredoc text), the account names, and no unfilled template
-    # placeholders. Uses the script's own render function, not a copy of it.
-    test_workspace_readme_explains_sandbox() {
-        local render out first_line placeholders
-        render=$(sed -n '/^render_shared_workspace_readme() {$/,/^}$/p' "$SV_BASE")
-        if [[ -z "$render" ]]; then
-            fail "workspace README explains the sandbox" \
-                "render_shared_workspace_readme in sv" \
-                "function not found"
-            return
-        fi
-
-        out=$(WORKSPACE="$SCRIPT_DIR/.." HOST_USER=testuser SV_PROFILE='' \
-            SANDVAULT_USER=sandvault-testuser SHARED_WORKSPACE=/Users/Shared/sv-testuser \
-            "$SYSTEM_BASH" -c "$render"$'\nrender_shared_workspace_readme' 2>&1) || {
-            fail "workspace README explains the sandbox" "render succeeds" "$out"
-            return
-        }
-
-        first_line="${out%%$'\n'*}"
-        placeholders=$(grep -o '__[A-Z_]*__' <<< "$out" | sort -u | tr '\n' ' ')
-        if [[ "$first_line" != "# Sandvault workspace for testuser" ]]; then
-            fail "workspace README explains the sandbox" \
-                "markdown heading on line 1, not indented text" \
-                "$first_line"
-        elif [[ "$out" != *"sandbox account sandvault-testuser"* ]]; then
-            fail "workspace README explains the sandbox" \
-                "says what the sandbox account is" \
-                "$out"
-        elif [[ "$out" != *"This workspace belongs to the default sandbox"* ]]; then
-            fail "workspace README explains the sandbox" \
-                "names the sandbox this workspace belongs to" \
-                "$out"
-        elif [[ -n "$placeholders" ]]; then
-            fail "workspace README explains the sandbox" \
-                "every template placeholder substituted" \
-                "$placeholders"
-        else
-            pass "workspace README explains the sandbox"
-        fi
-    }
-    queue_test test_workspace_readme_explains_sandbox
-
-    # The host rewrites SANDVAULT-README.md on every run, and $SHARED_WORKSPACE is
-    # writable by the sandbox user, so that destination can be a symlink the
-    # sandbox planted. A plain ">" redirect follows it and truncates the target
-    # -- as the host user, on a file the sandbox may not even be able to read.
-    # Assert the write replaces the link instead of following it, and that the
-    # result stays readable by the sandbox: mktemp gives 0600, so the write has
-    # to set the mode deliberately or the README becomes host-only.
-    test_workspace_readme_write_does_not_follow_symlink() {
-        local workdir dest victim run render write rc
+    # SANDVAULT-README.md lives in $SHARED_WORKSPACE, which the sandbox user can
+    # write, so anything at that path may be a symlink the sandbox planted. A
+    # plain ">" redirect follows it and truncates the target as the host user,
+    # and "mv" moves *into* a linked directory. These tests run the script's own
+    # write function against a scratch workspace and check that the host never
+    # writes through a link.
+    #
+    # Usage: run_readme_write WORKDIR [PLANT_CMD]
+    # PLANT_CMD runs inside the render step, i.e. after the "already exists"
+    # check and before the rename, which is the window a racing sandbox gets.
+    run_readme_write() {
+        local workdir="$1" plant="${2:-}" run render write
         render=$(sed -n '/^render_shared_workspace_readme() {$/,/^}$/p' "$SV_BASE")
         write=$(sed -n '/^write_shared_workspace_readme() {$/,/^}$/p' "$SV_BASE")
-        if [[ -z "$write" ]]; then
-            fail "workspace README write does not follow a symlink" \
-                "write_shared_workspace_readme in sv" "function not found"
-            return
-        fi
-
-        workdir="$(mktemp -d)"
-        dest="$workdir/SANDVAULT-README.md"
-        victim="$workdir/host-private"
-        printf 'HOST PRIVATE DATA\n' > "$victim"
-        /bin/chmod 0600 "$victim"
-        ln -s "$victim" "$dest"
-
-        run="$workdir/run"
+        [[ -n "$render" && -n "$write" ]] || { echo "functions not found in sv"; return 1; }
+        run="$workdir/../run-readme-write"
         {
             echo '#!/bin/bash'
             echo 'set -Eeuo pipefail'
             echo 'trace() { :; }'
             printf '%s\n' "$render"
+            if [[ -n "$plant" ]]; then
+                # Rename the real renderer and wrap it so the link appears mid-write.
+                echo 'eval "real_$(declare -f render_shared_workspace_readme)"'
+                printf 'render_shared_workspace_readme() { %s; real_render_shared_workspace_readme; }\n' "$plant"
+            fi
             printf '%s\n' "$write"
             echo 'write_shared_workspace_readme'
         } > "$run"
-        /bin/chmod +x "$run"
-
-        rc=0
         WORKSPACE="$SCRIPT_DIR/.." HOST_USER=testuser SV_PROFILE='' \
             SANDVAULT_USER=sandvault-testuser SHARED_WORKSPACE="$workdir" \
-            "$SYSTEM_BASH" "$run" >"$workdir/out" 2>&1 || rc=$?
-
-        if (( rc != 0 )); then
-            fail "workspace README write does not follow a symlink" \
-                "write succeeds with a planted symlink" \
-                "exit $rc: $(cat "$workdir/out")"
-            rm -rf "$workdir"
-            return
-        fi
-
-        if [[ "$(cat "$victim")" != 'HOST PRIVATE DATA' ]]; then
-            fail "workspace README write does not follow a symlink" \
-                "symlink target untouched" \
-                "target was overwritten by the host"
-        elif [[ -L "$dest" ]]; then
-            fail "workspace README write does not follow a symlink" \
-                "destination is a regular file" \
-                "destination is still a symlink"
-        elif [[ "$(/usr/bin/stat -f '%Lp' "$dest")" != "644" ]]; then
-            fail "workspace README write does not follow a symlink" \
-                "README mode 644 so the sandbox can read it, not mktemp's 600" \
-                "mode $(/usr/bin/stat -f '%Lp' "$dest")"
-        elif ! /usr/bin/grep -q '^# Sandvault workspace for testuser' "$dest"; then
-            fail "workspace README write does not follow a symlink" \
-                "destination holds the rendered README" \
-                "rendered heading missing"
-        else
-            pass "workspace README write does not follow a symlink"
-        fi
-        rm -rf "$workdir"
+            SANDVAULT_FILE_RIGHTS="user:$(id -un) allow read" \
+            "$SYSTEM_BASH" "$run" 2>&1
     }
-    queue_test test_workspace_readme_write_does_not_follow_symlink
 
-    # A symlink to a *directory* is the other half of the same problem: "mv"
-    # treats that as "move into this directory", so the README would land inside
-    # a host directory the sandbox chose and the link would survive -- while the
-    # command still reported success. The write has to replace the path.
-    test_workspace_readme_write_survives_directory_symlink() {
-        local workdir dest hostdir run render write rc
-        render=$(sed -n '/^render_shared_workspace_readme() {$/,/^}$/p' "$SV_BASE")
-        write=$(sed -n '/^write_shared_workspace_readme() {$/,/^}$/p' "$SV_BASE")
-        if [[ -z "$write" ]]; then
-            fail "workspace README write survives a directory symlink" \
-                "write_shared_workspace_readme in sv" "function not found"
-            return
-        fi
+    # Readme scratch layout: $base/ws is the workspace, $base holds the host
+    # files the sandbox would aim at (outside the workspace, as in real life).
+    new_readme_scratch() {
+        local base
+        base="$(mktemp -d)"
+        mkdir "$base/ws" "$base/host-dir"
+        printf 'HOST PRIVATE DATA\n' > "$base/host-private"
+        /bin/chmod 0600 "$base/host-private"
+        echo "$base"
+    }
 
-        workdir="$(mktemp -d)"
-        hostdir="$workdir/host-dir"
-        mkdir -p "$hostdir"
-        dest="$workdir/SANDVAULT-README.md"
-        ln -s "$hostdir" "$dest"
-
-        run="$workdir/run"
-        {
-            echo '#!/bin/bash'
-            echo 'set -Eeuo pipefail'
-            echo 'trace() { :; }'
-            printf '%s\n' "$render"
-            printf '%s\n' "$write"
-            echo 'write_shared_workspace_readme'
-        } > "$run"
-        /bin/chmod +x "$run"
-
-        rc=0
-        WORKSPACE="$SCRIPT_DIR/.." HOST_USER=testuser SV_PROFILE='' \
-            SANDVAULT_USER=sandvault-testuser SHARED_WORKSPACE="$workdir" \
-            "$SYSTEM_BASH" "$run" >"$workdir/out" 2>&1 || rc=$?
-
-        if [[ -n "$(ls -A "$hostdir")" ]]; then
-            fail "workspace README write survives a directory symlink" \
-                "nothing written inside the linked host directory" \
-                "host directory gained: $(ls -A "$hostdir")"
+    # First run: the README must be created as a regular file.
+    test_workspace_readme_created_when_missing() {
+        local name="workspace README created when missing" base dest out
+        base="$(new_readme_scratch)"; dest="$base/ws/SANDVAULT-README.md"
+        if ! out=$(run_readme_write "$base/ws"); then
+            fail "$name" "write succeeds" "$out"
         elif [[ -L "$dest" || ! -f "$dest" ]]; then
-            fail "workspace README write survives a directory symlink" \
-                "destination replaced by a regular file" \
-                "destination is $( [[ -L "$dest" ]] && echo 'still a symlink' || echo 'missing' )"
-        elif (( rc != 0 )); then
-            fail "workspace README write survives a directory symlink" \
-                "write succeeds" "exit $rc: $(cat "$workdir/out")"
+            fail "$name" "regular file at the README path" "missing or a link"
         else
-            pass "workspace README write survives a directory symlink"
+            pass "$name"
         fi
-        rm -rf "$workdir"
+        rm -rf "$base"
     }
-    queue_test test_workspace_readme_write_survives_directory_symlink
+    queue_test test_workspace_readme_created_when_missing
+
+    # An existing README is left alone: the host does not read or rewrite it.
+    test_workspace_readme_existing_left_alone() {
+        local name="workspace README left alone when present" base dest out
+        base="$(new_readme_scratch)"; dest="$base/ws/SANDVAULT-README.md"
+        printf 'user edited\n' > "$dest"
+        if ! out=$(run_readme_write "$base/ws"); then
+            fail "$name" "write succeeds" "$out"
+        elif [[ "$(cat "$dest")" != 'user edited' ]]; then
+            fail "$name" "existing README unchanged" "README was rewritten"
+        else
+            pass "$name"
+        fi
+        rm -rf "$base"
+    }
+    queue_test test_workspace_readme_existing_left_alone
+
+    # The sandbox can plant a link after the existence check. The rename must
+    # replace it rather than write through it.
+    test_workspace_readme_racing_file_symlink() {
+        local name="workspace README racing file symlink replaced" base dest out
+        base="$(new_readme_scratch)"; dest="$base/ws/SANDVAULT-README.md"
+        if ! out=$(run_readme_write "$base/ws" "ln -s '$base/host-private' '$dest'"); then
+            fail "$name" "write succeeds" "$out"
+        elif [[ "$(cat "$base/host-private")" != 'HOST PRIVATE DATA' ]]; then
+            fail "$name" "symlink target untouched" "target was overwritten by the host"
+        elif [[ -L "$dest" || ! -f "$dest" ]]; then
+            fail "$name" "link replaced by the README" "destination is still a link or missing"
+        else
+            pass "$name"
+        fi
+        rm -rf "$base"
+    }
+    queue_test test_workspace_readme_racing_file_symlink
+
+    # Same race with a link to a *directory*: plain "mv" would move the README
+    # into the host directory and leave the link in place.
+    test_workspace_readme_racing_directory_symlink() {
+        local name="workspace README racing directory symlink replaced" base dest out
+        base="$(new_readme_scratch)"; dest="$base/ws/SANDVAULT-README.md"
+        if ! out=$(run_readme_write "$base/ws" "ln -s '$base/host-dir' '$dest'"); then
+            fail "$name" "write succeeds" "$out"
+        elif [[ -n "$(/bin/ls -A "$base/host-dir")" ]]; then
+            fail "$name" "nothing written inside the linked host directory" "host directory gained: $(/bin/ls -A "$base/host-dir")"
+        elif [[ -L "$dest" || ! -f "$dest" ]]; then
+            fail "$name" "link replaced by the README" "destination is still a link or missing"
+        else
+            pass "$name"
+        fi
+        rm -rf "$base"
+    }
+    queue_test test_workspace_readme_racing_directory_symlink
 
     # Should be able to access home directory
     queue_test assert_sandbox_exit_code "sv s -- touch $SANDVAULT_HOME/README.md" 0 touch -c "$SANDVAULT_HOME/README.md"

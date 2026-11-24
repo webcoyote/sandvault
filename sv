@@ -1610,9 +1610,9 @@ fi
 render_shared_workspace_readme() {
     local profile_note
     if [[ -n "$SV_PROFILE" ]]; then
-        profile_note="This workspace belongs to profile $SV_PROFILE (sandbox $SANDVAULT_USER). A profile is a separate sandbox with its own home directory, workspace, SSH keys, and Keychain, and profiles cannot read one another."
+        profile_note="profile $SV_PROFILE"
     else
-        profile_note="This workspace belongs to the default sandbox. A profile is a separate sandbox with its own home directory, workspace, SSH keys, and Keychain, and profiles cannot read one another: run sv --profile NAME with any command to use one, or sv profiles list to see every sandbox you own."
+        profile_note="the default profile"
     fi
     sed \
         -e "s|__HOST_USER__|$HOST_USER|g" \
@@ -1623,40 +1623,34 @@ render_shared_workspace_readme() {
         "$WORKSPACE/helpers/workspace-readme.md"
 }
 
-# Keep the README current. It is the only file that says what the sandbox is, so
-# it is rewritten whenever the rendered content differs from what is on disk (new
-# version, new profile, first run, deleted file). --no-build leaves the
-# workspace untouched.
+# Create the README if it is missing (first run, deleted file); an existing one
+# is left alone. --no-build leaves the workspace untouched.
+#
+# $SHARED_WORKSPACE is writable by the sandbox user, so the host must not open,
+# read, or chmod any path inside it: the sandbox can swap any entry there for a
+# symlink at any moment (a ">" redirect would truncate the link's target, a
+# chmod would change its mode, a cat could block on a FIFO). The existence test
+# only looks at the path, and the only write is the final rename, which replaces
+# whatever is at $readme without following it.
 write_shared_workspace_readme() {
-    local readme contents tmp
+    local readme tmp
     readme="$SHARED_WORKSPACE/SANDVAULT-README.md"
-    contents="$(render_shared_workspace_readme)"
-    if [[ -f "$readme" && "$(cat "$readme")" == "$contents" ]]; then
+    if [[ -e "$readme" ]]; then
         return 0
     fi
     trace "Writing $readme"
-    # Write beside the target and rename into place. A rename replaces a symlink
-    # planted at $readme instead of following it, so the sandbox user cannot make
-    # the host truncate a file of its choosing (a plain ">" redirect does).
-    # mktemp's 0600 would leave the README unreadable to the sandbox, which is
-    # the whole point of the file, so set the mode before the rename.
-    tmp="$(mktemp "$SHARED_WORKSPACE/.SANDVAULT-README.XXXXXX")"
-    if ! render_shared_workspace_readme > "$tmp" || ! /bin/chmod 0644 "$tmp"; then
-        rm -f "$tmp"
-        return 1
-    fi
-    # "mv" treats a directory -- or a symlink to one -- as "move into", not
-    # "replace", so clear a planted link first. Otherwise the file lands inside
-    # a host directory the sandbox chose, and the link survives the write.
-    [[ -L "$readme" ]] && /bin/rm -f "$readme"
-    if ! /bin/mv -f "$tmp" "$readme"; then
-        rm -f "$tmp"
-        return 1
-    fi
-    # Post-condition: the path is now the file, not a link re-planted in the
-    # window above. Fail loudly rather than leave a README that never updates.
-    if [[ ! -f "$readme" || -L "$readme" ]]; then
-        /bin/rm -f "$readme/$(basename "$tmp")"
+    # Stage in /Users/Shared, the workspace's parent: it is sticky (the sandbox
+    # cannot remove or replace a file it does not own) and on the same volume, so
+    # the mv below is a single rename(2) rather than a copy.
+    tmp="$(mktemp "${SHARED_WORKSPACE%/*}/.sv-readme.XXXXXX")"
+    # mktemp gives 0600 and no ACL; grant the sandbox the same rights as other
+    # workspace files so it can still read (and touch) the README. mv -h
+    # replaces a symlink to a directory instead of moving into it.
+    if ! render_shared_workspace_readme > "$tmp" \
+        || ! /bin/chmod 0644 "$tmp" \
+        || ! /bin/chmod +a "$SANDVAULT_FILE_RIGHTS" "$tmp" \
+        || ! /bin/mv -fh "$tmp" "$readme"; then
+        /bin/rm -f "$tmp"
         return 1
     fi
 }
