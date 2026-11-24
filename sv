@@ -3,6 +3,9 @@
 set -Eeuo pipefail
 trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
+# Used when debugging with bash -x
+PS4='+ ${BASH_SOURCE}:${LINENO}: '
+
 # Resolve script location
 # perform "readlink -f", which is not supported in macOS system bash
 SOURCE="${BASH_SOURCE[0]}"
@@ -34,6 +37,17 @@ heredoc(){ IFS=$'\n' read -r -d '' "${1}" || true; }
 
 quote_zsh_args() {
     /bin/zsh -fc 'for arg; do printf "%s " "${(q)arg}"; done' -- "$@"
+}
+
+# The profile on disk is root owned and only rewritten on a rebuild, so a policy
+# change would never reach an installed machine. Compare the version line this
+# sv writes with the one on disk.
+profile_needs_rewrite() {
+    local want="$1" file="$2" have
+    [[ -f "$file" ]] || return 0
+    have="$(sed -n 's/^;; sv-profile-version: //p' "$file" 2>/dev/null | head -1)"
+    [[ "$have" == "$want" ]] && return 1
+    return 0
 }
 
 configure_ssh_access() {
@@ -111,6 +125,10 @@ fi
 # Resources
 ###############################################################################
 readonly VERSION="1.40.0"
+
+# Bump when the sandbox policy changes: the profile is root owned, so the
+# version line it carries is how an installed machine learns it is stale.
+readonly SV_SANDBOX_PROFILE_VERSION="3"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -1769,7 +1787,23 @@ else
     if [[ "$NO_BUILD" == "true" && ! -f "$SANDBOX_PROFILE" ]]; then
         abort "Sandbox profile is missing; cannot rebuild because --no-build set"
     fi
-    if [[ "$REBUILD" == "true" || ! -f "$SANDBOX_PROFILE" ]]; then
+    if [[ "$REBUILD" == "true" ]] || profile_needs_rewrite "$SV_SANDBOX_PROFILE_VERSION" "$SANDBOX_PROFILE"; then
+        # --no-build says this run may not touch root owned files, so a stale
+        # profile stops the run instead of being rewritten behind the flag.
+        if [[ "$NO_BUILD" == "true" ]]; then
+            abort "Sandbox profile needs a rewrite; rerun without --no-build: sv --rebuild build (needs sudo)"
+        fi
+        # An ordinary run rewrites a stale profile, and only --rebuild used to
+        # ask for a password, so check sudo here: without this the write below
+        # dies inside the tee with "sudo: a password is required" and the ERR
+        # trap, never reaching a message the user can act on.
+        if ! sudo -p "Password required to update the sandbox profile: " /usr/bin/true; then
+            if [[ -n "$SV_PROFILE" ]]; then
+                abort "Sandbox profile is stale; run 'sv --rebuild build --profile $SV_PROFILE' (needs sudo)"
+            fi
+            abort "Sandbox profile is stale; run 'sv --rebuild build' (needs sudo)"
+        fi
+
         debug "Configuring passwordless access to $SANDVAULT_USER..."
 
         # Create sandbox profile to restrict /Volumes access, which prevents
@@ -1781,6 +1815,7 @@ else
 heredoc SANDBOX_PROFILE_CONTENT << EOF
 ;; Sandbox profile for sandvault
 (version 1)
+;; sv-profile-version: __SV_PROFILE_VERSION__
 (allow default)
 
 ;; restrict writes to everything
@@ -1795,11 +1830,69 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
     (subpath "/Volumes/Macintosh HD"))
 
 ;; Deny mounting disks
+(deny file-mount file-unmount)
+
+;; Deny every per-user service except the ones a session needs. The sandbox
+;; user runs in the bootstrap namespace of the host user, so an allowed lookup
+;; lets the host user's service act for the sandbox: open on a bundle made
+;; LaunchServices launch it as the host user, outside this profile.
+(deny mach-lookup)
+(allow mach-lookup
+  ;; CFPreferences: defaults, plutil, curl and the other CoreFoundation
+  ;; clients look up com.apple.cfprefsd.agent and com.apple.cfprefsd.daemon.
+  ;; Kept as insurance, not as a fix: defaults write, read and delete pass
+  ;; with only com.apple.system. allowed, and a denied preferences lookup
+  ;; falls back to reading the plist, so a client that needs this one fails
+  ;; silently rather than loudly.
+  (global-name-prefix "com.apple.cfprefsd")
+  ;; opendirectoryd's libinfo, which carries the prefs path and user and group
+  ;; names: without it id -un and whoami print a uid, id loses group names,
+  ;; dscl fails with eServerError, and defaults writes do not persist.
+  (global-name-prefix "com.apple.system.")
+  ;; DNS, and the sockets curl, git and node resolve through.
+  (global-name-prefix "com.apple.dnssd")
+  (global-name-prefix "com.apple.mDNSResponder")
+  (global-name-prefix "com.apple.networkd")
+  (global-name-prefix "com.apple.SystemConfiguration")
+  ;; TLS trust evaluation. Measured: without the com.apple.trustd prefix,
+  ;; curl, git and python3 all verify https://example.com and
+  ;; git ls-remote answers, so the prefix carries none of it. The one name
+  ;; curl needs is TrustEvaluationAgent: with it denied, curl
+  ;; https://example.com fails with (60) unable to get local issuer
+  ;; certificate.
+  (global-name "com.apple.TrustEvaluationAgent")
+  ;; LaunchServices, which Chrome and Chromium check in with at startup: with
+  ;; it denied, start-chrome (sv --chrome) reports "Chrome exited
+  ;; unexpectedly" and the browser logs nothing. This one name is the narrow
+  ;; grant that restores Chrome, and a launch still does not reach the host:
+  ;; open on the test bundle fails with kLSNoExecutableErr, and open -a
+  ;; Calculator leaves no Calculator process owned by the host user.
+  (global-name "com.apple.coreservices.launchservicesd")
+  ;; Keychain access, reads and writes, by security and the agent tools: the
+  ;; lookup reaches the host user's securityd, so a session can add items too.
+  ;; Without it security reports "One or more parameters passed to a function
+  ;; were not valid".
+  (global-name "com.apple.SecurityServer")
+  ;; OCSP revocation checks. not measured: no probe failed without it.
+  (global-name "com.apple.ocspd")
+  ;; Chrome / Chromium multi-process IPC. Chrome's child processes (renderer,
+  ;; GPU, utility) register and look up dynamic Mach services whose names
+  ;; contain the parent PID. Without these, child processes log
+  ;; "No rendezvous client, terminating process (parent died?)" and exit,
+  ;; leaving the browser unable to serve CDP commands (connectOverCDP hangs).
+  ;; Crashpad (crash reporter) similarly registers per-launch Mach services.
+  ;; The prefixes are scoped to Chrome/Chromium names and carry no host-user
+  ;; authority — they are ad-hoc bootstrap services, not launchd daemons.
+  (global-name-prefix "com.google.Chrome.MachPortRendezvousServer.")
+  (global-name-prefix "com.google.Chromium.MachPortRendezvousServer.")
+  (global-name-prefix "org.chromium.crashpad."))
+
+;; Keep these four denied explicitly, after the allow above, so that widening
+;; the allow later cannot quietly re-admit them.
 ;; diskarbitrationd -- diskutil mount, hdiutil attach, Finder disk handling
 ;; NetAuthAgent     -- NetFS: 'open smb://...', Connect to Server
 ;; NetAuthSysAgent
 ;; appleeventsd     -- disallow osascript telling Finder to do it
-(deny file-mount file-unmount)
 (deny mach-lookup
   (global-name "com.apple.DiskArbitration.diskarbitrationd")
   (global-name "com.apple.NetAuthAgent")
@@ -1869,9 +1962,30 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
     (literal "/bin/ps")
     (with no-sandbox))
 EOF
+        # The version line marks which policy this profile carries. The
+        # placeholder is filled in here rather than expanded in the heredoc so
+        # that profile_needs_rewrite compares against the one constant.
+        # shellcheck disable=SC2154 # SANDBOX_PROFILE_CONTENT is referenced but not assigned (yes it is)
+        SANDBOX_PROFILE_CONTENT="${SANDBOX_PROFILE_CONTENT//__SV_PROFILE_VERSION__/$SV_SANDBOX_PROFILE_VERSION}"
+        # Write a fresh root owned temp file beside the target, then rename it
+        # onto the target: rewriting in place lets a concurrent session apply a
+        # half-written, more permissive profile, and a fixed temp name would let
+        # two writers share one inode.
+        SANDBOX_PROFILE_TMP="$(sudo /usr/bin/mktemp "/var/sandvault/.sandbox-$SANDVAULT_USER.XXXXXXXX")"
         # shellcheck disable=SC2154
-        echo "$SANDBOX_PROFILE_CONTENT" | sudo tee "$SANDBOX_PROFILE" > /dev/null
-        sudo /bin/chmod 0444 "$SANDBOX_PROFILE"
+        echo "$SANDBOX_PROFILE_CONTENT" | sudo tee "$SANDBOX_PROFILE_TMP" > /dev/null
+        sudo /bin/chmod 0444 "$SANDBOX_PROFILE_TMP"
+        # A profile that fails to parse would be installed and then stick for
+        # good, because its own version line makes it look current, so load it
+        # before the rename.
+        if ! sudo /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE_TMP" /usr/bin/true &>/dev/null; then
+            # Second run only to keep the ERR trap quiet while the text is
+            # captured for the abort message.
+            SANDBOX_PROFILE_ERROR="$(sudo /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE_TMP" /usr/bin/true 2>&1 || true)"
+            sudo rm -f "$SANDBOX_PROFILE_TMP"
+            abort "Sandbox profile does not load: $SANDBOX_PROFILE_ERROR"
+        fi
+        sudo /bin/mv -f "$SANDBOX_PROFILE_TMP" "$SANDBOX_PROFILE"
     fi
 fi
 

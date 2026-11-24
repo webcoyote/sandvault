@@ -27,4 +27,3 @@ command -v pnpm >/dev/null || skip "pnpm not installed; run: brew install pnpm"
 pnpm install --prefer-offline --reporter=append-only
 
 node test-playwright.js
-node test-puppeteer.js

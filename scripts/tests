@@ -514,6 +514,150 @@ run_tests() {
     }
     queue_test test_codex_code_mode_host_warmup_present
 
+    # LaunchServices answers in the bootstrap namespace of the host user, so a
+    # bundle opened from inside the sandbox ran as the host user. Build a bundle
+    # whose executable reports its identity to a path the sandbox cannot write,
+    # open it from inside, and require that no such file appears. A hand-built
+    # bundle only proves its own kLSNoExecutableErr, so a system app is opened by
+    # name as well: the host must gain no Calculator process from it.
+    test_sandbox_cannot_launch_as_host() {
+        local _ app calc_output calc_pids calc_status live live_output marker output status
+        marker="/Users/Shared/sv-launch-probe.$$"
+        app="$SHARED_WORKSPACE/sv-launch-probe.app"
+        rm -f "$marker"
+        rm -rf "$app"
+        mkdir -p "$app/Contents/MacOS"
+        cat > "$app/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>local.sv.launchprobe</string>
+<key>CFBundleExecutable</key><string>probe</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+PLIST
+        printf '#!/bin/sh\nid -un > %s 2>&1\n' "$marker" > "$app/Contents/MacOS/probe"
+        chmod +x "$app/Contents/MacOS/probe"
+        chmod -R a+rX "$app"
+
+        set +e
+        output=$(sv_cmd s -- open "$app" 2>&1)
+        status=$?
+        set -e
+        # A launch that the profile lets through can still arrive after the open
+        # call returns, so poll instead of waiting a fixed time: a late launch
+        # must be caught, not slept past.
+        for _ in $(seq 1 15); do
+            [[ -e "$marker" ]] && break
+            sleep 0.2
+        done
+        # The marker proves nothing if sv aborted before it started the sandboxed
+        # shell (--no-build with a stale profile, or a version mismatch): no
+        # marker appears because the profile under test was never applied, so
+        # keep sv's own message for the failure text.
+        set +e
+        live_output=$(sv_cmd s -- true 2>&1)
+        live=$?
+        set -e
+        if [[ -e "$marker" ]]; then
+            fail "sandbox cannot launch as the host user" \
+                "no host-owned file appears" "the bundle ran as $(cat "$marker")"
+        elif [[ "$live" -ne 0 ]]; then
+            fail "sandbox cannot launch as the host user" \
+                "the sandbox session runs" "sv s -- true exited $live: $live_output"
+        elif [[ "$output" == *"no such file or directory: open"* || "$output" == *"command not found"* ]]; then
+            fail "sandbox cannot launch as the host user" \
+                "open runs from inside the sandbox" "the harness ran no open: $status | $output"
+        else
+            # Opened by name from inside the sandbox. Unsandboxed, the same open
+            # as the sandvault user starts a Calculator owned by $HOST_USER, so an
+            # empty pgrep is what "the launch never reaches the host" means. A
+            # Calculator the host already had open before this run also shows up
+            # here, which is what the recorded pids in the failure text are for.
+            set +e
+            calc_output=$(sv_cmd s -- open -a Calculator 2>&1)
+            calc_status=$?
+            set -e
+            calc_pids=""
+            for _ in $(seq 1 15); do
+                # No match is the pass case, so swallow pgrep's exit 1 (and the
+                # SIGPIPE head can cause) instead of dying under errexit.
+                calc_pids=$(pgrep -u "$HOST_USER" -fl 'Calculator.app' 2>/dev/null | head -3 || true)
+                [[ -z "$calc_pids" ]] || break
+                sleep 0.2
+            done
+            if [[ -n "$calc_pids" ]]; then
+                fail "sandbox cannot launch as the host user" \
+                    "no Calculator process owned by $HOST_USER" \
+                    "open -a Calculator exited $calc_status and the host gained [$calc_pids]: $calc_output"
+            else
+                pass "sandbox cannot launch as the host user (bundle open exit $status: $(printf '%s' "$output" | tr '\n' ' '); open -a Calculator exit $calc_status: $(printf '%s' "$calc_output" | tr '\n' ' '))"
+            fi
+        fi
+        # Cleanup runs as the sandbox user in nested runs, where /Users/Shared is
+        # sticky: the marker can be unremovable, so remove the bundle first and
+        # let the marker removal fail quietly instead of aborting under errexit.
+        rm -rf "$app"
+        rm -f "$marker" 2>/dev/null || true
+    }
+    queue_test test_sandbox_cannot_launch_as_host
+
+    # The profile on disk is root owned and rewritten only on a rebuild, so a
+    # policy change would never reach an installed machine. profile_needs_rewrite
+    # compares the version line sv writes with the one on disk, and a machine
+    # with no profile at all needs a rewrite too.
+    test_sv_rewrites_stale_sandbox_profile() {
+        local current dir fn got stale version
+        fn=$(sed -n '/^profile_needs_rewrite() {$/,/^}$/p' "$SV_BASE")
+        if [[ -z "$fn" ]]; then
+            fail "sv rewrites a stale sandbox profile" "profile_needs_rewrite in sv" "function not found"
+            return
+        fi
+        # Read the version sv stamps, so bumping the constant cannot leave this
+        # test asserting a number sv no longer writes.
+        version=$(sed -n 's/^readonly SV_SANDBOX_PROFILE_VERSION="\([0-9][0-9]*\)"$/\1/p' "$SV_BASE")
+        if [[ -z "$version" ]]; then
+            fail "sv rewrites a stale sandbox profile" \
+                "readonly SV_SANDBOX_PROFILE_VERSION in sv" "not found"
+            return
+        fi
+        got=$(
+            SB_PROFILE_VERSION=2 SESSION_DIR_UNDER_TEST=1 \
+            /bin/bash -c "$fn"'
+                printf "%s" "$(profile_needs_rewrite "$1" /dev/null; echo $?)"
+            ' _ "$version"
+        )
+        if [[ "$got" != "0" ]]; then
+            fail "sv rewrites a stale sandbox profile" "a profile with no version line needs a rewrite" "$got"
+            return
+        fi
+        # /dev/null stops at the missing-file branch, so the pair below is what
+        # runs the compare: a profile carrying another version needs a rewrite,
+        # one carrying this version does not.
+        dir="$(mktemp -d)"
+        stale="$dir/stale.sb"
+        current="$dir/current.sb"
+        printf ';; sv-profile-version: %s\n' "$((version - 1))" > "$stale"
+        printf ';; sv-profile-version: %s\n' "$version" > "$current"
+        got=$(
+            /bin/bash -c "$fn"'
+                printf "%s%s" \
+                    "$(profile_needs_rewrite "$3" "$1"; echo $?)" \
+                    "$(profile_needs_rewrite "$3" "$2"; echo $?)"
+            ' _ "$stale" "$current" "$version"
+        )
+        rm -rf "$dir"
+        if [[ "$got" != "01" ]]; then
+            fail "sv rewrites a stale sandbox profile" \
+                "01 (a profile at another version needs a rewrite, one at $version does not)" "$got"
+        else
+            pass "sv rewrites a stale sandbox profile"
+        fi
+    }
+    queue_test test_sv_rewrites_stale_sandbox_profile
+
     # git runs several config values as commands on the host (core.fsmonitor,
     # core.sshCommand, core.hooksPath, core.pager, [filter] drivers). The clone
     # directory is guest-writable, and so is any workspace path passed as the
@@ -533,7 +677,7 @@ run_tests() {
 
         mkdir -p "$src"
         git -C "$src" init -q
-        git -C "$src" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+        GIT_CONFIG_GLOBAL=/dev/null git -C "$src" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
         printf '#!/bin/sh\ntouch %s\n' "$marker" > "$workdir/hook"
         chmod +x "$workdir/hook"
         git -C "$src" config core.fsmonitor "$workdir/hook"
@@ -1864,6 +2008,25 @@ STUB
         SV_CLONE_WORKSPACE_ROOT="$CLONE_WORKSPACE" "$bash_path" "$SV_CLONE_BASE" "$@"
     }
 
+    # Create a minimal throwaway git repo with a GitHub-shaped origin.
+    # Usage: make_test_repo <variable_name> [owner/repo]
+    # Writes the path into the named variable.  The repo lives under
+    # $CLONE_WORKSPACE so cleanup_clone_workspace sweeps it automatically.
+    # The repo gets one empty commit so git clone / bundle work.
+    # Tests should use this instead of pointing sv-clone at the real
+    # sandvault checkout, which must never have its config mutated.
+    make_test_repo() {
+        local _var="$1"
+        local github_path="${2:-sv-test-org/test-repo}"
+        local dir
+        dir="$(mktemp -d "$CLONE_WORKSPACE/src.XXXXXX")"
+        GIT_CONFIG_GLOBAL=/dev/null git -C "$dir" init -q
+        GIT_CONFIG_GLOBAL=/dev/null git -C "$dir" -c user.email=t@t -c user.name=t \
+            commit -q --allow-empty -m "init"
+        git -C "$dir" remote add origin "git@github.com:${github_path}.git"
+        eval "$_var=\$dir"
+    }
+
     # Create a fake `gh` on PATH that records every invocation (to
     # GH_STUB_LOG) and tracks a minimal deploy-key registry (in
     # GH_STUB_STATE, set by the caller as env vars), so the -k/-w code paths
@@ -1943,29 +2106,15 @@ STUB_EOF
     }
 
     # Test cloning a local repository via sv-clone and wiring remotes.
+    # Uses a throwaway repo so the real checkout's config is never at risk.
     test_sv_clone_local() {
-        local src_repository
-        local clone_name
-        local clone_path
-        local output
-        local status
-        local host_origin
-        local remote_output
-        local expected_upstream
+        local src_repository clone_path output status
+        local host_origin remote_output
+        local github_path="sv-test-org/clone-local"
 
-        src_repository="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null || true)"
-        if [[ -z "$src_repository" ]] || ! git -C "$src_repository" rev-parse --git-dir &>/dev/null; then
-            fail "sv-clone clones local repository" "current repository available" "$src_repository"
-            return
-        fi
+        make_test_repo src_repository "$github_path"
 
-        clone_name="$(basename "$src_repository")"
-        clone_path="$CLONE_WORKSPACE/repos/$clone_name"
-        expected_upstream="$(git -C "$src_repository" remote get-url origin 2>/dev/null || true)"
-        if [[ -z "$expected_upstream" ]]; then
-            fail "sv-clone clones local repository" "source repository has origin remote" "$src_repository"
-            return
-        fi
+        clone_path="$CLONE_WORKSPACE/repos/$(basename "$src_repository")"
 
         # Clean up any previous clone so the test is idempotent.
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
@@ -1990,8 +2139,8 @@ STUB_EOF
 
         # Host origin should still point at the upstream remote.
         host_origin="$(git -C "$src_repository" remote get-url origin 2>/dev/null)"
-        if [[ "$host_origin" != "$expected_upstream" ]]; then
-            fail "local repository keeps origin at upstream" "$expected_upstream" "$host_origin"
+        if [[ "$host_origin" != "git@github.com:${github_path}.git" ]]; then
+            fail "local repository keeps origin at upstream" "git@github.com:${github_path}.git" "$host_origin"
             return
         fi
 
@@ -2002,18 +2151,15 @@ STUB_EOF
             return
         fi
 
-        # The clone's origin should point to the upstream repo. Deploy key
-        # setup may rewrite the URL from HTTPS to SSH, so compare the
-        # owner/repo path rather than the full URL.
+        # The clone's origin should point to the upstream repo.
         set +e
         remote_output=$(git -C "$clone_path" config remote.origin.url 2>&1)
         status=$?
         set -e
-        local actual_repo_path expected_repo_path
+        local actual_repo_path
         actual_repo_path="$(github_repo_path "$remote_output")"
-        expected_repo_path="$(github_repo_path "$expected_upstream")"
-        if [[ "$status" -ne 0 || "$actual_repo_path" != "$expected_repo_path" ]]; then
-            fail "sv-clone clone origin points to upstream" "$expected_upstream" "$status | $remote_output"
+        if [[ "$status" -ne 0 || "$actual_repo_path" != "$github_path" ]]; then
+            fail "sv-clone clone origin points to upstream" "$github_path" "$status | $remote_output"
             return
         fi
 
@@ -2119,17 +2265,20 @@ STUB_EOF
     # Test that sv-clone does not generate a deploy key or touch the origin
     # remote unless -k/-w is given.
     test_sv_clone_no_flag_no_deploy_key() {
-        local clone_path key_file origin_after output status
-        local https_repository="https://github.com/webcoyote/sandvault.git"
+        local src_repository clone_path key_file origin_after output status
+        local github_path="sv-test-org/no-flag-test" repo_name
+        local expected_origin="git@github.com:${github_path}.git"
 
-        clone_path="$CLONE_WORKSPACE/repos/sandvault"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
 
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
         sv_cmd s -- rm -f "$key_file" "$key_file.pub" >/dev/null 2>&1
 
         set +e
-        output=$(sv_clone_cmd "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(sv_clone_cmd "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2138,8 +2287,8 @@ STUB_EOF
         fi
 
         origin_after=$(git -C "$clone_path" config remote.origin.url 2>/dev/null || true)
-        if [[ "$origin_after" != "$https_repository" ]]; then
-            fail "sv-clone default clone leaves origin untouched" "$https_repository" "$origin_after"
+        if [[ "$origin_after" != "$expected_origin" ]]; then
+            fail "sv-clone default clone leaves origin untouched" "$expected_origin" "$origin_after"
             return
         fi
 
@@ -2157,12 +2306,15 @@ STUB_EOF
     # Test that -k generates a read-only deploy key, rewrites the origin to
     # SSH, does not request write access, and is idempotent on re-run.
     test_sv_clone_dash_k_read_only() {
-        local clone_path key_file stub_dir log_file state_file
-        local https_repository="https://github.com/webcoyote/sandvault.git"
+        local src_repository clone_path key_file stub_dir log_file state_file
+        local github_path="sv-test-org/key-ro-test" repo_name
+        local expected_ssh="git@github.com:${github_path}.git"
         local output status origin_after ssh_command add_line
 
-        clone_path="$CLONE_WORKSPACE/repos/sandvault"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
         stub_dir="$(mktemp -d)"
         log_file="$(mktemp)"
         state_file="$(mktemp)"
@@ -2175,7 +2327,7 @@ STUB_EOF
         export GH_STUB_STATE="$state_file"
 
         set +e
-        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2189,8 +2341,8 @@ STUB_EOF
         fi
 
         origin_after=$(git -C "$clone_path" config remote.origin.url 2>/dev/null || true)
-        if [[ "$origin_after" != "git@github.com:webcoyote/sandvault.git" ]]; then
-            fail "sv-clone -k rewrites origin to SSH" "git@github.com:webcoyote/sandvault.git" "$origin_after"
+        if [[ "$origin_after" != "$expected_ssh" ]]; then
+            fail "sv-clone -k rewrites origin to SSH" "$expected_ssh" "$origin_after"
             return
         fi
 
@@ -2208,17 +2360,11 @@ STUB_EOF
 
         # Re-running -k against a repo whose key is already registered
         # (per the stub's state file) should still (re)activate the SSH
-        # origin and sshCommand — idempotent, not a silent no-op. Remove
-        # only the local clone (not the deploy key or stub state) first, so
-        # this re-run takes the fresh-HTTPS-clone path rather than the
-        # existing-repo fetch path: that fetch would use the real `ssh`
-        # binary against real github.com, which never actually received
-        # this test's key (only the fake `gh` was told about it), and would
-        # fail on real auth rather than exercising the code we're testing.
+        # origin and sshCommand — idempotent, not a silent no-op.
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
 
         set +e
-        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2227,7 +2373,7 @@ STUB_EOF
         fi
         origin_after=$(git -C "$clone_path" config remote.origin.url 2>/dev/null || true)
         ssh_command=$(git -C "$clone_path" config core.sshCommand 2>/dev/null || true)
-        if [[ "$origin_after" != "git@github.com:webcoyote/sandvault.git" || -z "$ssh_command" ]]; then
+        if [[ "$origin_after" != "$expected_ssh" || -z "$ssh_command" ]]; then
             fail "sv-clone -k re-run reactivates existing key" "origin rewritten + sshCommand set" "$origin_after | $ssh_command"
             return
         fi
@@ -2241,12 +2387,14 @@ STUB_EOF
 
     # Test that -w generates a deploy key with write access.
     test_sv_clone_dash_w_write() {
-        local clone_path key_file stub_dir log_file state_file
-        local https_repository="https://github.com/webcoyote/sandvault.git"
+        local src_repository clone_path key_file stub_dir log_file state_file
+        local github_path="sv-test-org/key-write-test" repo_name
         local output status add_line
 
-        clone_path="$CLONE_WORKSPACE/repos/sandvault"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
         stub_dir="$(mktemp -d)"
         log_file="$(mktemp)"
         state_file="$(mktemp)"
@@ -2259,7 +2407,7 @@ STUB_EOF
         export GH_STUB_STATE="$state_file"
 
         set +e
-        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -w "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -w "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2284,12 +2432,14 @@ STUB_EOF
     # deploy key to write access (delete + re-add) without regenerating the
     # local private key.
     test_sv_clone_dash_w_upgrades_read_only_key() {
-        local clone_path key_file stub_dir log_file state_file
-        local https_repository="https://github.com/webcoyote/sandvault.git"
+        local src_repository clone_path key_file stub_dir log_file state_file
+        local github_path="sv-test-org/key-upgrade-test" repo_name
         local output status key_hash_before key_hash_after
 
-        clone_path="$CLONE_WORKSPACE/repos/sandvault"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
         stub_dir="$(mktemp -d)"
         log_file="$(mktemp)"
         state_file="$(mktemp)"
@@ -2302,7 +2452,7 @@ STUB_EOF
         export GH_STUB_STATE="$state_file"
 
         set +e
-        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -k "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 || ! -f "$key_file" ]]; then
@@ -2312,15 +2462,12 @@ STUB_EOF
         key_hash_before=$(shasum "$key_file" | awk '{print $1}')
 
         # Remove only the local clone (not the deploy key or stub state)
-        # before re-running with -w, so this run takes the fresh-HTTPS-clone
-        # path rather than the existing-repo fetch path — see the comment in
-        # test_sv_clone_dash_k_read_only for why that fetch path can't work
-        # against a key this test only registered with the fake `gh`.
+        # before re-running with -w.
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
 
         : > "$log_file"
         set +e
-        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -w "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$stub_dir:$PATH" sv_clone_cmd -w "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2361,11 +2508,14 @@ STUB_EOF
     test_sv_clone_rerun_ignores_guest_config() {
         local src_repository clone_path key_file stub_dir log_file state_file
         local marker_dir alt_repo expected_repo_path output status
+        local github_path="sv-test-org/rerun-test"
+        local repo_name
 
-        src_repository="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel)"
-        clone_path="$CLONE_WORKSPACE/repos/$(basename "$src_repository")"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$(basename "$src_repository")"
-        expected_repo_path="$(github_repo_path "$(git -C "$src_repository" remote get-url origin)")"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
+        expected_repo_path="$github_path"
         stub_dir="$(mktemp -d)"
         log_file="$(mktemp)"
         state_file="$(mktemp)"
@@ -2435,12 +2585,15 @@ STUB_EOF
     # Test that -k with no gh CLI on PATH prints the public key for manual
     # setup and does not rewrite the origin to SSH.
     test_sv_clone_dash_k_no_gh() {
-        local clone_path key_file no_gh_path output status origin_after
-        local https_repository="https://github.com/webcoyote/sandvault.git"
+        local src_repository clone_path key_file no_gh_path output status origin_after
+        local github_path="sv-test-org/no-gh-test" repo_name
+        local expected_origin="git@github.com:${github_path}.git"
         local dir path_dirs
 
-        clone_path="$CLONE_WORKSPACE/repos/sandvault"
-        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_sandvault"
+        make_test_repo src_repository "$github_path"
+        repo_name="$(basename "$src_repository")"
+        clone_path="$CLONE_WORKSPACE/repos/$repo_name"
+        key_file="$CLONE_WORKSPACE/_sandvault/.ssh/deploy_$repo_name"
 
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
         sv_cmd s -- rm -f "$key_file" "$key_file.pub" >/dev/null 2>&1
@@ -2457,7 +2610,7 @@ STUB_EOF
         done
 
         set +e
-        output=$(PATH="$no_gh_path" sv_clone_cmd -k "$https_repository" -- --no-build shell -- true 2>&1)
+        output=$(PATH="$no_gh_path" sv_clone_cmd -k "$src_repository" -- --no-build shell -- true 2>&1)
         status=$?
         set -e
         if [[ "$status" -ne 0 ]]; then
@@ -2471,8 +2624,8 @@ STUB_EOF
         fi
 
         origin_after=$(git -C "$clone_path" config remote.origin.url 2>/dev/null || true)
-        if [[ "$origin_after" != "$https_repository" ]]; then
-            fail "sv-clone -k without gh leaves origin untouched" "$https_repository" "$origin_after"
+        if [[ "$origin_after" != "$expected_origin" ]]; then
+            fail "sv-clone -k without gh leaves origin untouched" "$expected_origin" "$origin_after"
             return
         fi
 
