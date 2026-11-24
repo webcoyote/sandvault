@@ -128,7 +128,7 @@ readonly VERSION="1.40.0"
 
 # Bump when the sandbox policy changes: the profile is root owned, so the
 # version line it carries is how an installed machine learns it is stale.
-readonly SV_SANDBOX_PROFILE_VERSION="2"
+readonly SV_SANDBOX_PROFILE_VERSION="3"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -1874,7 +1874,18 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
   ;; were not valid".
   (global-name "com.apple.SecurityServer")
   ;; OCSP revocation checks. not measured: no probe failed without it.
-  (global-name "com.apple.ocspd"))
+  (global-name "com.apple.ocspd")
+  ;; Chrome / Chromium multi-process IPC. Chrome's child processes (renderer,
+  ;; GPU, utility) register and look up dynamic Mach services whose names
+  ;; contain the parent PID. Without these, child processes log
+  ;; "No rendezvous client, terminating process (parent died?)" and exit,
+  ;; leaving the browser unable to serve CDP commands (connectOverCDP hangs).
+  ;; Crashpad (crash reporter) similarly registers per-launch Mach services.
+  ;; The prefixes are scoped to Chrome/Chromium names and carry no host-user
+  ;; authority — they are ad-hoc bootstrap services, not launchd daemons.
+  (global-name-prefix "com.google.Chrome.MachPortRendezvousServer.")
+  (global-name-prefix "com.google.Chromium.MachPortRendezvousServer.")
+  (global-name-prefix "org.chromium.crashpad."))
 
 ;; Keep these four denied explicitly, after the allow above, so that widening
 ;; the allow later cannot quietly re-admit them.
