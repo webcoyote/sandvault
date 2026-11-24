@@ -3,6 +3,9 @@
 set -Eeuo pipefail
 trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
+# Used when debugging with bash -x
+PS4='+ ${BASH_SOURCE}:${LINENO}: '
+
 # Resolve script location
 # perform "readlink -f", which is not supported in macOS system bash
 SOURCE="${BASH_SOURCE[0]}"
@@ -1794,7 +1797,7 @@ else
         # ask for a password, so check sudo here: without this the write below
         # dies inside the tee with "sudo: a password is required" and the ERR
         # trap, never reaching a message the user can act on.
-        if ! sudo -p "Password required to update the sandbox profile: " /usr/bin/true 2>/dev/null; then
+        if ! sudo -p "Password required to update the sandbox profile: " /usr/bin/true; then
             if [[ -n "$SV_PROFILE" ]]; then
                 abort "Sandbox profile is stale; run 'sv --rebuild build --profile $SV_PROFILE' (needs sudo)"
             fi
