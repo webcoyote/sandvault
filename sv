@@ -1800,11 +1800,28 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
 ;; NetAuthSysAgent
 ;; appleeventsd     -- disallow osascript telling Finder to do it
 (deny file-mount file-unmount)
-(deny mach-lookup
-  (global-name "com.apple.DiskArbitration.diskarbitrationd")
-  (global-name "com.apple.NetAuthAgent")
-  (global-name "com.apple.NetAuthSysAgent")
-  (global-name "com.apple.appleeventsd"))
+;; Deny every per-user service except the ones a session needs. The sandbox
+;; user runs in the bootstrap namespace of the host user, so an allowed lookup
+;; lets the host user's service act for the sandbox: `open` on a bundle made
+;; LaunchServices launch it as the host user, outside this profile.
+(deny mach-lookup)
+(allow mach-lookup
+  ;; Preferences and system information.
+  (global-name-prefix "com.apple.cfprefsd")
+  (global-name-prefix "com.apple.system.")
+  ;; DNS, and the sockets curl, git and node resolve through.
+  (global-name-prefix "com.apple.dnssd")
+  (global-name-prefix "com.apple.mDNSResponder")
+  (global-name-prefix "com.apple.networkd")
+  (global-name-prefix "com.apple.SystemConfiguration")
+  ;; TLS trust evaluation.
+  (global-name-prefix "com.apple.trustd")
+  ;; Keychain reads by `security` and the agent tools.
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.ocspd")
+  ;; Logging, which the agent tools write through.
+  (global-name-prefix "com.apple.logd")
+  (global-name "com.apple.system.logger"))
 
 ;; Block raw disk and packet-capture devices regardless of the broader
 ;; /dev write allow below. Defense in depth: /dev/*disk* is already
