@@ -578,6 +578,31 @@ PLIST
     }
     queue_test test_sandbox_cannot_launch_as_host
 
+    # The profile on disk is root owned and rewritten only on a rebuild, so a
+    # policy change would never reach an installed machine. profile_needs_rewrite
+    # compares the version line sv writes with the one on disk, and a machine
+    # with no profile at all needs a rewrite too.
+    test_sv_rewrites_stale_sandbox_profile() {
+        local got
+        got=$(sed -n '/^profile_needs_rewrite() {$/,/^}$/p' "$SV_BASE")
+        if [[ -z "$got" ]]; then
+            fail "sv rewrites a stale sandbox profile" "profile_needs_rewrite in sv" "function not found"
+            return
+        fi
+        got=$(
+            SB_PROFILE_VERSION=2 SESSION_DIR_UNDER_TEST=1 \
+            /bin/bash -c "$got"'
+                printf "%s" "$(profile_needs_rewrite 2 /dev/null; echo $?)"
+            '
+        )
+        if [[ "$got" != "0" ]]; then
+            fail "sv rewrites a stale sandbox profile" "a profile with no version line needs a rewrite" "$got"
+        else
+            pass "sv rewrites a stale sandbox profile"
+        fi
+    }
+    queue_test test_sv_rewrites_stale_sandbox_profile
+
     # The merge copies $SHARED_WORKSPACE/user over the deployed home, and the
     # sandbox user can write that source. It must not be able to overwrite the
     # prompt text the wrappers read (sv_tool_prompt -> --append-system-prompt)
