@@ -128,7 +128,7 @@ readonly VERSION="1.40.0"
 
 # Bump when the sandbox policy changes: the profile is root owned, so the
 # version line it carries is how an installed machine learns it is stale.
-readonly SV_SANDBOX_PROFILE_VERSION="3"
+readonly SV_SANDBOX_PROFILE_VERSION="4"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -1875,6 +1875,11 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
   (global-name "com.apple.SecurityServer")
   ;; OCSP revocation checks. not measured: no probe failed without it.
   (global-name "com.apple.ocspd")
+  ;; File system change notifications, used by watchexec, fswatch, and other
+  ;; file watchers. fseventsd is a root system daemon, not a per-user host
+  ;; service. Without this name, FSEventStreamCreate never delivers events,
+  ;; so watchers start but never fire (watchexec --poll still works).
+  (global-name "com.apple.FSEvents")
   ;; Chrome / Chromium multi-process IPC. Chrome's child processes (renderer,
   ;; GPU, utility) register and look up dynamic Mach services whose names
   ;; contain the parent PID. Without these, child processes log
