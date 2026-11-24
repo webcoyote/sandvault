@@ -514,6 +514,51 @@ run_tests() {
     }
     queue_test test_codex_code_mode_host_warmup_present
 
+    # LaunchServices answers in the bootstrap namespace of the host user, so a
+    # bundle opened from inside the sandbox ran as the host user. Build a bundle
+    # whose executable reports its identity to a path the sandbox cannot write,
+    # open it from inside, and require that no such file appears.
+    test_sandbox_cannot_launch_as_host() {
+        local app marker output status
+        marker="/Users/Shared/sv-launch-probe.$$"
+        app="$SHARED_WORKSPACE/sv-launch-probe.app"
+        rm -f "$marker"
+        rm -rf "$app"
+        mkdir -p "$app/Contents/MacOS"
+        cat > "$app/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>local.sv.launchprobe</string>
+<key>CFBundleExecutable</key><string>probe</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+PLIST
+        printf '#!/bin/sh\nid -un > %s 2>&1\n' "$marker" > "$app/Contents/MacOS/probe"
+        chmod +x "$app/Contents/MacOS/probe"
+        chmod -R a+rX "$app"
+
+        set +e
+        output=$(sv_cmd s -- open "$app" 2>&1)
+        status=$?
+        set -e
+        sleep 3
+        if [[ -e "$marker" ]]; then
+            fail "sandbox cannot launch as the host user" \
+                "no host-owned file appears" "the bundle ran as $(cat "$marker")"
+        elif [[ "$output" == *"no such file or directory: open"* || "$output" == *"command not found"* ]]; then
+            fail "sandbox cannot launch as the host user" \
+                "open runs from inside the sandbox" "the harness ran no open: $status | $output"
+        else
+            pass "sandbox cannot launch as the host user"
+        fi
+        rm -f "$marker"
+        rm -rf "$app"
+    }
+    queue_test test_sandbox_cannot_launch_as_host
+
     # git runs several config values as commands on the host (core.fsmonitor,
     # core.sshCommand, core.hooksPath, core.pager, [filter] drivers). The clone
     # directory is guest-writable, and so is any workspace path passed as the
