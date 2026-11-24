@@ -549,7 +549,7 @@ PLIST
         # A launch that the profile lets through can still arrive after the open
         # call returns, so poll instead of waiting a fixed time: a late launch
         # must be caught, not slept past.
-        for _ in $(seq 1 50); do
+        for _ in $(seq 1 15); do
             [[ -e "$marker" ]] && break
             sleep 0.2
         done
@@ -581,7 +581,7 @@ PLIST
             calc_status=$?
             set -e
             calc_pids=""
-            for _ in $(seq 1 50); do
+            for _ in $(seq 1 15); do
                 # No match is the pass case, so swallow pgrep's exit 1 (and the
                 # SIGPIPE head can cause) instead of dying under errexit.
                 calc_pids=$(pgrep -u "$HOST_USER" -fl 'Calculator.app' 2>/dev/null | head -3 || true)
