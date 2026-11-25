@@ -135,7 +135,7 @@ fi
 ###############################################################################
 # Resources
 ###############################################################################
-readonly VERSION="1.40.0"
+readonly VERSION="1.41.0"
 
 # Bump when the sandbox policy changes: the profile is root owned, so the
 # version line it carries is how an installed machine learns it is stale.

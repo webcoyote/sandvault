@@ -2,14 +2,27 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
-### Fixed
-
-- Fix `gh` and other Go programs failing TLS verification in the sandbox with `x509: OSStatus -26276`. Go tools now use the macOS trust store, including root certificates installed system-wide (MDM or the System keychain)
-- Run `sv` sessions in the sandbox user's own macOS login context instead of yours. Before, system helpers the sandbox talks to (preferences, certificate checks) were your own instances; now they are the sandbox user's, as `sv --ssh` sessions already were. The first `sv` run after upgrading asks for your password once to install the new launcher
+## [1.41.0] - 2026-11-24
 
 ### Added
+- Read-only GitHub API token (`sv-gh-token`) available inside the sandbox ([#389](https://github.com/webcoyote/sandvault/pull/389))
+- Workspace README is now rendered from a template file ([#378](https://github.com/webcoyote/sandvault/pull/378))
 
-- Add `sv-gh-token`, which gives the sandbox's `gh` CLI read-only GitHub API access (issues, PRs, CI logs) with a fine-grained token. It opens GitHub's token form pre-filled with read-only permissions, refuses classic tokens, and installs the token as the sandbox user without writing it to disk on the host
+### Fixed
+- Run sudo sessions in the sandbox user's own launchd domain ([#390](https://github.com/webcoyote/sandvault/pull/390))
+- Fix TLS certificate verification for Go programs inside the sandbox ([#389](https://github.com/webcoyote/sandvault/pull/389))
+- Allow FSEvents mach-lookup so file watchers work in the sandbox ([#388](https://github.com/webcoyote/sandvault/pull/388))
+- Prevent deploy-key installation from following planted symlinks ([#386](https://github.com/webcoyote/sandvault/pull/386))
+- Keep iOS bridge state host-only and run it in a host-only working directory ([#385](https://github.com/webcoyote/sandvault/pull/385))
+- Allow Chrome/Chromium mach-lookup for multi-process IPC in the sandbox ([#384](https://github.com/webcoyote/sandvault/pull/384))
+- Deny per-user mach lookups except an explicit allowlist ([#381](https://github.com/webcoyote/sandvault/pull/381))
+- Auto-rewrite stale sandbox profiles when the version changes ([#381](https://github.com/webcoyote/sandvault/pull/381))
+- Write the workspace README atomically to prevent symlink-redirect attacks ([#378](https://github.com/webcoyote/sandvault/pull/378))
+
+### Thanks to 2 contributors!
+
+- [@jesserobbins](https://github.com/jesserobbins)
+- [@webcoyote](https://github.com/webcoyote)
 
 ## [1.40.0] - 2026-11-23
 
