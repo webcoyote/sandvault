@@ -1,0 +1,233 @@
+#!/bin/bash
+# Give the sandbox read-only GitHub API access (issues, PRs, CI logs) via a
+# fine-grained personal access token installed into the sandbox's gh CLI.
+#
+# This script runs as $USER (the host user). It never writes the token into
+# a sandbox-writable path itself: the token is sent on stdin to a script that
+# runs as the sandbox user, which calls `gh auth login --with-token` and so
+# stores the token in its own ~/.config/gh/hosts.yml. The token never appears
+# in argv, the environment, or a file on the host.
+#
+# Usage:
+#   sv-gh-token [options] [login|status|logout]
+#
+#   login   (default) Open GitHub's token form pre-filled with read-only
+#           permissions, read the new token, install it in the sandbox
+#   status  Show the sandbox's gh auth status
+#   logout  Remove the token from the sandbox (revoke it on GitHub too)
+#
+# The token may also be piped in (e.g. `pbpaste | sv-gh-token`).
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+# Resolve script location
+# perform "readlink -f", which is not supported in macOS system bash
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+    SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" = /* ]] || SOURCE="$SOURCE_DIR/$SOURCE"
+done
+WORKSPACE="$(cd -P "$(dirname "$SOURCE")" && pwd -P)"
+if [[ "$WORKSPACE" =~ ^(.*)/homebrew/Cellar/([^/]+)/[^/]+(/.+)?$ ]]; then
+    WORKSPACE="${BASH_REMATCH[1]}/homebrew/opt/${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+fi
+readonly WORKSPACE
+
+SV="$WORKSPACE/sv"
+if [[ ! -x "$SV" ]]; then
+    echo >&2 "ERROR: sv not found at $SV"
+    exit 1
+fi
+
+# shellcheck source=helpers/sv-logging.sh
+source "$WORKSPACE/helpers/sv-logging.sh"
+
+# Read-only permissions requested in the pre-filled token form. Metadata:read
+# is mandatory and added by GitHub automatically.
+readonly TOKEN_PERMISSIONS=(
+    issues=read          # gh issue list/view
+    pull_requests=read   # gh pr view/diff, review comments
+    contents=read        # files, commits, branches, releases via the API
+    actions=read         # gh run view --log-failed
+    statuses=read        # CI status on PRs (gh pr checks)
+)
+
+usage() {
+    echo "Usage: $(basename "$0") [options] [login|status|logout]"
+    echo ""
+    echo "Give the sandbox read-only GitHub API access with a fine-grained token."
+    echo ""
+    echo "Commands:"
+    echo "  login    (default) Create a read-only token and install it in the sandbox"
+    echo "  status   Show the sandbox's gh auth status"
+    echo "  logout   Remove the token from the sandbox (also revoke it on GitHub)"
+    echo ""
+    echo "Options:"
+    echo "  -P, --profile NAME   Use a named profile (separate sandbox)"
+    echo "  -o, --owner NAME     Token resource owner (user or org; default: you)"
+    echo "  -d, --days N         Token lifetime in days, 1-366 (default: 90)"
+    echo "  -n, --no-browser     Print the token URL instead of opening it"
+    echo "  -v, --verbose        Enable verbose output"
+    echo "  -h, --help           Show this help message"
+    echo ""
+    echo "The token can also be piped in: pbpaste | $(basename "$0")"
+}
+
+
+###############################################################################
+# Parse command line
+###############################################################################
+COMMAND=""
+OWNER=""
+DAYS=90
+OPEN_BROWSER=true
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -v|--verbose)   ((SV_VERBOSE++)) || true; shift ;;
+        -vv)            ((SV_VERBOSE+=2)) || true; shift ;;
+        -P|--profile)   SV_PROFILE="${2:?--profile requires a name}"; shift 2 ;;
+        --profile=*)    SV_PROFILE="${1#--profile=}"; shift ;;
+        -P?*)           SV_PROFILE="${1#-P}"; shift ;;
+        -o|--owner)     OWNER="${2:?--owner requires a name}"; shift 2 ;;
+        --owner=*)      OWNER="${1#--owner=}"; shift ;;
+        -d|--days)      DAYS="${2:?--days requires a number}"; shift 2 ;;
+        --days=*)       DAYS="${1#--days=}"; shift ;;
+        -n|--no-browser) OPEN_BROWSER=false; shift ;;
+        -h|--help)      usage; exit 0 ;;
+        -*)             abort "Unknown option: $1" ;;
+        login|status|logout)
+            [[ -z "$COMMAND" ]] || abort "Unexpected argument: $1"
+            COMMAND="$1"
+            shift
+            ;;
+        *)              abort "Unknown command: $1 (see --help)" ;;
+    esac
+done
+COMMAND="${COMMAND:-login}"
+
+if [[ ! "$DAYS" =~ ^[0-9]+$ ]] || (( DAYS < 1 || DAYS > 366 )); then
+    abort "--days must be a number from 1 to 366"
+fi
+if [[ -n "$OWNER" && ! "$OWNER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
+    abort "Invalid --owner: $OWNER"
+fi
+
+# shellcheck source=helpers/sv-identity.sh
+source "$WORKSPACE/helpers/sv-identity.sh"
+readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER$SV_SUFFIX"
+
+SV_PROFILE_ARGS=()
+if [[ -n "$SV_PROFILE" ]]; then
+    SV_PROFILE_ARGS=("--profile" "$SV_PROFILE")
+fi
+
+# Run a script inside the sandbox as the sandbox user. The script goes on
+# stdin, not as `sv shell -- <args>`: under sudo --login, $ in args is
+# expanded by the sandbox user's login shell, and stdin keeps the token out
+# of argv. Commands in the script must not read stdin (it is the script).
+SANDBOX_SHELL=("$SV" "${SV_PROFILE_ARGS[@]+"${SV_PROFILE_ARGS[@]}"}" --no-build
+    shell "$SHARED_WORKSPACE")
+readonly SANDBOX_SHELL
+
+# gh is a Go binary and needs SSL_CERT_FILE to verify TLS in the sandbox
+# (see guest/home/.zshenv, which sv sources before running the script).
+readonly GH_STATUS_CMD='gh auth status --hostname github.com </dev/null'
+
+
+###############################################################################
+# status / logout
+###############################################################################
+if [[ "$COMMAND" == "status" ]]; then
+    printf '%s\n' "$GH_STATUS_CMD" | "${SANDBOX_SHELL[@]}" \
+        && status=0 || status=$?
+    exit "$status"
+fi
+
+if [[ "$COMMAND" == "logout" ]]; then
+    printf '%s\n' 'gh auth logout --hostname github.com </dev/null' \
+        | "${SANDBOX_SHELL[@]}" \
+        || abort "gh auth logout failed inside the sandbox"
+    info "Token removed from the sandbox. Revoke it on GitHub as well:"
+    info "  https://github.com/settings/personal-access-tokens"
+    exit 0
+fi
+
+
+###############################################################################
+# login: open the pre-filled token form
+###############################################################################
+TOKEN_NAME="sandvault-$HOST_USER$SV_SUFFIX-$(date +%Y%m%d)"
+TOKEN_NAME="${TOKEN_NAME:0:40}"   # GitHub's limit
+TOKEN_URL="https://github.com/settings/personal-access-tokens/new"
+TOKEN_URL+="?name=$TOKEN_NAME"
+TOKEN_URL+="&description=Read-only+API+access+for+the+sandvault+sandbox"
+TOKEN_URL+="&expires_in=$DAYS"
+[[ -n "$OWNER" ]] && TOKEN_URL+="&target_name=$OWNER"
+for perm in "${TOKEN_PERMISSIONS[@]}"; do
+    TOKEN_URL+="&$perm"
+done
+
+# Only prompt when the token isn't being piped in.
+if [[ -t 0 ]]; then
+    info "Create a fine-grained token on GitHub. The form is pre-filled with"
+    info "read-only permissions: ${TOKEN_PERMISSIONS[*]}"
+    info "Choose 'Repository access' yourself. 'Only select repositories' is"
+    info "safest: issue text is untrusted input to the agent, and anything"
+    info "the token can read, a prompt-injected agent can send elsewhere."
+    echo >&2 ""
+    echo >&2 "  $TOKEN_URL"
+    echo >&2 ""
+    if [[ "$OPEN_BROWSER" == true ]]; then
+        /usr/bin/open "$TOKEN_URL" || warn "Could not open a browser; use the URL above"
+    fi
+    read -r -s -p "Paste the token (input hidden): " TOKEN
+    echo >&2 ""
+else
+    IFS= read -r TOKEN || [[ -n "${TOKEN:-}" ]] || abort "No token on stdin"
+fi
+
+# Strip surrounding whitespace (a copy/paste often adds a newline or space).
+TOKEN="${TOKEN#"${TOKEN%%[![:space:]]*}"}"
+TOKEN="${TOKEN%"${TOKEN##*[![:space:]]}"}"
+
+case "$TOKEN" in
+    github_pat_*) ;;
+    ghp_*)
+        abort "That is a classic token. Classic 'repo' scope grants write access to"$'\n'"   every repo you can access; create a fine-grained token instead." ;;
+    gh[ousr]_*)
+        abort "That is an OAuth/app token, not a fine-grained personal access token." ;;
+    "")
+        abort "No token entered" ;;
+    *)
+        abort "Not a fine-grained GitHub token (expected it to start with github_pat_)" ;;
+esac
+# Strict charset: the token is embedded in a quoted heredoc below.
+if [[ ! "$TOKEN" =~ ^github_pat_[A-Za-z0-9_]{20,255}$ ]]; then
+    abort "Token contains unexpected characters; paste it again"
+fi
+
+
+###############################################################################
+# login: install into the sandbox's gh
+###############################################################################
+# --insecure-storage: write hosts.yml in the sandbox home instead of trying the
+#   sandbox Keychain, which may be locked in a non-interactive session.
+# --git-protocol ssh / --skip-ssh-key: git keeps using sv-clone's per-repo
+#   deploy keys; gh does not install itself as a git credential helper.
+debug "Installing token into the sandbox's gh config..."
+{
+    printf 'set -e\numask 077\n'
+    printf 'gh auth login --hostname github.com --with-token --insecure-storage'
+    printf " --git-protocol ssh --skip-ssh-key <<'SV_GH_TOKEN_EOF'\n"
+    printf '%s\n' "$TOKEN"
+    printf 'SV_GH_TOKEN_EOF\n'
+    printf '%s\n' "$GH_STATUS_CMD"
+} | "${SANDBOX_SHELL[@]}" || abort "Could not install the token in the sandbox (see the gh output above). If it is a TLS error, run 'sv' once to refresh the sandbox home"
+TOKEN=""
+
+info "Sandbox gh is authenticated. Try inside the sandbox:"
+info "  gh issue list -R OWNER/REPO"
+info "  gh run view --log-failed -R OWNER/REPO"
+info "Revoke at https://github.com/settings/personal-access-tokens when done."

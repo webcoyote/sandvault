@@ -181,6 +181,33 @@ For local Git repositories, sandvault also wires remotes:
 - This lets you run `git fetch sandvault` from the original local Git repository to pull commits made in the sandvault Git repository.
 
 
+## GitHub API access (issues, PRs, CI logs)
+
+`sv-gh-token` gives the sandbox's `gh` CLI read-only GitHub API access, so an
+agent can read issues, pull requests, review comments, and failed CI logs:
+
+```bash
+sv-gh-token                 # create a token and install it in the sandbox
+sv-gh-token status          # show the sandbox's gh auth status
+sv-gh-token logout          # remove it (revoke it on GitHub too)
+sv-gh-token --profile work  # install into a profile's sandbox
+```
+
+It opens GitHub's fine-grained token form pre-filled with read-only `issues`,
+`pull_requests`, `contents`, `actions`, and `statuses` permissions (90-day
+expiry; `--days N` to change). You choose which repositories the token can
+reach. Paste the token at the hidden prompt, or pipe it in
+(`pbpaste | sv-gh-token`). Classic tokens are refused: their `repo` scope
+grants write access to every repository you can reach.
+
+The token is stored by the sandbox user's own `gh`
+(`~/.config/gh/hosts.yml` in the sandbox home). Git keeps using the SSH
+deploy keys from `sv-clone -k`. Issue and PR text is untrusted input to the
+agent, so anything the token can read, a prompt-injected agent can send
+elsewhere. Prefer "Only select repositories", and never grant write
+permissions.
+
+
 ## Profiles
 
 Profiles let you run separate sandboxes with isolated credentials, SSH keys, and workspaces. Each profile gets its own macOS user account.

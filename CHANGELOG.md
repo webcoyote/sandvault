@@ -2,11 +2,13 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
-## [Unreleased]
-
 ### Fixed
 
 - Fix `gh` and other Go programs failing TLS verification in the sandbox with `x509: OSStatus -26276`. The sandbox shell now sets `SSL_CERT_FILE=/etc/ssl/cert.pem` unless you already set it. Go tools then ignore root certificates added through Keychain Access or MDM; set `SSL_CERT_FILE` in `/Users/Shared/sv-$USER/user/.zshenv` to use your own bundle. Takes effect on the next `sv` run
+
+### Added
+
+- Add `sv-gh-token`, which gives the sandbox's `gh` CLI read-only GitHub API access (issues, PRs, CI logs) with a fine-grained token. It opens GitHub's token form pre-filled with read-only permissions, refuses classic tokens, and installs the token as the sandbox user without writing it to disk on the host
 
 ## [1.40.0] - 2026-11-23
 
