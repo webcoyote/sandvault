@@ -682,10 +682,14 @@ start_ios_simulator() {
     mkdir -p "$SV_PRIVATE_DIR/tmp"
     IOS_BRIDGE_SCRATCH_DIR="$(mktemp -d "$SV_PRIVATE_DIR/tmp/sv-ios-bridge.XXXXXX")"
     rm -f "$IOS_BRIDGE_LOG_FILE"
+    # Per-session token so only this sandbox can reach the bridge.
+    IOS_BRIDGE_TOKEN="$(openssl rand -hex 16)"
     debug "Starting iOS bridge..."
     "$WORKSPACE/helpers/sv-ios-bridge" --udid "$IOS_SIM_UDID" \
         --host 127.0.0.1 --port 0 \
         --scratch-dir "$IOS_BRIDGE_SCRATCH_DIR" \
+        --token "$IOS_BRIDGE_TOKEN" \
+        --allowed-prefix "$SHARED_WORKSPACE/" \
         > "$IOS_BRIDGE_LOG_FILE" 2>&1 &
     IOS_BRIDGE_PID=$!
 
@@ -2478,8 +2482,12 @@ fi
 if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
     if [[ -n "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
         EXTRA_ENV+=("SV_IOS_SIMULATOR_ENDPOINT=$SV_IOS_SIMULATOR_ENDPOINT")
+        if [[ -n "${SV_IOS_BRIDGE_TOKEN:-}" ]]; then
+            EXTRA_ENV+=("SV_IOS_BRIDGE_TOKEN=$SV_IOS_BRIDGE_TOKEN")
+        fi
     elif [[ -n "$IOS_BRIDGE_PORT" ]]; then
         EXTRA_ENV+=("SV_IOS_SIMULATOR_ENDPOINT=http://127.0.0.1:$IOS_BRIDGE_PORT")
+        EXTRA_ENV+=("SV_IOS_BRIDGE_TOKEN=$IOS_BRIDGE_TOKEN")
     else
         abort "iOS bridge port not available. Bridge may have failed to start."
     fi

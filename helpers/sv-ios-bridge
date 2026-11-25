@@ -87,6 +87,7 @@ BLOCKED_URL_SCHEMES = frozenset({"file", "data", "javascript", "about"})
 SIMPLE_STR_RE = re.compile(r"^[\x20-\x7e]{1,512}$")
 
 UDID = ""  # Set by main() before the server starts.
+AUTH_TOKEN = ""  # Per-session token; set by main() when --token is given.
 
 # Shared scratch directory (screenshots and /view targets); set by main().
 # It lives under $SHARED_WORKSPACE/_sandvault, which the sandbox user can
@@ -382,6 +383,26 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- routing ---------------------------------------------------------
 
+    def _check_auth(self):
+        """Verify the per-session token if one was configured.
+
+        Returns True if the request is authorized, False if a 403 was sent.
+        When no token is configured (legacy / standalone mode), all requests
+        are allowed.
+        """
+        if not AUTH_TOKEN:
+            return True
+        # Accept token in Authorization header or ?token= query parameter.
+        auth = self.headers.get("Authorization", "")
+        if auth == f"Bearer {AUTH_TOKEN}":
+            return True
+        u = urlparse(self.path)
+        qs = parse_qs(u.query)
+        if (qs.get("token") or [None])[0] == AUTH_TOKEN:
+            return True
+        self._send_error(403, "invalid or missing session token")
+        return False
+
     def _ensure_ready(self):
         """Reject requests until the simulator is booted.
 
@@ -403,6 +424,8 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
+        if not self._check_auth():
+            return
         u = urlparse(self.path)
         path = u.path
         qs = parse_qs(u.query)
@@ -415,7 +438,13 @@ class Handler(BaseHTTPRequestHandler):
             args = ["describe", "--json"]
             for key in ("x", "y"):
                 if key in qs:
-                    args += [f"--{key}", qs[key][0]]
+                    try:
+                        val = float(qs[key][0])
+                    except (ValueError, TypeError):
+                        return self._send_error(400, f"invalid {key}")
+                    if not validate_coord(val):
+                        return self._send_error(400, f"{key} out of range")
+                    args += [f"--{key}", str(val)]
             if "depth" in qs:
                 try:
                     depth = int(qs["depth"][0])
@@ -434,6 +463,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_error(404, f"unknown path: {path}")
 
     def do_POST(self):
+        if not self._check_auth():
+            return
         if not self._ensure_ready():
             return
         path = urlparse(self.path).path
@@ -559,7 +590,9 @@ class Handler(BaseHTTPRequestHandler):
         text = body.get("text")
         if not isinstance(text, str) or not text or len(text) > 4096:
             return self._send_error(400, "text required (max 4096 chars)")
-        return self._iosef("type", "--text", text)
+        # Use --text=<value> form so a value starting with - cannot be
+        # misinterpreted as a flag by iosef.
+        return self._iosef("type", f"--text={text}")
 
     def _iosef_swipe(self, body):
         for key in ("from_x", "from_y", "to_x", "to_y"):
@@ -634,10 +667,17 @@ def main():
     p.add_argument("--port", type=int, default=0)
     p.add_argument("--scratch-dir",
                    help="Pre-created scratch directory (caller manages cleanup)")
+    p.add_argument("--token", default="",
+                   help="Per-session auth token (required in Authorization header or ?token=)")
+    p.add_argument("--allowed-prefix", action="append", default=None,
+                   help="Override ALLOWED_PATH_PREFIXES for /install (repeatable)")
     args = p.parse_args()
 
-    global UDID
+    global UDID, AUTH_TOKEN, ALLOWED_PATH_PREFIXES
     UDID = args.udid
+    AUTH_TOKEN = args.token
+    if args.allowed_prefix:
+        ALLOWED_PATH_PREFIXES = tuple(args.allowed_prefix)
 
     # Per-bridge scratch directory for screenshots.
     #
