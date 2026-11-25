@@ -2152,12 +2152,22 @@ elif [[ "$REBUILD" == "true" ]]; then
     GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
     GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
 
-    mkdir -p "$SV_PRIVATE_DIR/setup"
+    # Security: $SV_PRIVATE_DIR is sandbox-writable. The host must not write
+    # there by path (a planted symlink redirects the write). Pipe the scripts
+    # through a shell running as the sandbox user, with rm -f first so a
+    # symlink at the destination is replaced, not followed.
+    printf -v _setup_dir_q '%q' "$SV_PRIVATE_DIR/setup"
+    printf -v _gitconfig_q '%q' "$SV_PRIVATE_DIR/setup/gitconfig"
+    printf -v _claudejson_q '%q' "$SV_PRIVATE_DIR/setup/claude-json"
 
     # .gitconfig: seed identity if missing, preserving user overrides
     # Uses a retry loop because concurrent sandbox sessions may race on the
     # git config lock file (~/.gitconfig.lock).
-    cat > "$SV_PRIVATE_DIR/setup/gitconfig" << SETUP_EOF
+    {
+        printf 'set -e\numask 022\nmkdir -p %s\nrm -f %s\n' \
+            "$_setup_dir_q" "$_gitconfig_q"
+        printf 'cat > %s <<'"'"'SV_SETUP_EOF'"'"'\n' "$_gitconfig_q"
+        cat << SETUP_EOF
 #!/bin/bash
 set -Eeuo pipefail
 _git_config_retry() {
@@ -2178,10 +2188,16 @@ if ! git config -f "\$HOME/.gitconfig" --get-all safe.directory 2>/dev/null | /u
     _git_config_retry git config -f "\$HOME/.gitconfig" --add safe.directory "$SHARED_WORKSPACE/*"
 fi
 SETUP_EOF
-    chmod +x "$SV_PRIVATE_DIR/setup/gitconfig"
+        printf 'SV_SETUP_EOF\nchmod +x %s\n' "$_gitconfig_q"
+    } | sudo -u "$SANDVAULT_USER" /bin/sh \
+        || abort "Failed to install setup/gitconfig as $SANDVAULT_USER"
 
     # .claude.json: seed if missing (onboarding flags only matter on first run)
-    cat > "$SV_PRIVATE_DIR/setup/claude-json" << 'SETUP_EOF'
+    {
+        printf 'set -e\numask 022\nmkdir -p %s\nrm -f %s\n' \
+            "$_setup_dir_q" "$_claudejson_q"
+        printf 'cat > %s <<'"'"'SV_SETUP_EOF'"'"'\n' "$_claudejson_q"
+        cat << 'SETUP_EOF'
 #!/bin/bash
 set -Eeuo pipefail
 if [[ ! -f "$HOME/.claude.json" ]]; then
@@ -2196,7 +2212,9 @@ if [[ ! -f "$HOME/.claude.json" ]]; then
 JSON_EOF
 fi
 SETUP_EOF
-    chmod +x "$SV_PRIVATE_DIR/setup/claude-json"
+        printf 'SV_SETUP_EOF\nchmod +x %s\n' "$_claudejson_q"
+    } | sudo -u "$SANDVAULT_USER" /bin/sh \
+        || abort "Failed to install setup/claude-json as $SANDVAULT_USER"
 fi
 
 
