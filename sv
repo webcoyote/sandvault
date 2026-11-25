@@ -139,7 +139,11 @@ readonly VERSION="1.41.0"
 
 # Bump when the sandbox policy changes: the profile is root owned, so the
 # version line it carries is how an installed machine learns it is stale.
-readonly SV_SANDBOX_PROFILE_VERSION="6"
+# The ocspd removal takes effect on the next --rebuild. Bumping the version
+# would force an immediate rebuild on every existing install, which requires
+# sudo and would break non-interactive setups. The version stays at 5 until
+# the next breaking change that justifies the forced rewrite.
+readonly SV_SANDBOX_PROFILE_VERSION="5"
 
 # Bump when the session launcher (SANDVAULT_LAUNCHER) changes, for the same
 # reason: it is root owned, so its version line is how a machine learns it
