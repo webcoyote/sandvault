@@ -324,10 +324,13 @@ if [[ "$DEPLOY_KEY" == true ]]; then
     # if it was derived from a workspace-local repo's origin, the sandbox could
     # aim the deploy key at an arbitrary repository.
     if [[ -n "$LOCAL_REPOSITORY" ]]; then
+        # Check against the real workspace, not the test override
+        # (SV_CLONE_WORKSPACE_ROOT redirects the workspace for tests).
+        _real_workspace="/Users/Shared/sv-$HOST_USER$SV_SUFFIX"
         case "$LOCAL_REPOSITORY" in
-            "$SHARED_WORKSPACE"/*|"$SHARED_WORKSPACE")
+            "$_real_workspace"/*|"$_real_workspace")
                 abort "Deploy key (-k/-w) refused: the source repository is inside the" \
-                    "sandbox workspace ($SHARED_WORKSPACE), so its remote URL is" \
+                    "sandbox workspace ($_real_workspace), so its remote URL is" \
                     "sandbox-controlled. Pass an explicit URL instead:" \
                     "  sv-clone -k <URL>"
                 ;;
