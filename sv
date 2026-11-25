@@ -1055,6 +1055,45 @@ uninstall_all() {
 
 
 ###############################################################################
+# Refuse to run from inside a sandbox-writable directory
+###############################################################################
+# If this script lives under any sandbox's shared workspace, the sandbox user
+# can edit it between invocations. The host then executes sandbox-controlled
+# code, including the steps that call sudo. Warn and refuse unless nested (the
+# sandbox is already the sandbox) or the user explicitly overrides.
+if [[ "$NESTED" == "false" && "${SV_ALLOW_WORKSPACE_INSTALL:-}" != "1" ]]; then
+    _ws_unsafe=false
+    # Check 1: $WORKSPACE under any sandvault shared workspace
+    case "$WORKSPACE" in
+        /Users/Shared/sv-*) _ws_unsafe=true ;;
+        *) ;;
+    esac
+    # Check 2: $WORKSPACE under any sandvault user home
+    case "$WORKSPACE" in
+        /Users/sandvault-*) _ws_unsafe=true ;;
+        *) ;;
+    esac
+    # Check 3: $WORKSPACE writable by any sandvault group
+    if [[ "$_ws_unsafe" == "false" ]]; then
+        _ws_group="$(/usr/bin/stat -f '%Sg' "$WORKSPACE" 2>/dev/null || true)"
+        case "$_ws_group" in
+            sandvault-*) _ws_unsafe=true ;;
+            *) ;;
+        esac
+    fi
+    if [[ "$_ws_unsafe" == "true" ]]; then
+        error "Refusing to run: this script lives inside a sandbox-writable directory."
+        error "  $WORKSPACE"
+        error "The sandbox user can edit this script and its helpers, which the host"
+        error "then executes, including steps that call sudo."
+        error ""
+        error "Use an installed copy (Homebrew, or a checkout in your home directory)."
+        error "To override this check: SV_ALLOW_WORKSPACE_INSTALL=1 sv ..."
+        exit 1
+    fi
+fi
+
+###############################################################################
 # Parse command line
 ###############################################################################
 REBUILD=false
