@@ -1664,6 +1664,7 @@ write_shared_workspace_readme() {
     # mktemp gives 0600 and no ACL; grant the sandbox the same rights as other
     # workspace files so it can still read (and touch) the README. mv -h
     # replaces a symlink to a directory instead of moving into it.
+    # shellcheck disable=SC2310 # renderer's status is its final sed's
     if ! render_shared_workspace_readme > "$tmp" \
         || ! /bin/chmod 0644 "$tmp" \
         || ! /bin/chmod +a "$SANDVAULT_FILE_RIGHTS" "$tmp" \
@@ -1787,6 +1788,7 @@ else
     if [[ "$NO_BUILD" == "true" && ! -f "$SANDBOX_PROFILE" ]]; then
         abort "Sandbox profile is missing; cannot rebuild because --no-build set"
     fi
+    # shellcheck disable=SC2310 # predicate with explicit return codes
     if [[ "$REBUILD" == "true" ]] || profile_needs_rewrite "$SV_SANDBOX_PROFILE_VERSION" "$SANDBOX_PROFILE"; then
         # --no-build says this run may not touch root owned files, so a stale
         # profile stops the run instead of being rewritten behind the flag.

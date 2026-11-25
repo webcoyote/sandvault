@@ -108,6 +108,9 @@ case "${1:-}" in
         echo >&2 "$USER: running opencode with OPENCODE_PERMISSION='${OPENCODE_PERMISSION}' (subcommand, no --prompt)"
         exec "$OPENCODE" "$@"
         ;;
+    *)
+        # Not a subcommand: fall through to the interactive launch below.
+        ;;
 esac
 
 TOOL_PROMPT=$(sv_tool_prompt)

@@ -82,6 +82,9 @@ case "${1:-}" in
         echo >&2 "$USER: running pi ($PI) (subcommand, no --approve)"
         exec "$PI" "$@"
         ;;
+    *)
+        # Not a subcommand: fall through to the interactive launch below.
+        ;;
 esac
 
 TOOL_PROMPT=$(sv_tool_prompt)

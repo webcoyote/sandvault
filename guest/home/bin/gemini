@@ -42,6 +42,9 @@ case "${1:-}" in
         echo >&2 "$USER: running gemini (subcommand, no --yolo)"
         exec "$GEMINI" "$@"
         ;;
+    *)
+        # Not a subcommand: fall through to the interactive launch below.
+        ;;
 esac
 
 TOOL_PROMPT=$(sv_tool_prompt)

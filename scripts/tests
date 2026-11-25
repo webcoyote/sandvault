@@ -695,7 +695,7 @@ PLIST
         if [[ -e "$marker" ]]; then
             fail "host-side git ignores a poisoned local config" \
                 "no config-driven command runs" "core.fsmonitor executed"
-        elif grep -q 'git -C "\$LOCAL_REPOSITORY"' "$SCRIPT_DIR/../sv-clone"; then
+        elif grep -q "git -C \"\\\$LOCAL_REPOSITORY\"" "$SCRIPT_DIR/../sv-clone"; then
             fail "host-side git ignores a poisoned local config" \
                 "every host-side call uses git_safe" \
                 "found a bare 'git -C \"\$LOCAL_REPOSITORY\"' call"
@@ -1676,6 +1676,34 @@ STUB
     }
     queue_test test_sv_exports_no_sandbox
 
+    # Go programs (gh) need com.apple.trustd.agent to verify TLS, which the
+    # profile denies because it would resolve to the host user's agent. The
+    # guest .zshenv points SSL_CERT_FILE at the system bundle instead, but
+    # must not override a value the user already set. Sourced directly with
+    # zsh -f: sv tests run --no-build, so the sandbox home may hold an older
+    # copy of the file.
+    test_guest_zshenv_sets_ssl_cert_file() {
+        local zshenv="$SCRIPT_DIR/../guest/home/.zshenv" unset_out preset_out
+        if [[ ! -r /etc/ssl/cert.pem ]]; then
+            fail "guest .zshenv sets SSL_CERT_FILE" "/etc/ssl/cert.pem readable" "missing"
+            return
+        fi
+        # shellcheck disable=SC2016 # expanded by zsh, not here
+        unset_out=$(env -u SSL_CERT_FILE SHARED_WORKSPACE='' ZSHENV="$zshenv" \
+            /bin/zsh -f -c 'source "$ZSHENV"; printf %s "${SSL_CERT_FILE:-}"' 2>&1)
+        # shellcheck disable=SC2016 # expanded by zsh, not here
+        preset_out=$(SSL_CERT_FILE=/custom/ca.pem SHARED_WORKSPACE='' ZSHENV="$zshenv" \
+            /bin/zsh -f -c 'source "$ZSHENV"; printf %s "${SSL_CERT_FILE:-}"' 2>&1)
+        if [[ "$unset_out" == "/etc/ssl/cert.pem" && "$preset_out" == "/custom/ca.pem" ]]; then
+            pass "guest .zshenv sets SSL_CERT_FILE without overriding the user's"
+        else
+            fail "guest .zshenv sets SSL_CERT_FILE without overriding the user's" \
+                "unset='/etc/ssl/cert.pem' preset='/custom/ca.pem'" \
+                "unset='$unset_out' preset='$preset_out'"
+        fi
+    }
+    queue_test test_guest_zshenv_sets_ssl_cert_file
+
     # Test that brew symlinks used by sv are accessible
     test_brew_symlink_accessible() {
         local brew_prefix
@@ -1823,6 +1851,7 @@ STUB
             printf '%s\n' "$render"
             if [[ -n "$plant" ]]; then
                 # Rename the real renderer and wrap it so the link appears mid-write.
+                # shellcheck disable=SC2016 # emitted code, expanded by the generated script
                 echo 'eval "real_$(declare -f render_shared_workspace_readme)"'
                 printf 'render_shared_workspace_readme() { %s; real_render_shared_workspace_readme; }\n' "$plant"
             fi
@@ -1850,6 +1879,7 @@ STUB
     test_workspace_readme_created_when_missing() {
         local name="workspace README created when missing" base dest out
         base="$(new_readme_scratch)"; dest="$base/ws/SANDVAULT-README.md"
+        # shellcheck disable=SC2310 # the write's failure is what the test checks
         if ! out=$(run_readme_write "$base/ws"); then
             fail "$name" "write succeeds" "$out"
         elif [[ -L "$dest" || ! -f "$dest" ]]; then
@@ -1866,6 +1896,7 @@ STUB
         local name="workspace README left alone when present" base dest out
         base="$(new_readme_scratch)"; dest="$base/ws/SANDVAULT-README.md"
         printf 'user edited\n' > "$dest"
+        # shellcheck disable=SC2310 # the write's failure is what the test checks
         if ! out=$(run_readme_write "$base/ws"); then
             fail "$name" "write succeeds" "$out"
         elif [[ "$(cat "$dest")" != 'user edited' ]]; then
@@ -1882,6 +1913,7 @@ STUB
     test_workspace_readme_racing_file_symlink() {
         local name="workspace README racing file symlink replaced" base dest out
         base="$(new_readme_scratch)"; dest="$base/ws/SANDVAULT-README.md"
+        # shellcheck disable=SC2310 # the write's failure is what the test checks
         if ! out=$(run_readme_write "$base/ws" "ln -s '$base/host-private' '$dest'"); then
             fail "$name" "write succeeds" "$out"
         elif [[ "$(cat "$base/host-private")" != 'HOST PRIVATE DATA' ]]; then
@@ -1900,6 +1932,7 @@ STUB
     test_workspace_readme_racing_directory_symlink() {
         local name="workspace README racing directory symlink replaced" base dest out
         base="$(new_readme_scratch)"; dest="$base/ws/SANDVAULT-README.md"
+        # shellcheck disable=SC2310 # the write's failure is what the test checks
         if ! out=$(run_readme_write "$base/ws" "ln -s '$base/host-dir' '$dest'"); then
             fail "$name" "write succeeds" "$out"
         elif [[ -n "$(/bin/ls -A "$base/host-dir")" ]]; then
@@ -2561,7 +2594,9 @@ STUB_EOF
         log_file="$(mktemp)"
         cp "$SV_CLONE_BASE" "$install_dir/sv-clone"
         cp -R "$SCRIPT_DIR/../helpers" "$install_dir/helpers"
+        # shellcheck disable=SC2016 # expanded by the stub, not here
         printf '#!/bin/bash\necho "sv $*" >> "$SV_STUB_LOG"\n' > "$install_dir/sv"
+        # shellcheck disable=SC2016 # expanded by the stub, not here
         printf '#!/bin/bash\necho "chgrp $*" >> "$SV_STUB_LOG"\n' > "$install_dir/chgrp"
         chmod +x "$install_dir/sv" "$install_dir/chgrp"
 
@@ -2599,6 +2634,76 @@ STUB_EOF
         sv_cmd s -- rm -rf "$CLONE_WORKSPACE/repos/$(basename "$src_repository")" >/dev/null 2>&1
     }
     queue_test test_sv_clone_fetch_uses_profile
+    wait_for_all_running_tests
+
+    # sv-gh-token installs a fine-grained GitHub token into the sandbox's gh.
+    # The token must reach the sandbox only on stdin (never argv), be stored
+    # by the sandbox user's own gh, keep git on SSH deploy keys, and use the
+    # --profile sandbox. Classic tokens (repo scope = write everywhere) and
+    # tokens with shell metacharacters must be refused before sv is run. A
+    # stub sv next to a copy of the script records argv and stdin.
+    test_sv_gh_token() {
+        local install_dir log_file output status
+        # Fake tokens are assembled at runtime so secret scanners see no literal.
+        local pat="github""_pat_" classic="gh""p_"
+        local token="${pat}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_svtest"
+        local profile="svtestprofile"
+
+        install_dir="$(mktemp -d)"
+        log_file="$(mktemp)"
+        cp "$SCRIPT_DIR/../sv-gh-token" "$install_dir/sv-gh-token"
+        cp -R "$SCRIPT_DIR/../helpers" "$install_dir/helpers"
+        # shellcheck disable=SC2016 # expanded by the stub, not here
+        printf '#!/bin/bash\necho "ARGV: $*" >> "$SV_STUB_LOG"\ncat >> "$SV_STUB_LOG"\n' > "$install_dir/sv"
+        chmod +x "$install_dir/sv"
+
+        set +e
+        output=$(printf ' %s \n' "$token" | SV_STUB_LOG="$log_file" \
+            "$bash_path" "$install_dir/sv-gh-token" --profile "$profile" 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            fail "sv-gh-token installs a piped token" "exit 0" "$status | $output"
+        elif grep '^ARGV:' "$log_file" | grep -qF "$token"; then
+            fail "sv-gh-token keeps the token out of argv" "token only on stdin" "$(cat "$log_file")"
+        elif ! grep -qx "ARGV: --profile $profile --no-build shell /Users/Shared/sv-$HOST_USER-$profile" "$log_file"; then
+            fail "sv-gh-token runs in the --profile sandbox" \
+                "ARGV: --profile $profile --no-build shell /Users/Shared/sv-$HOST_USER-$profile" "$(grep '^ARGV:' "$log_file")"
+        elif ! grep -qx "$token" "$log_file" \
+            || ! grep -q '^gh auth login --hostname github.com --with-token --insecure-storage --git-protocol ssh --skip-ssh-key <<' "$log_file"; then
+            fail "sv-gh-token hands the trimmed token to gh auth login on stdin" \
+                "gh auth login ... --git-protocol ssh <<heredoc with token" "$(cat "$log_file")"
+        elif grep -q 'setup-git' "$log_file"; then
+            fail "sv-gh-token does not make gh a git credential helper" "no setup-git" "$(cat "$log_file")"
+        else
+            status=ok
+        fi
+        # One result per test: a later pass would overwrite this failure.
+        if [[ "$status" != ok ]]; then
+            rm -rf "$install_dir" "$log_file"
+            return
+        fi
+
+        local bad
+        # shellcheck disable=SC2016 # literal $( ) is the malformed token under test
+        for bad in "${classic}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "${pat}"'aaaaaaaaaaaaaaaaaaaaaaaa$(touch /tmp/x)' ""; do
+            : > "$log_file"
+            set +e
+            output=$(printf '%s\n' "$bad" | SV_STUB_LOG="$log_file" \
+                "$bash_path" "$install_dir/sv-gh-token" 2>&1)
+            status=$?
+            set -e
+            if [[ "$status" -eq 0 || -s "$log_file" ]]; then
+                fail "sv-gh-token refuses token '${bad:0:16}...' before running sv" \
+                    "non-zero exit, sv not run" "$status | $output | $(cat "$log_file")"
+                rm -rf "$install_dir" "$log_file"
+                return
+            fi
+        done
+        pass "sv-gh-token installs a token via stdin and refuses classic/malformed ones"
+        rm -rf "$install_dir" "$log_file"
+    }
+    queue_test test_sv_gh_token
     wait_for_all_running_tests
 
     # Test that -w generates a deploy key with write access.

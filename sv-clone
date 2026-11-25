@@ -206,6 +206,7 @@ fi
 LOCAL_REPOSITORY=""
 if [[ -d "$CLONE_REPOSITORY" ]]; then
     LOCAL_REPOSITORY="$(cd "$CLONE_REPOSITORY" && pwd -P)"
+    # shellcheck disable=SC2310 # git_safe is a single git command
     REPOSITORY_SOURCE_URL="$(git_safe "$LOCAL_REPOSITORY" remote get-url origin 2>/dev/null)" \
         || abort "Local repository $LOCAL_REPOSITORY has no 'origin' remote"
     REPOSITORY_NAME="$(basename "$LOCAL_REPOSITORY")"
@@ -360,6 +361,7 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
     else
         debug "Deploy key already exists for $REPOSITORY_NAME"
         # -P "" so a passphrase-protected key fails instead of prompting.
+        # shellcheck disable=SC2310 # sandbox_run is a single sv command
         DEPLOY_KEY_PUB_LINE="$(sandbox_run ssh-keygen -y -P "" -f "$DEPLOY_KEY_PRIV" \
             </dev/null 2>/dev/null)" || DEPLOY_KEY_PUB_LINE=""
         DEPLOY_KEY_PUB_RE='^(ssh-ed25519 [A-Za-z0-9+/]+={0,2})( [^[:cntrl:]]*)?$'
@@ -499,6 +501,7 @@ fi
 # Add sandvault remote to local repository (if cloning from local)
 ###############################################################################
 if [[ -n "$LOCAL_REPOSITORY" && -z "${SV_CLONE_WORKSPACE_ROOT:-}" ]]; then
+    # shellcheck disable=SC2310 # git_safe is a single git command
     if git_safe "$LOCAL_REPOSITORY" remote get-url sandvault &>/dev/null; then
         git_safe "$LOCAL_REPOSITORY" remote set-url sandvault "$REPO_DIR"
     else
