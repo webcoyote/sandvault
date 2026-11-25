@@ -777,11 +777,15 @@ configure_shared_folder_permssions() {
     # latter errors: "chmod: the -R and -h options may not be specified
     # together".
     if [[ "$enable" == "true" ]]; then
-        # Make workspace accessible to $HOST_USER and $SANDVAULT_GROUP only
+        # Make workspace accessible to $HOST_USER and $SANDVAULT_GROUP only.
+        # Use find -exec -h instead of chown -R: -R follows symlinks and
+        # applies to hard-linked inodes outside the tree. Skip inodes with
+        # nlink > 1 (hard links) so ownership changes don't escape.
         trace "Configuring $SHARED_WORKSPACE: set owner to $HOST_USER:$SANDVAULT_GROUP"
-        sudo /usr/sbin/chown -f -R "$HOST_USER:$SANDVAULT_GROUP" "$SHARED_WORKSPACE"
+        sudo find "$SHARED_WORKSPACE" ! -type l -links 1 \
+            -exec /usr/sbin/chown -h "$HOST_USER:$SANDVAULT_GROUP" {} + 2>/dev/null || true
         trace "Configuring $SHARED_WORKSPACE permissions..."
-        sudo /bin/chmod 0770 "$SHARED_WORKSPACE"
+        sudo /bin/chmod -h 0770 "$SHARED_WORKSPACE"
 
         # One-shot legacy ACE cleanup. Several historical sv releases
         # applied ACE shapes that propagated execute (or search, which
@@ -812,9 +816,10 @@ configure_shared_folder_permssions() {
     else
         # Make workspace accessible to $HOST_USER only
         trace "Configuring $SHARED_WORKSPACE: restoring owner to $HOST_USER:$(id -gn)"
-        sudo /usr/sbin/chown -f -R "$HOST_USER:$(id -gn)" "$SHARED_WORKSPACE"
+        sudo find "$SHARED_WORKSPACE" ! -type l -links 1 \
+            -exec /usr/sbin/chown -h "$HOST_USER:$(id -gn)" {} + 2>/dev/null || true
         trace "Configuring $SHARED_WORKSPACE permissions..."
-        sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
+        sudo /bin/chmod -h 0700 "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE: stripping all ACLs"
         sudo find "$SHARED_WORKSPACE" -exec /bin/chmod -h -N {} + \
             2>/dev/null || true
@@ -975,11 +980,14 @@ uninstall_all() {
         sudo rm -rf "$p_sudoers" "$p_sudoers_legacy"
         sudo rm -rf "$p_build_home" "$p_launcher" "$p_sandbox"
 
-        # Remove ACLs on workspace
+        # Remove ACLs on workspace. Use find -exec -h instead of -R to
+        # avoid following symlinks and to skip hard links (nlink > 1) that
+        # could carry the ownership/ACL change to an inode outside the tree.
         if [[ -d "$p_workspace" ]]; then
-            sudo chmod -RN "$p_workspace" 2>/dev/null || true
-            sudo chown -R "$HOST_USER:$(id -gn)" "$p_workspace" 2>/dev/null || true
-            sudo chmod -R u=rwX,go= "$p_workspace" 2>/dev/null || true
+            sudo find "$p_workspace" -exec /bin/chmod -h -N {} + 2>/dev/null || true
+            sudo find "$p_workspace" ! -type l -links 1 -exec /usr/sbin/chown -h "$HOST_USER:$(id -gn)" {} + 2>/dev/null || true
+            sudo find "$p_workspace" ! -type l -links 1 \( -type d -exec /bin/chmod -h u=rwx,go= {} + \) \
+                -o \( ! -type d -exec /bin/chmod -h u=rw,go= {} + \) 2>/dev/null || true
         fi
 
         # Remove group membership and user/group
@@ -1679,7 +1687,23 @@ fi
 ###############################################################################
 if [[ "$REBUILD" == "true" ]]; then
     debug "Creating shared workspace at $SHARED_WORKSPACE..."
-    mkdir -p "$SHARED_WORKSPACE"
+    if [[ -e "$SHARED_WORKSPACE" ]]; then
+        # Validate: must be a real directory, not a symlink. /Users/Shared
+        # is sticky so another sandbox can't replace a claimed name, but it
+        # can pre-create the name of a profile that doesn't exist yet.
+        if [[ -L "$SHARED_WORKSPACE" ]]; then
+            abort "Refusing to use $SHARED_WORKSPACE: it is a symlink (expected a directory)"
+        fi
+        if [[ ! -d "$SHARED_WORKSPACE" ]]; then
+            abort "Refusing to use $SHARED_WORKSPACE: it exists but is not a directory"
+        fi
+    else
+        # Create without -p: the parent (/Users/Shared) must already exist.
+        # -p would silently succeed on a symlink to an existing directory.
+        mkdir "$SHARED_WORKSPACE"
+    fi
+    # Use chmod -h on the workspace root to avoid following a replaced symlink.
+    sudo /bin/chmod -h 0770 "$SHARED_WORKSPACE"
     configure_shared_folder_permssions true
 fi
 
