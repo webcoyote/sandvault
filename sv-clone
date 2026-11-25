@@ -226,6 +226,15 @@ if [[ -z "$REPOSITORY_NAME" ]]; then
     abort "Could not determine repository name from: $CLONE_REPOSITORY"
 fi
 
+# Validate: reject path traversal, whitespace, quotes, and other shell
+# metacharacters that would be unsafe in deploy-key paths and jq programs.
+if [[ "$REPOSITORY_NAME" == "." || "$REPOSITORY_NAME" == ".." ]]; then
+    abort "Invalid repository name: $REPOSITORY_NAME"
+fi
+if [[ ! "$REPOSITORY_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    abort "Invalid repository name: $REPOSITORY_NAME (must match [A-Za-z0-9._-]+)"
+fi
+
 readonly REPOSITORY_NAME
 readonly REPOSITORY_SOURCE_URL
 readonly CLONE_SOURCE="${LOCAL_REPOSITORY:-$REPOSITORY_SOURCE_URL}"

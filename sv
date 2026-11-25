@@ -1049,15 +1049,10 @@ uninstall_all() {
         rm -f "$orphan"
         trace "Swept orphan install marker: $orphan"
     done
-    # Session dirs (profile subdirs of ~/.local/state/sandvault/)
-    for orphan in "$HOME/.local/state/sandvault"/*/; do
-        [[ -d "$orphan" ]] || continue
-        rm -rf "$orphan"
-        trace "Swept orphan session dir: $orphan"
-    done
+    # Session dirs are only removed if they were already cleaned in pass 1.
+    # Do not sweep unknown subdirs — they may be user-created.
 
-    # Clean up parent dirs if now empty
-    sudo rmdir "$(dirname "$INSTALL_PRODUCT/x")" 2>/dev/null || true
+    # Clean up parent dirs if now empty (no sudo — these are user dirs)
     rmdir "$INSTALL_PRODUCT" &>/dev/null || true
     rmdir "$INSTALL_ORG" &>/dev/null || true
     sudo rmdir /var/sandvault 2>/dev/null || true
@@ -1522,15 +1517,20 @@ next_free_id() {
 # Mac do not race on ID allocation. mkdir is atomic on POSIX, so the
 # first creator wins. The lock holder writes its PID; if a stale lock
 # is found (PID no longer running) we steal it.
-SV_ID_LOCK_DIR="/tmp/sandvault-id-alloc.lock"
+# Lock in /var/sandvault/ (root-owned) so a sandbox user cannot pre-create
+# the lock directory and block builds. /tmp is world-writable.
+SV_ID_LOCK_DIR="/var/sandvault/id-alloc.lock"
 acquire_id_alloc_lock() {
     local waited=0
-    while ! mkdir "$SV_ID_LOCK_DIR" 2>/dev/null; do
+    sudo mkdir -p "$(dirname "$SV_ID_LOCK_DIR")" 2>/dev/null || true
+    while ! sudo mkdir "$SV_ID_LOCK_DIR" 2>/dev/null; do
         local holder=""
         [[ -r "$SV_ID_LOCK_DIR/pid" ]] && holder=$(cat "$SV_ID_LOCK_DIR/pid" 2>/dev/null || true)
         if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
             warn "Removing stale ID-allocation lock from PID $holder"
-            rm -rf "$SV_ID_LOCK_DIR"
+            sudo rm -rf "$SV_ID_LOCK_DIR" 2>/dev/null || true
+            sleep 1
+            waited=$((waited + 1))
             continue
         fi
         if (( waited >= 30 )); then
@@ -1539,11 +1539,11 @@ acquire_id_alloc_lock() {
         sleep 1
         waited=$((waited + 1))
     done
-    echo "$$" > "$SV_ID_LOCK_DIR/pid"
-    trap 'rm -rf "$SV_ID_LOCK_DIR"' EXIT
+    echo "$$" | sudo tee "$SV_ID_LOCK_DIR/pid" > /dev/null
+    trap 'sudo rm -rf "$SV_ID_LOCK_DIR" 2>/dev/null || true' EXIT
 }
 release_id_alloc_lock() {
-    rm -rf "$SV_ID_LOCK_DIR"
+    sudo rm -rf "$SV_ID_LOCK_DIR" 2>/dev/null || true
     trap - EXIT
 }
 
