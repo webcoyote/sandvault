@@ -1,0 +1,457 @@
+# Sandvault 2 design
+
+Status: design, nothing implemented. Decisions marked **Decided** were made on
+2026-11-24. Open items are listed at the end.
+
+Section references such as §1 are to `docs/review-guidelines.md`. "Finding N"
+refers to `docs/security-review-2026-11-24.md`.
+
+## Goals
+
+1. Rewrite in Rust as a single compiled binary plus one small root helper.
+2. Need `sudo` only for install, uninstall, and sudoers setup. Creating and
+   deleting sandboxes needs no password, and works for users without admin
+   rights.
+3. Make account and workspace names impossible to confuse between users.
+4. Remove features that put the host user or root to work inside
+   sandbox-writable directories.
+5. Add an AI agent without changing sandvault itself.
+
+## The rule the design follows
+
+Almost every escape in v1's history is a confused deputy: the host user or
+root performs an ordinary file or git operation on a path the sandbox
+controls. The first fix in that class was wrong three times, and each time the
+fix that held was the one that removed the access (§1).
+
+So v2 starts from this rule:
+
+> The host user and root never read, write, or run tools inside the workspace
+> or the sandbox home. The sandbox user does every operation there.
+
+The one stated exception is the iOS bridge (see "iOS bridge").
+
+Of the 19 findings in the security review, about 12 no longer have a code
+path under this rule and the feature removals below.
+
+## Trust model
+
+| Actor | Trust |
+|---|---|
+| Root helper | The only code that runs as root. Trusts nothing it is passed. |
+| Admin who runs `sv2 install` | Trusted. Decides who may create sandboxes. |
+| Host user | Trusted with their own sandboxes. **Not** trusted by root or by other users. |
+| Sandbox user | Hostile. Runs arbitrary code, concurrently, at all times. |
+| Adversary | Steers the agent; can plant something now that fires on a later run. |
+
+
+## Language and structure
+
+Rust, split in two:
+
+- **`sv2`**, the command-line tool. Runs as the host user. Ordinary
+  dependencies are fine.
+- **`sv2-helper`**, the root helper. As close to zero dependencies as
+  possible, because every crate in it runs as root. Commit `Cargo.lock`,
+  vendor or audit its dependency tree, and pin CI actions by commit SHA.
+
+What Rust buys:
+
+- All of §6 (bash 3.2 idioms, lost exit codes) goes away.
+- Arguments are passed as a vector from `sv2` to the agent. No shell re-parses
+  them, which removes the quoting class (finding 12).
+- File operations can be done relative to a directory handle without following
+  links, which bash cannot do.
+- A launch drops from roughly 60–90 processes to a handful.
+
+What Rust does not buy: the confused-deputy class. That is closed by the rule
+above, not by the language. Concurrency is not a benefit here either; the work
+is a few system calls.
+
+User and group creation still shells out to `dscl` and `dseditgroup`. That
+happens only when a profile is added.
+
+## Privileged helper
+
+**Decided:** a root-owned helper invoked through one sudoers line for v2. A
+launchd daemon is a planned follow-up.
+
+- The helper is installed outside the Homebrew prefix, which an admin user can
+  write: `sudo sv2 install` copies it to a root-owned path. `sv2` and the
+  helper check each other's version.
+- One sudoers line, for example
+  `%sandvault-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper`.
+  There is no per-user sudoers file.
+- The helper's interface is designed as a wire protocol so it can move behind
+  a daemon without redesign:
+  - narrow verbs only: `profile-add NAME`, `profile-remove NAME`,
+    `profile-list`, `launch NAME -- ARGV`;
+  - no path arguments;
+  - the caller is identified by real UID, never by an argument or an
+    environment variable;
+  - root never opens a host-owned file. The guest payload is embedded in the
+    binary.
+- A per-user limit on the number of profiles, since each one is a real
+  account.
+- UID allocation and the registry are locked in a root-owned directory, not
+  `/tmp` (finding 14).
+- It is written with setuid-level care: the caller controls its working
+  directory, resource limits, and timing, and can kill it halfway through.
+  Every operation must be safe to interrupt and repeat.
+
+Why the daemon comes later: it is the stronger design for an untrusted caller
+(the caller can only send it messages), but it needs a terminal proxy, a
+versioned protocol, and a root socket that sandboxed processes must be kept
+away from.
+
+## Session launch
+
+**Decided:** every session runs in the sandbox user's own launchd domain. This
+is the approach from the `use-launchd` branch (commit f9d2924).
+
+Background: `sudo -u` alone keeps the caller's Mach bootstrap, so a v1 session
+looked up per-user services in the host user's login session and reached the
+host user's agents. `launchctl asuser <uid>`, run as root, moves the session
+into `user/<sandbox uid>`. Services the profile allows, such as
+`com.apple.cfprefsd.agent` and `com.apple.trustd.agent`, are then the sandbox
+user's own.
+
+The launch sequence in v2:
+
+1. `sv2` runs `sudo sv2-helper launch NAME -- ARGV`.
+2. The helper looks up the profile and its UID in the registry.
+3. The helper runs `/bin/launchctl asuser <uid>` on a second stage of itself.
+4. The second stage allocates a pty, sets groups and UID, clears the
+   environment, applies the sandbox profile, and executes the command.
+
+Consequences:
+
+- The sandbox profile is always applied. There is no `--no-sandbox`.
+- The session has its own pty and does not share the host's terminal
+  (finding 8).
+- No inner `sudo --login`, so no login shell re-parses arguments or sources
+  `.zshenv` and `.zprofile` twice.
+- No per-user launcher script and no launcher version stamp; the UID comes
+  from the registry.
+- Go programs verify TLS through the sandbox user's own trust agent, so the
+  `SSL_CERT_FILE` workaround is not needed.
+- The later daemon needs the same `asuser` step, since its own domain has no
+  per-user agents.
+
+Acceptance test, carried over from the branch: inside a session,
+`launchctl manageruid` equals `id -u`.
+
+## Names and ownership
+
+**Decided:** username plus a mandatory profile. The default profile is named
+`default`.
+
+The v1 collision exists because the profile is optional: `pat` + `work` and
+`pat-work` + nothing produce the same string. Profiles match `^[a-z0-9]{1,16}$`
+and so never contain a dash. With a profile always present, the last dash
+separates user from profile unambiguously.
+
+- **Account:** `sv2-<user>-<profile>`, for example `sv2-pat-default` and
+  `sv2-pat-work`. The `sv2-` prefix keeps v2 accounts distinct from v1's
+  `sandvault-<user>-<profile>` accounts, so both versions can be installed
+  side by side and v2 never adopts or modifies a v1 account.
+- **Workspace:** `/Users/Shared/sv2/<user>/<profile>/`. The directories `sv2/`
+  and `sv2/<user>/` are root-owned and not world-writable, so no sandbox can
+  pre-create the name of a future profile (finding 5).
+- **Ownership is recorded, not parsed.** A root-owned registry, keyed by host
+  UID, lists each user's profiles. The helper reads the registry and never
+  derives ownership from a name. This replaces v1's collision guard, its
+  listing by regular expression, and "the host user is in the sandbox group"
+  as the ownership record.
+- **Host usernames** are validated against an explicit character set and a
+  length limit, and are never placed unescaped into a pattern or a filename.
+
+## Workspace permissions
+
+- Root never operates inside the workspace. v1's recursive `chown` and ACL
+  passes are removed (finding 5).
+- New files and directories get access through inherited ACL entries, as
+  today.
+- Files moved in from elsewhere keep their old permissions. The host user owns
+  them and can fix them without root: `sv2 share PATH` does this explicitly.
+- Nothing managed by sandvault lives in the workspace. v1's `_sandvault/`
+  directory (setup scripts, state files, scratch space) is gone (finding 1).
+  State that grants access lives in host-only or root-only locations (§2).
+
+## Sandbox profile
+
+- Each sandvault profile has its own `sandbox-exec` profile file, so profiles
+  can later be given different capabilities, as defined by the host user.
+- The files are root-owned and live outside the workspace and the sandbox
+  home, for example `/Library/Application Support/sandvault2/profiles/<user>/<profile>.sb`.
+  The helper writes one on `profile-add` and deletes it on `profile-remove`.
+  The sandbox user cannot edit its own file.
+- Root never opens a host-owned file, so `sv2` sends the host user's
+  capability choices to the helper on stdin. The helper validates them and
+  renders the file from the embedded base profile. The input format is an open
+  item.
+- Default deny (finding 11). Each allow rule is written in the source next to
+  the tool that needs it and the symptom without it, measured as the sandbox
+  user under the rendered profile (§3). The probes are kept as tests.
+- The Mach service allow list stays short, and each entry is re-measured in
+  the sandbox user's own domain.
+- A stated position on localhost networking. At minimum, deny local port 22.
+
+## Closing other routes out of the sandbox
+
+The profile only confines processes that sandvault starts. Removing SSH mode
+does not close the SSH route: if Remote Login is on for all users, the sandbox
+user can connect to its own account, because `authorized_keys` is in its own
+writable home.
+
+`sv2 install` therefore:
+
+- puts all sandbox accounts in one shared group and installs an sshd drop-in
+  that refuses that group (no keys, no passwords, forced command
+  `/usr/bin/false`);
+- gives sandbox accounts no usable password;
+- never adds them to `com.apple.access_ssh`.
+
+Other routes to audit before release: cron, `at`, launchd agents, Screen
+Sharing.
+
+## Command line
+
+```
+sv2 install                       # needs sudo, once per machine
+sv2 uninstall                     # needs sudo
+sv2 build [OPTIONS]
+sv2 profile add NAME
+sv2 profile remove NAME
+sv2 profile list
+sv2 run [OPTIONS] NAME [ARGS...]
+sv2 [OPTIONS] NAME [ARGS...]      # shorthand for sv2 run
+sv2 share PATH
+sv2 doctor
+```
+
+- Options come before `NAME`. Everything after `NAME` is passed to the agent
+  unchanged; no `--` is needed.
+- `sv2 run` creates the `default` profile on first use.
+- `sv2 run --profile work claude` selects a profile.
+- One uninstall path, which removes only what the
+  registry lists (finding 17).
+
+**Decided:** a bare agent name is accepted as shorthand. `sv2 claude` is
+`sv2 run claude`, and `sv2 --profile work claude` is
+`sv2 run --profile work claude`.
+
+- Subcommands always win. An agent whose name matches a subcommand is
+  reachable only through `sv2 run NAME`, and `sv2 doctor` warns about it. This
+  way a subcommand added later cannot be shadowed by a user's agent, and a
+  user's agent cannot change what `sv2 install` or `sv2 uninstall` does.
+- A first argument that is neither a subcommand nor a known agent is an error
+  ("unknown command or agent"). `sv2` never searches `PATH` for it.
+
+## Agents
+
+`NAME` in `sv2 run NAME` selects an agent definition. Adding an agent means
+adding one definition; `sv2` does not change.
+
+- **Where definitions live:**
+  - Built-ins are installed with `sv2` in `<prefix>/share/sandvault2/agents/`.
+    `sv2` finds this directory from its own resolved executable path
+    (`../share/sandvault2/agents`), never from the current directory or
+    `PATH`. Built-ins can then be added or fixed without rebuilding the binary.
+  - User definitions live in host-only `~/.config/sandvault2/agents/`.
+  - `shell` is embedded in the binary, so `sv2 run shell` works even when the
+    agents directory is missing or broken.
+  - A development build with no `share/` directory falls back to the
+    `agents/` directory of the source tree it was built from.
+- **Precedence:** a user definition with the same name as a built-in replaces
+  it as a whole directory, not file by file. The session banner names the
+  directory that was used.
+- **Definition directories must not be writable by the sandbox.** A definition
+  names the Homebrew package that `sv2` installs as the host user, and
+  Homebrew formulae run arbitrary code, so a definition the sandbox can edit
+  gives the sandbox code execution as the host user. Before reading a
+  directory, `sv2` refuses it if it lies under the workspace root or if any
+  directory on its path is writable by anyone other than the host user and
+  root. Ownership alone is not enough, because the sandbox can move
+  host-owned directories into place. This applies to the development fallback
+  too: a checkout inside the workspace is refused (finding 7). The rule covers
+  the whole definition directory, including guest scripts, so there is one
+  rule rather than one per file.
+- **Versioning:** each definition carries a schema version that `sv2` checks.
+  `sv2 doctor` reports missing or incompatible built-ins.
+- **How they reach the sandbox:** `sv2` reads the definition, including its
+  guest scripts, as the host user and passes it to the session over a pipe.
+  Root never opens it, and the sandbox cannot edit it.
+- **Names** match `^[a-z0-9][a-z0-9-]*$` and are looked up only in the places
+  above, never on `PATH`.
+- `shell` is a built-in definition, embedded in the binary (see above).
+- §7 still applies: resolve the binary by explicit path, check injected flags
+  against the real `--help`, and state in the banner what trust a flag grants.
+
+### Definition format
+
+**Decided:** one directory per agent, holding an `agent.toml` for data and
+separate shell scripts for steps that run inside the sandbox.
+
+```
+agents/claude/
+  agent.toml
+  install.sh      # guest native install, runs as the sandbox user
+```
+
+A definition does three things, and how much code each may contain depends on
+which user runs it:
+
+1. **Host install is data only.** It runs as the host user, outside the
+   sandbox. A host-side script would make every definition arbitrary host
+   code, and could reach into the workspace and reopen the confused-deputy
+   class. The definition names a package; `sv2` builds the argument vector
+   itself (for example `brew install --formula claude-code`), validates the
+   name, shows what it will run, and passes it with no shell (finding 12).
+   A new method, such as MacPorts, is a new key plus reviewed code in `sv2`.
+2. **Guest install may be a script.** It runs as the sandbox user, under the
+   sandbox profile, into a home the sandbox already controls, so arbitrary
+   code there grants nothing new. Scripts are separate `.sh` files, not
+   strings inside TOML, so they need no escaping and are checked by
+   shellcheck like the rest of the repository.
+3. **Run is mostly data,** with an optional guest-side wrapper script. Binary
+   location, permission-bypass flag, system prompt injection, and the
+   subcommands that must not receive injected flags are data, because `sv2`
+   needs them for the banner, for checking flags against `--help` (§7), and
+   for `sv2 doctor`. An agent that does not fit can add a wrapper script,
+   which runs inside the sandbox.
+
+Example (values are illustrative):
+
+```toml
+schema = 1
+binary = ["~/.local/bin/claude", "{brew}/bin/claude"]
+
+[install.host]          # data only; sv2 builds the argv
+brew = { formula = "claude-code" }
+
+[install.guest]
+script = "install.sh"
+
+[run]
+bypass_flag = "--dangerously-skip-permissions"
+system_prompt = { flag = "--append-system-prompt" }
+no_inject = ["mcp", "config", "update"]
+# wrapper = "run.sh"    # optional, runs inside the sandbox
+```
+
+Why not the alternatives:
+
+- **Bash scripts only:** v1's wrappers are about 80% identical, and the shared
+  part drifted. Host install would become host code, and `sv2` could not
+  inspect a definition for the banner or `doctor`.
+- **JSON:** no comments and no multi-line strings. Each flag and install step
+  should carry a comment saying why it is there.
+- **YAML:** implicit typing and indentation errors, and nothing gained over
+  TOML. Rust's `toml` crate reads TOML directly through `serde`.
+
+### Installing agents
+
+**Decided:** Homebrew by default; native install with
+`sv2 run --native NAME`.
+
+- Homebrew runs as the host user from `sv2`, never from the root helper.
+- `sv2` requires an existing Homebrew and does not install it. If Homebrew is
+  missing, or its prefix is not writable (non-admin users), the error points
+  to `--native`.
+- A native install runs the agent's own installer inside the sandbox, into the
+  sandbox home.
+- A native binary already present in the sandbox home is preferred, so
+  `--native` is needed only the first time.
+
+## Features removed
+
+| Removed | Reason | Replacement |
+|---|---|---|
+| SSH mode (`--ssh`, `authorized_keys.d`) | Findings 8, 9, 12; the account password; half the test matrix. Its one isolation benefit now applies to every session. | None |
+| `sv-clone` and the `/sv` skill | Findings 3, 4, 13, 16, 18: host git and host writes in the workspace | Deploy-key script, below |
+| `sv-agentsview-setup` | Finding 2; about 1,600 lines including vendored code | None |
+| `--no-sandbox` | The profile is mandatory | None |
+| Nested `sv` | Trusted an environment variable to detect nesting | None |
+| `SANDVAULT_ARGS` | Second argument parser with different quoting | Shell alias |
+| `uninstall --all`, `--fix-permissions` | Root passes over the workspace | `sv2 uninstall`, `sv2 share` |
+| Installing Homebrew via `curl \| bash` | Finding 19 | Require Homebrew or use `--native` |
+| Host-written files in the workspace | Findings 1, 15 | Embedded guest payload |
+
+Browser support (`--chrome`, `--lightpanda`) stays. It already runs inside the
+sandbox.
+
+## Repository credentials
+
+**Decided:** `sv-clone` is replaced by a script that runs inside the sandbox.
+
+- The script generates a deploy key in the sandbox and prints the
+  `gh repo deploy-key add` command. The user runs that command on the host and
+  sees exactly which repository and access level it names.
+- The sandbox clones and pushes. The host gets results by pulling from GitHub.
+- The host never runs git against the workspace (§1 rule 7).
+
+`sv-gh-token` carries over. It already follows the rule: the token is sent on
+stdin to a script running as the sandbox user, and the host writes nothing
+into the workspace.
+
+## iOS bridge
+
+**Decided:** redesign in v2 rather than drop.
+
+The bridge is a server running as the host user that lets the sandbox install
+and launch simulator apps (finding 6). It is the one exception to the rule at
+the top of this document, so it is opt-in and held to these requirements:
+
+- a per-session token on every request, and a `Host` header check;
+- installs limited to this profile's workspace;
+- the app bundle is copied into a host-only directory without following links,
+  and only the copy is installed;
+- the scratch directory is created and removed by the sandbox user, or
+  accessed through a directory handle (finding 15);
+- every argument is validated and passed so it cannot be read as an option;
+- the bridge runs as the host user under `sv2`, never from the root helper;
+- the README states exactly what trust `--ios` grants.
+
+## Installed artifacts and upgrades
+
+v2 installs four things as root: the helper, one sudoers line, the sshd
+drop-in, and the registry. The helper also writes one `sandbox-exec` profile
+file per sandvault profile. Each of these carries a version and has an upgrade
+path, and each is written to a temporary file, validated, then renamed into
+place (§2, §5). Upgrading the base profile means re-rendering every profile
+file listed in the registry.
+
+There are no generated root scripts (finding 10) and no per-launch setup. The
+guest side unpacks the embedded payload only when its version stamp changes.
+
+## Tests
+
+- Naming, profile rendering, registry handling, and argument parsing are unit
+  tests that need no privileges.
+- The planted-attack tests in v1's `scripts/tests` are the acceptance suite.
+  They and the review guidelines are the real specification.
+- §8 still applies to integration tests: throwaway fixtures only, a test that
+  plants the attack for every security fix, and verification from the host
+  side.
+
+## Development
+
+A checkout inside the workspace lets a sandboxed agent edit the source of the
+root helper (finding 7). A helper build must be reviewed, and built from a
+checkout the sandbox cannot write, before `sudo sv2 install`.
+
+## Open items
+
+1. **Quarantine.** v1 clears quarantine by running freshly installed agent
+   binaries as the host user. Find a way that does not execute them (remove
+   the attribute, or install without quarantine).
+2. **Simulator trust.** Confirm from the host side whether simulator apps run
+   unconfined as the host user, then document what `--ios` grants.
+3. **Daemon follow-up.** Scope and timing of the move from the sudoers helper
+   to a launchd daemon.
+4. **Per-profile capabilities.** The format the host user uses to define a
+   profile's capabilities: a fixed set of named capabilities the helper maps
+   to rules it already contains, or raw SBPL rules added to the base profile.
+   Named capabilities keep root's parser small and every rule reviewed. Raw
+   SBPL is more flexible, but the helper then has to parse and validate it.
