@@ -9,7 +9,7 @@ refers to `docs/security-review-2026-11-24.md`.
 ## Goals
 
 1. Rewrite in Rust as a single compiled binary plus one small root helper.
-2. Need `sudo` only for install, uninstall, and sudoers setup. Creating and
+2. Need `sudo` only for install, uninstall, and allowing or denying a user. Creating and
    deleting sandboxes needs no password, and works for users without admin
    rights.
 3. Make account and workspace names impossible to confuse between users.
@@ -29,7 +29,11 @@ So v2 starts from this rule:
 > The host user and root never read, write, or run tools inside the workspace
 > or the sandbox home. The sandbox user does every operation there.
 
-The one stated exception is the iOS bridge (see "iOS bridge").
+The rule binds sandvault's own code (`sv2` and the helper), not the person:
+the host user still edits files in the workspace by hand.
+
+There are two stated exceptions: `sv2 repair` (see "Workspace permissions")
+and the iOS bridge (see "iOS bridge").
 
 Of the 19 findings in the security review, about 12 no longer have a code
 path under this rule and the feature removals below.
@@ -77,18 +81,27 @@ happens only when a profile is added.
 launchd daemon is a planned follow-up.
 
 - The helper is installed outside the Homebrew prefix, which an admin user can
-  write: `sudo sv2 install` copies it to a root-owned path. `sv2` and the
-  helper check each other's version.
+  write. `sv2 install` is run without `sudo` and refuses to run as root. It
+  runs `sudo <prefix>/sv2-helper install` itself, which asks for the
+  password; the helper copies its own executable to a root-owned path and
+  writes the other root-owned artifacts. `sv2` itself never runs as root.
+- `sv2` and the helper check each other's version.
+- The helper is not setuid, because Homebrew cannot install a setuid binary.
 - One sudoers line, for example
   `%sandvault-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper`.
   There is no per-user sudoers file.
 - The helper's interface is designed as a wire protocol so it can move behind
   a daemon without redesign:
   - narrow verbs only: `profile-add NAME`, `profile-remove NAME`,
-    `profile-list`, `launch NAME -- ARGV`;
+    `profile-list`, `launch NAME -- ARGV`, `user-allow USER`,
+    `user-deny USER`, `install`, `uninstall`;
   - no path arguments;
-  - the caller is identified by real UID, never by an argument or an
-    environment variable;
+  - the caller is identified by `SUDO_UID`. Under sudo the helper's real UID
+    is 0, so this is the only identity available; sudo sets the variable
+    itself and the caller cannot override it. The helper refuses to run
+    unless its real UID is 0 and `SUDO_UID` is set, rejects a `SUDO_UID` that
+    is a sandbox account, and takes identity from no argument and no other
+    variable;
   - root never opens a host-owned file. The guest payload is embedded in the
     binary.
 - A per-user limit on the number of profiles, since each one is a real
@@ -121,14 +134,12 @@ The launch sequence in v2:
 1. `sv2` runs `sudo sv2-helper launch NAME -- ARGV`.
 2. The helper looks up the profile and its UID in the registry.
 3. The helper runs `/bin/launchctl asuser <uid>` on a second stage of itself.
-4. The second stage allocates a pty, sets groups and UID, clears the
-   environment, applies the sandbox profile, and executes the command.
+4. The second stage sets groups and UID, clears the environment, applies the
+   sandbox profile, and executes the command.
 
 Consequences:
 
 - The sandbox profile is always applied. There is no `--no-sandbox`.
-- The session has its own pty and does not share the host's terminal
-  (finding 8).
 - No inner `sudo --login`, so no login shell re-parses arguments or sources
   `.zshenv` and `.zprofile` twice.
 - No per-user launcher script and no launcher version stamp; the UID comes
@@ -140,6 +151,30 @@ Consequences:
 
 Acceptance test, carried over from the branch: inside a session,
 `launchctl manageruid` equals `id -u`.
+
+### Terminal multiplexers
+
+tmux and screen work without SSH, in two ways:
+
+- **On the host.** Run `sv2` inside a host tmux pane. To tmux this is an
+  ordinary program in a terminal; nothing is needed.
+- **Inside the sandbox.** Run `sv2 run shell tmux new -A -s main`, then detach,
+  close the terminal, and reattach later with the same command. The server
+  runs as the sandbox user, under the sandbox profile, in the sandbox user's
+  launchd domain.
+
+The second way needs one thing from the launch: **detached processes may
+outlive `sv2 run`.** The helper does not kill the session's process group when
+the command exits. This grants nothing new: the trust model already assumes
+the sandbox runs code at all times, and the sandbox profile is inherited
+across `fork`, so a tmux server stays confined. In exchange, `profile-remove`
+kills every process of the sandbox UID before it deletes the account.
+
+The sandbox profile must allow tmux's socket directory
+(`/private/tmp/tmux-<uid>`), measured the same way as other allow rules (§3).
+The pasteboard service is denied, so copying to the host clipboard from inside
+tmux needs OSC 52 (`set -g set-clipboard on`), which goes through the host
+terminal.
 
 ## Names and ownership
 
@@ -173,7 +208,17 @@ separates user from profile unambiguously.
 - New files and directories get access through inherited ACL entries, as
   today.
 - Files moved in from elsewhere keep their old permissions. The host user owns
-  them and can fix them without root: `sv2 share PATH` does this explicitly.
+  them and can fix them without root: `sv2 repair PATH` does this explicitly.
+- `sv2 repair PATH` only fixes permissions, and only inside the caller's own
+  workspace tree; any other path is an error. It runs as the host user, never
+  as root. Because it is a host operation on sandbox-writable paths, it is an
+  exception to the rule and is held to §1: it walks the tree without following
+  links, changes each entry through an open file descriptor rather than by
+  path, and skips (with a warning) anything the host user does not own or
+  that has more than one hard link.
+- `sv2 profile remove` never deletes the user's files. The helper removes the
+  workspace directory only if it is empty. Otherwise it leaves it, says so,
+  and a later `profile add` of the same name reuses it.
 - Nothing managed by sandvault lives in the workspace. v1's `_sandvault/`
   directory (setup scripts, state files, scratch space) is gone (finding 1).
   State that grants access lives in host-only or root-only locations (§2).
@@ -190,6 +235,9 @@ separates user from profile unambiguously.
   capability choices to the helper on stdin. The helper validates them and
   renders the file from the embedded base profile. The input format is an open
   item.
+- **Decided:** the first milestone ports v1's profile unchanged
+  (allow-default with its deny list). The default-deny work below follows
+  once sessions run, and is required before release.
 - Default deny (finding 11). Each allow rule is written in the source next to
   the tool that needs it and the symptom without it, measured as the sandbox
   user under the rendered profile (§3). The probes are kept as tests.
@@ -199,10 +247,9 @@ separates user from profile unambiguously.
 
 ## Closing other routes out of the sandbox
 
-The profile only confines processes that sandvault starts. Removing SSH mode
-does not close the SSH route: if Remote Login is on for all users, the sandbox
-user can connect to its own account, because `authorized_keys` is in its own
-writable home.
+The profile only confines processes that sandvault starts. If Remote Login is
+on for all users, the sandbox user can connect to its own account, because
+`authorized_keys` is in its own writable home.
 
 `sv2 install` therefore:
 
@@ -218,18 +265,22 @@ Sharing.
 ## Command line
 
 ```
-sv2 install                       # needs sudo, once per machine
-sv2 uninstall                     # needs sudo
-sv2 build [OPTIONS]
+sv2 install                       # asks for sudo, once per machine
+sv2 uninstall                     # asks for sudo
+sv2 user allow USER               # asks for sudo
+sv2 user deny USER                # asks for sudo
 sv2 profile add NAME
 sv2 profile remove NAME
 sv2 profile list
 sv2 run [OPTIONS] NAME [ARGS...]
 sv2 [OPTIONS] NAME [ARGS...]      # shorthand for sv2 run
-sv2 share PATH
+sv2 repair PATH
 sv2 doctor
 ```
 
+- `sv2 user allow USER` and `sv2 user deny USER` add a user to, or remove one
+  from, the `sandvault-users` group named in the sudoers line. `sv2 install`
+  adds the admin who runs it.
 - Options come before `NAME`. Everything after `NAME` is passed to the agent
   unchanged; no `--` is needed.
 - `sv2 run` creates the `default` profile on first use.
@@ -270,10 +321,13 @@ adding one definition; `sv2` does not change.
   names the Homebrew package that `sv2` installs as the host user, and
   Homebrew formulae run arbitrary code, so a definition the sandbox can edit
   gives the sandbox code execution as the host user. Before reading a
-  directory, `sv2` refuses it if it lies under the workspace root or if any
-  directory on its path is writable by anyone other than the host user and
-  root. Ownership alone is not enough, because the sandbox can move
-  host-owned directories into place. This applies to the development fallback
+  directory, `sv2` refuses it if it lies under a workspace or a sandbox home,
+  or if any directory on its path is writable by a sandbox account
+  (world-writable, or writable through a group or ACL entry that includes
+  one). A directory owned by another host user is accepted: for a non-admin
+  user the Homebrew prefix belongs to an admin, and that admin can already
+  replace `sv2` itself. Ownership alone is not enough inside the workspace,
+  because the sandbox can move host-owned directories into place. This applies to the development fallback
   too: a checkout inside the workspace is refused (finding 7). The rule covers
   the whole definition directory, including guest scripts, so there is one
   rule rather than one per file.
@@ -368,13 +422,13 @@ Why not the alternatives:
 
 | Removed | Reason | Replacement |
 |---|---|---|
-| SSH mode (`--ssh`, `authorized_keys.d`) | Findings 8, 9, 12; the account password; half the test matrix. Its one isolation benefit now applies to every session. | None |
+| SSH mode (`--ssh`, `authorized_keys.d`) | Findings 8, 9, 12; the account password; half the test matrix. Its one isolation benefit (own login context) now applies to every session. | None needed for tmux or screen: see "Terminal multiplexers". Inbound SSH from other machines (v1's `authorized_keys.d`) is out of scope for v2. |
 | `sv-clone` and the `/sv` skill | Findings 3, 4, 13, 16, 18: host git and host writes in the workspace | Deploy-key script, below |
 | `sv-agentsview-setup` | Finding 2; about 1,600 lines including vendored code | None |
 | `--no-sandbox` | The profile is mandatory | None |
 | Nested `sv` | Trusted an environment variable to detect nesting | None |
 | `SANDVAULT_ARGS` | Second argument parser with different quoting | Shell alias |
-| `uninstall --all`, `--fix-permissions` | Root passes over the workspace | `sv2 uninstall`, `sv2 share` |
+| `uninstall --all`, `--fix-permissions` | Root passes over the workspace | `sv2 uninstall`, `sv2 repair` |
 | Installing Homebrew via `curl \| bash` | Finding 19 | Require Homebrew or use `--native` |
 | Host-written files in the workspace | Findings 1, 15 | Embedded guest payload |
 
@@ -439,7 +493,7 @@ guest side unpacks the embedded payload only when its version stamp changes.
 
 A checkout inside the workspace lets a sandboxed agent edit the source of the
 root helper (finding 7). A helper build must be reviewed, and built from a
-checkout the sandbox cannot write, before `sudo sv2 install`.
+checkout the sandbox cannot write, before `sv2 install`.
 
 ## Open items
 
@@ -450,7 +504,22 @@ checkout the sandbox cannot write, before `sudo sv2 install`.
    unconfined as the host user, then document what `--ios` grants.
 3. **Daemon follow-up.** Scope and timing of the move from the sudoers helper
    to a launchd daemon.
-4. **Per-profile capabilities.** The format the host user uses to define a
+4. **Terminal.** The launch does nothing special with the terminal. Check in
+   the first working build whether tmux inside the sandbox works, and whether
+   the session sharing the host's terminal (finding 8) needs a fix.
+5. **Guest-side launcher.** Which component, running as the sandbox user,
+   resolves the agent binary, runs `install.sh`, and builds the final
+   argument vector: the helper after it drops privileges, or a script in the
+   embedded payload. Also how the agent definition, initial directory, and
+   terminal variables reach it, given that sudo passes only stdin, stdout,
+   and stderr.
+6. **Registry format.** Fields, and the intent record that makes
+   `profile-add` and `profile-remove` safe to interrupt and repeat.
+7. **launchd as a route around the profile.** Measure whether a session can
+   start a job in its own launchd domain (`launchctl bootstrap` or `submit`,
+   or a plist in `~/Library/LaunchAgents`). Such a job would run as the
+   sandbox user without the `sandbox-exec` profile.
+8. **Per-profile capabilities.** The format the host user uses to define a
    profile's capabilities: a fixed set of named capabilities the helper maps
    to rules it already contains, or raw SBPL rules added to the base profile.
    Named capabilities keep root's parser small and every rule reviewed. Raw
