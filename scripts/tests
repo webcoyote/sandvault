@@ -2177,11 +2177,15 @@ PY
     # The repo gets one empty commit so git clone / bundle work.
     # Tests should use this instead of pointing sv-clone at the real
     # sandvault checkout, which must never have its config mutated.
+    # Place source repos in /tmp (host-only) rather than inside the clone
+    # workspace, which lives under the shared workspace. The deploy-key
+    # refusal check (security review item 4) blocks -k/-w when the source
+    # is inside the sandbox workspace.
     make_test_repo() {
         local _var="$1"
         local github_path="${2:-sv-test-org/test-repo}"
         local dir
-        dir="$(mktemp -d "$CLONE_WORKSPACE/src.XXXXXX")"
+        dir="$(mktemp -d /tmp/sv-clone-test-src.XXXXXX)"
         GIT_CONFIG_GLOBAL=/dev/null git -C "$dir" init -q
         GIT_CONFIG_GLOBAL=/dev/null git -C "$dir" -c user.email=t@t -c user.name=t \
             commit -q --allow-empty -m "init"
@@ -3521,6 +3525,8 @@ start_guard() {
 # run this before tearing the guard down.  The host-side rm is a fallback for
 # when the session is already gone -- it clears at least the directory we own.
 cleanup_clone_workspace() {
+    # Clean up source repos created in /tmp by make_test_repo.
+    rm -rf /tmp/sv-clone-test-src.* 2>/dev/null || true
     [[ -n "$CLONE_WORKSPACE" ]] || return 0
     # shellcheck disable=SC2310 # best-effort; the host-side rm below is the fallback
     sv_cmd s -- rm -rf "$CLONE_WORKSPACE" >/dev/null 2>&1 || true
