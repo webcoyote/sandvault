@@ -131,8 +131,8 @@ SANDBOX_SHELL=("$SV" "${SV_PROFILE_ARGS[@]+"${SV_PROFILE_ARGS[@]}"}" --no-build
     shell "$SHARED_WORKSPACE")
 readonly SANDBOX_SHELL
 
-# gh is a Go binary and needs SSL_CERT_FILE to verify TLS in the sandbox
-# (see guest/home/.zshenv, which sv sources before running the script).
+# gh is a Go binary: it verifies TLS through the sandvault user's own trustd
+# agent (com.apple.trustd.agent), which the sandbox profile allows.
 readonly GH_STATUS_CMD='gh auth status --hostname github.com </dev/null'
 
 

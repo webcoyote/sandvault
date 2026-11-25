@@ -4,7 +4,8 @@ All notable user-facing changes to SandVault are documented in this file.
 
 ### Fixed
 
-- Fix `gh` and other Go programs failing TLS verification in the sandbox with `x509: OSStatus -26276`. The sandbox shell now sets `SSL_CERT_FILE=/etc/ssl/cert.pem` unless you already set it. Go tools then ignore root certificates added through Keychain Access or MDM; set `SSL_CERT_FILE` in `/Users/Shared/sv-$USER/user/.zshenv` to use your own bundle. Takes effect on the next `sv` run
+- Fix `gh` and other Go programs failing TLS verification in the sandbox with `x509: OSStatus -26276`. Go tools now use the macOS trust store, including root certificates installed system-wide (MDM or the System keychain)
+- Run `sv` sessions in the sandbox user's own macOS login context instead of yours. Before, system helpers the sandbox talks to (preferences, certificate checks) were your own instances; now they are the sandbox user's, as `sv --ssh` sessions already were. The first `sv` run after upgrading asks for your password once to install the new launcher
 
 ### Added
 

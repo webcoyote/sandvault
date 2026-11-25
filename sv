@@ -50,6 +50,17 @@ profile_needs_rewrite() {
     return 0
 }
 
+# Same idea for the root owned session launcher. An install that predates the
+# launcher has no file at all, so it needs a rewrite too, and the sudoers rule
+# that permits it is written alongside.
+launcher_needs_rewrite() {
+    local want="$1" file="$2" have
+    [[ -f "$file" ]] || return 0
+    have="$(sed -n 's/^# sv-launcher-version: //p' "$file" 2>/dev/null | head -1)"
+    [[ "$have" == "$want" ]] && return 1
+    return 0
+}
+
 configure_ssh_access() {
     local key_file
     local tmp_authorized_keys
@@ -128,7 +139,12 @@ readonly VERSION="1.40.0"
 
 # Bump when the sandbox policy changes: the profile is root owned, so the
 # version line it carries is how an installed machine learns it is stale.
-readonly SV_SANDBOX_PROFILE_VERSION="4"
+readonly SV_SANDBOX_PROFILE_VERSION="5"
+
+# Bump when the session launcher (SANDVAULT_LAUNCHER) changes, for the same
+# reason: it is root owned, so its version line is how a machine learns it
+# is stale.
+readonly SV_LAUNCHER_VERSION="1"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
 NESTED=false
@@ -238,6 +254,10 @@ readonly SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-${SANDVAULT_USER//./_}"
 # Name used before the fix above; sudo ignored it for dotted usernames
 readonly SUDOERS_FILE_LEGACY="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
 readonly SUDOERS_BUILD_HOME_SCRIPT_NAME="/var/sandvault/buildhome-$SANDVAULT_USER"
+# Root owned launcher that starts a session in the sandvault user's own
+# launchd domain (user/<uid>), not the host user's login session. See the
+# "Session launcher" comment where it is written.
+readonly SANDVAULT_LAUNCHER="/var/sandvault/launch-$SANDVAULT_USER"
 
 # Installation marker file
 readonly INSTALL_ORG="$HOME/.config/codeofhonor"
@@ -865,8 +885,9 @@ uninstall() {
     # Remove the sudoers file
     sudo rm -rf "$SUDOERS_FILE" "$SUDOERS_FILE_LEGACY"
 
-    # Remove build home script and sandbox profile
+    # Remove build home script, session launcher and sandbox profile
     sudo rm -rf "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+    sudo rm -rf "$SANDVAULT_LAUNCHER"
     sudo rm -rf "$SANDBOX_PROFILE"
     sudo rmdir "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")" 2>/dev/null || true
 
@@ -927,6 +948,7 @@ uninstall_all() {
         local p_sudoers="/etc/sudoers.d/50-nopasswd-for-${p_user//./_}"
         local p_sudoers_legacy="/etc/sudoers.d/50-nopasswd-for-$p_user"
         local p_build_home="/var/sandvault/buildhome-$p_user"
+        local p_launcher="/var/sandvault/launch-$p_user"
         local p_sandbox="/var/sandvault/sandbox-$p_user.sb"
         local p_install_marker="$INSTALL_PRODUCT/install${suffix}"
         local p_ssh_priv="$SSH_DIR/id_ed25519_sandvault${suffix}"
@@ -949,9 +971,9 @@ uninstall_all() {
         # Remove install marker
         rm -rf "$p_install_marker"
 
-        # Remove sudoers, build script, sandbox profile
+        # Remove sudoers, build script, session launcher, sandbox profile
         sudo rm -rf "$p_sudoers" "$p_sudoers_legacy"
-        sudo rm -rf "$p_build_home" "$p_sandbox"
+        sudo rm -rf "$p_build_home" "$p_launcher" "$p_sandbox"
 
         # Remove ACLs on workspace
         if [[ -d "$p_workspace" ]]; then
@@ -1682,7 +1704,30 @@ fi
 ###############################################################################
 # Configure passwordless sudo to switch to sandvault user
 ###############################################################################
-if [[ "$REBUILD" == "true" ]]; then
+# An install that predates the session launcher, or carries an older one, gets
+# the launcher and the sudoers rule that permits it here, without --rebuild.
+# Sessions never fall back to the old "sudo --user" path, which ran in the host
+# user's login session.
+SESSION_LAUNCHER_STALE=false
+# shellcheck disable=SC2310 # predicate with explicit return codes
+if [[ "$NESTED" == "false" && "$REBUILD" == "false" ]] \
+    && launcher_needs_rewrite "$SV_LAUNCHER_VERSION" "$SANDVAULT_LAUNCHER"; then
+    if [[ "$NO_BUILD" == "true" ]]; then
+        abort "Session launcher needs an update; rerun without --no-build: sv --rebuild build (needs sudo)"
+    fi
+    # Check sudo up front for the same reason the profile rewrite does: a bare
+    # "sudo: a password is required" from deep in the block is not actionable.
+    if ! sudo -p "Password required to update the session launcher: " /usr/bin/true; then
+        if [[ -n "$SV_PROFILE" ]]; then
+            abort "Session launcher is stale; run 'sv --rebuild build --profile $SV_PROFILE' (needs sudo)"
+        fi
+        abort "Session launcher is stale; run 'sv --rebuild build' (needs sudo)"
+    fi
+    SESSION_LAUNCHER_STALE=true
+fi
+readonly SESSION_LAUNCHER_STALE
+
+if [[ "$REBUILD" == "true" || "$SESSION_LAUNCHER_STALE" == "true" ]]; then
     if [[ ! -d "$WORKSPACE/guest/home" ]]; then
         abort "ERROR: '$WORKSPACE/guest/home' directory not found"
     fi
@@ -1745,6 +1790,40 @@ EOF
 
     # Get the sandvault user's UID
     SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
+    if [[ ! "$SANDVAULT_UID" =~ ^[0-9]+$ ]]; then
+        abort "Could not read the UniqueID of $SANDVAULT_USER"
+    fi
+
+    # Session launcher. "sudo --user" alone keeps the caller's Mach bootstrap
+    # (/etc/pam.d/sudo has no pam_launchd), so a session would look up per-user
+    # services such as com.apple.cfprefsd.agent and com.apple.trustd.agent in
+    # the host user's login session and reach the host user's agents.
+    # "launchctl asuser" moves the session into the sandvault user's own domain
+    # (user/<uid>, launchctl managername "Background"), the one "sv --ssh"
+    # already gets from sshd's pam_launchd. asuser needs root, hence a root
+    # owned script with the user and uid fixed: it always drops to
+    # $SANDVAULT_USER and clears the environment, so it grants the host user
+    # no more than the "($SANDVAULT_USER) NOPASSWD: /usr/bin/env" rule below.
+    # The arguments go to "env -i": NAME=value pairs, then the command.
+heredoc SANDVAULT_LAUNCHER_CONTENT << EOF
+#!/bin/bash
+# sv-launcher-version: __SV_LAUNCHER_VERSION__
+# Generated by sv. Starts a sandvault session as $SANDVAULT_USER in the
+# launchd domain user/$SANDVAULT_UID.
+# Usage: $SANDVAULT_LAUNCHER [NAME=value ...] command [args ...]
+set -e
+exec /bin/launchctl asuser $SANDVAULT_UID \\
+    /usr/bin/sudo --login --set-home --user=$SANDVAULT_USER \\
+    /usr/bin/env -i "\$@"
+EOF
+    # shellcheck disable=SC2154 # SANDVAULT_LAUNCHER_CONTENT is referenced but not assigned (yes it is)
+    SANDVAULT_LAUNCHER_CONTENT="${SANDVAULT_LAUNCHER_CONTENT//__SV_LAUNCHER_VERSION__/$SV_LAUNCHER_VERSION}"
+    # Temp file and rename, like the sandbox profile: a running sv may be
+    # exec'ing the launcher while this one rewrites it.
+    SANDVAULT_LAUNCHER_TMP="$(sudo /usr/bin/mktemp "/var/sandvault/.launch-$SANDVAULT_USER.XXXXXXXX")"
+    echo "$SANDVAULT_LAUNCHER_CONTENT" | sudo tee "$SANDVAULT_LAUNCHER_TMP" > /dev/null
+    sudo /bin/chmod 0555 "$SANDVAULT_LAUNCHER_TMP"
+    sudo /bin/mv -f "$SANDVAULT_LAUNCHER_TMP" "$SANDVAULT_LAUNCHER"
 
 heredoc SUDOERS_CONTENT << EOF
 # Allow $HOST_USER to run these commands as $SANDVAULT_USER without password
@@ -1754,6 +1833,9 @@ $HOST_USER ALL=($SANDVAULT_USER) NOPASSWD: /usr/bin/true
 
 # Allow $HOST_USER to run $SUDOERS_BUILD_HOME_SCRIPT_NAME to sync home directory
 $HOST_USER ALL=(root) NOPASSWD: $SUDOERS_BUILD_HOME_SCRIPT_NAME
+
+# Allow $HOST_USER to start sessions in $SANDVAULT_USER's own launchd domain
+$HOST_USER ALL=(root) NOPASSWD: $SANDVAULT_LAUNCHER
 
 # Allow $HOST_USER to kill $SANDVAULT_USER processes without password
 $HOST_USER ALL=(root) NOPASSWD: /bin/launchctl bootout user/$SANDVAULT_UID
@@ -1834,10 +1916,14 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
 ;; Deny mounting disks
 (deny file-mount file-unmount)
 
-;; Deny every per-user service except the ones a session needs. The sandbox
-;; user runs in the bootstrap namespace of the host user, so an allowed lookup
-;; lets the host user's service act for the sandbox: open on a bundle made
-;; LaunchServices launch it as the host user, outside this profile.
+;; Deny every Mach service except the ones a session needs. Sessions run in
+;; the sandvault user's own launchd domain (user/<uid>): the sudo path through
+;; the session launcher's "launchctl asuser", and sv --ssh through sshd's
+;; pam_launchd. So a per-user agent name allowed here reaches the sandvault
+;; user's own agent, not the host user's; launchctl manageruid in a session
+;; prints the sandvault uid. Before the launcher, sudo sessions inherited the
+;; host user's login session and every allowed agent name was the host
+;; user's, which is why this list is still a short allow list.
 (deny mach-lookup)
 (allow mach-lookup
   ;; CFPreferences: defaults, plutil, curl and the other CoreFoundation
@@ -1856,24 +1942,30 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
   (global-name-prefix "com.apple.mDNSResponder")
   (global-name-prefix "com.apple.networkd")
   (global-name-prefix "com.apple.SystemConfiguration")
-  ;; TLS trust evaluation. Measured: without the com.apple.trustd prefix,
-  ;; curl, git and python3 all verify https://example.com and
-  ;; git ls-remote answers, so the prefix carries none of it. The one name
-  ;; curl needs is TrustEvaluationAgent: with it denied, curl
-  ;; https://example.com fails with (60) unable to get local issuer
-  ;; certificate.
+  ;; TLS trust evaluation. curl needs TrustEvaluationAgent: with it denied,
+  ;; curl https://example.com fails with (60) unable to get local issuer
+  ;; certificate. Go programs (gh, and any Go binary) verify through the
+  ;; per-user trustd agent: with com.apple.trustd.agent denied they fail with
+  ;; "x509: OSStatus -26276". Measured in user/<uid>: the agent that answers
+  ;; is the sandvault user's own trustd --agent, and Go verifies both
+  ;; https://example.com and https://api.github.com. Only the agent name is
+  ;; allowed, not the com.apple.trustd prefix: curl, git and python3 verify
+  ;; without the rest of it.
   (global-name "com.apple.TrustEvaluationAgent")
+  (global-name "com.apple.trustd.agent")
   ;; LaunchServices, which Chrome and Chromium check in with at startup: with
   ;; it denied, start-chrome (sv --chrome) reports "Chrome exited
   ;; unexpectedly" and the browser logs nothing. This one name is the narrow
   ;; grant that restores Chrome, and a launch still does not reach the host:
   ;; open on the test bundle fails with kLSNoExecutableErr, and open -a
-  ;; Calculator leaves no Calculator process owned by the host user.
+  ;; Calculator leaves no Calculator process owned by the host user (measured
+  ;; while sudo sessions still ran in the host user's login session).
   (global-name "com.apple.coreservices.launchservicesd")
-  ;; Keychain access, reads and writes, by security and the agent tools: the
-  ;; lookup reaches the host user's securityd, so a session can add items too.
-  ;; Without it security reports "One or more parameters passed to a function
-  ;; were not valid".
+  ;; Keychain access, reads and writes, by security and the agent tools
+  ;; (Claude Code keeps its credentials in sandvault.keychain-db). securityd
+  ;; is a system daemon; it keys its state on the caller's audit session,
+  ;; which in user/<uid> is the sandvault user's own. Without it security
+  ;; reports "One or more parameters passed to a function were not valid".
   (global-name "com.apple.SecurityServer")
   ;; OCSP revocation checks. not measured: no probe failed without it.
   (global-name "com.apple.ocspd")
@@ -2403,25 +2495,30 @@ if [[ "$MODE" == "ssh" ]]; then
     exit "$sv_session_rc"
 else
 
-    LAUNCHER=()
+    # Both launchers end in "env -i", which clears the environment so PATH
+    # does not carry over; the arguments below are NAME=value pairs and then
+    # the command.
     if [[ "$NESTED" == "true" ]]; then
-        : # No launcher required
+        # Already the sandvault user; the session inherits the parent
+        # session's launchd domain
+        LAUNCHER=(/usr/bin/env -i)
     else
         # Verify passwordless sudo is working
         trace "Checking passwordless sudo"
-        if ! sudo --non-interactive --user="$SANDVAULT_USER" /usr/bin/true ; then
+        if ! sudo --non-interactive "$SANDVAULT_LAUNCHER" /usr/bin/true ; then
             error "Passwordless sudo to $SANDVAULT_USER user is not configured correctly."
             error "Please run: ${BASH_SOURCE[0]} build --rebuild"
             exit 1
         fi
 
-        # Launch using sudo
-        LAUNCHER+=("sudo" "--login" "--set-home" "--user=$SANDVAULT_USER")
+        # The root owned launcher runs "launchctl asuser <uid>" and then
+        # "sudo --login --set-home --user=$SANDVAULT_USER env -i", so the session
+        # runs in the sandvault user's own launchd domain rather than the host
+        # user's login session (see "Session launcher" above).
+        LAUNCHER=(sudo --non-interactive "$SANDVAULT_LAUNCHER")
     fi
 
     # Launch interactive shell as sandvault user
-    # Use sudo with -H to set HOME correctly
-    # Use env to ensure the environment is cleared, otherwise PATH carries over
     # Use sandbox-exec to restrict access to external drives
     debug "Shell $SANDVAULT_USER@$SSH_HOST"
 
@@ -2434,8 +2531,7 @@ else
     sv_session_rc=0
     sv_session_runner=(run_session)
     [[ "$NESTED" == "true" ]] && sv_session_runner=(exec)
-    "${sv_session_runner[@]}" "${LAUNCHER[@]+"${LAUNCHER[@]}"}" \
-        /usr/bin/env -i \
+    "${sv_session_runner[@]}" "${LAUNCHER[@]}" \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
             "SHELL=/bin/zsh" \

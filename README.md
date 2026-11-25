@@ -110,7 +110,7 @@ Install via git:
 
 ## Connect via SSH
 
-The default mode for sandvault runs commands as a limited user (basically `sudo -u sandbox-$USER COMMAND`). Sandvault also configures the limited sandvault account so that you can run commands via SSH (`ssh sandbox-$USER@127.0.0.1`), and everything works the same. Use the `-s` or `--ssh` option to use SSH mode with `sv`, or use `tmux` or `screen` for users so inclined.
+The default mode for sandvault runs commands as a limited user (basically `sudo launchctl asuser <uid> sudo -u sandbox-$USER COMMAND`, so the session runs in the sandbox user's own macOS login context, not yours). Sandvault also configures the limited sandvault account so that you can run commands via SSH (`ssh sandbox-$USER@127.0.0.1`), and everything works the same. Use the `-s` or `--ssh` option to use SSH mode with `sv`, or use `tmux` or `screen` for users so inclined.
 
 ```bash
 # Run using impersonation
