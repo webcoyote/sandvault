@@ -242,6 +242,13 @@ debug "Clone from: $CLONE_SOURCE"
 debug "Destination: $REPO_DIR"
 
 
+# Pass --profile through to sv if set (deploy-key setup and the final launch)
+SV_PROFILE_ARGS=()
+if [[ -n "$SV_PROFILE" ]]; then
+    SV_PROFILE_ARGS=("--profile" "$SV_PROFILE")
+fi
+readonly SANDVAULT_GROUP="sandvault-$HOST_USER$SV_SUFFIX"
+
 ###############################################################################
 # Clone or fetch
 ###############################################################################
@@ -252,23 +259,39 @@ if [[ -d "$REPO_DIR/.git" ]]; then
     # runs inside the sandbox (see the fetch step).
     debug "Repository already exists; will fetch after deploy-key setup"
 else
-    debug "Cloning into $REPO_DIR..."
-    mkdir -p "$(dirname "$REPO_DIR")"
-    git clone --no-hardlinks "$CLONE_SOURCE" "$REPO_DIR"
+    # Security: the host must not run git clone into the workspace. The
+    # workspace is writable by the sandbox user, so a pre-created symlink
+    # at repos/ or repos/<name> would redirect the clone elsewhere, and
+    # the host's git would operate in an attacker-controlled directory.
+    #
+    # Instead: clone into a host-only temp dir, then have the sandbox user
+    # move the clone into the workspace. This ensures the host's git never
+    # touches sandbox-writable paths.
+    debug "Cloning into host-only temp dir..."
+    CLONE_TMP="$(mktemp -d /tmp/sv-clone.XXXXXX)"
+    CLONE_TMP_REPO="$CLONE_TMP/$REPOSITORY_NAME"
+    git clone --no-hardlinks "$CLONE_SOURCE" "$CLONE_TMP_REPO"
 
-    # If cloned from a local path, set origin to the real remote URL
+    # If cloned from a local path, set origin to the real remote URL.
+    # This write is safe: the temp dir is host-owned.
     if [[ -n "$LOCAL_REPOSITORY" ]]; then
-        git_repo remote set-url origin "$REPOSITORY_SOURCE_URL"
+        git_safe "$CLONE_TMP_REPO" remote set-url origin "$REPOSITORY_SOURCE_URL"
     fi
+
+    # Hand the clone to the sandbox user. Make it readable by the sandbox
+    # group, then have the sandbox user move it into the workspace.
+    chgrp -R "$SANDVAULT_GROUP" "$CLONE_TMP"
+    chmod -R g+rX "$CLONE_TMP"
+    {
+        printf 'set -e\nmkdir -p %q\n' "$(dirname "$REPO_DIR")"
+        printf 'if [ -e %q ]; then echo >&2 "destination already exists"; exit 1; fi\n' "$REPO_DIR"
+        printf 'cp -a %q %q\n' "$CLONE_TMP_REPO" "$REPO_DIR"
+    } | "$SV" "${SV_PROFILE_ARGS[@]+"${SV_PROFILE_ARGS[@]}"}" --no-build \
+            shell "$SHARED_WORKSPACE" \
+        || { rm -rf "$CLONE_TMP"; abort "Failed to install clone into workspace"; }
+    rm -rf "$CLONE_TMP"
 fi
 info "Repository ready at $REPO_DIR"
-
-
-# Pass --profile through to sv if set (deploy-key setup and the final launch)
-SV_PROFILE_ARGS=()
-if [[ -n "$SV_PROFILE" ]]; then
-    SV_PROFILE_ARGS=("--profile" "$SV_PROFILE")
-fi
 
 
 ###############################################################################
@@ -376,10 +399,12 @@ if [[ -n "$GITHUB_REPO_PATH" ]]; then
     # Only rewrite the origin to SSH and configure core.sshCommand once the
     # key is confirmed usable. Doing this unconditionally would strand a
     # public HTTPS clone if the upload below fails or gh is unavailable.
+    # Run git config inside the sandbox so the host never writes to the
+    # workspace clone's .git/config (which could be a symlink).
     activate_deploy_key() {
-        git_repo remote set-url origin "$DEPLOY_SSH_URL"
+        sandbox_run git -C "$REPO_DIR" remote set-url origin "$DEPLOY_SSH_URL"
         debug "Set origin to $DEPLOY_SSH_URL"
-        git_repo config core.sshCommand \
+        sandbox_run git -C "$REPO_DIR" config core.sshCommand \
             "ssh -i '$DEPLOY_KEY_PRIV' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
     }
 

@@ -2914,16 +2914,15 @@ STUB_EOF
             return
         fi
 
-        git init -q --bare "$alt_repo"
-        echo "$alt_repo/objects" > "$clone_path/.git/objects/info/alternates"
-        # The marker is named after SV_CLONE_TEST_CONTEXT, which is set only
-        # in sv-clone's own (host) environment: sv starts sandboxed commands
-        # with `env -i`, so a sandboxed run sees it unset. This tells host
-        # from sandbox even when the suite runs nested, where both are the
-        # same account.
-        git -C "$clone_path" config core.alternateRefsCommand \
-            "sh -c 'touch \"$marker_dir/\${SV_CLONE_TEST_CONTEXT:-sandbox}\"' x"
-        git -C "$clone_path" config remote.origin.url "git@github.com:sv-test-attacker/evil.git"
+        # Poison the clone as the sandbox user (since the clone is now
+        # sandbox-owned after the security fix to sv-clone).
+        {
+            echo "set -e"
+            echo "git init -q --bare '$alt_repo'"
+            echo "echo '$alt_repo/objects' > '$clone_path/.git/objects/info/alternates'"
+            echo "git -C '$clone_path' config core.alternateRefsCommand \"sh -c 'touch \\\"$marker_dir/\\\${SV_CLONE_TEST_CONTEXT:-sandbox}\\\"' x\""
+            echo "git -C '$clone_path' config remote.origin.url 'git@github.com:sv-test-attacker/evil.git'"
+        } | sv_cmd s
 
         make_gh_stub "$stub_dir"
         export GH_STUB_LOG="$log_file"
