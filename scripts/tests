@@ -1676,6 +1676,34 @@ STUB
     }
     queue_test test_sv_exports_no_sandbox
 
+    # Go programs (gh) need com.apple.trustd.agent to verify TLS, which the
+    # profile denies because it would resolve to the host user's agent. The
+    # guest .zshenv points SSL_CERT_FILE at the system bundle instead, but
+    # must not override a value the user already set. Sourced directly with
+    # zsh -f: sv tests run --no-build, so the sandbox home may hold an older
+    # copy of the file.
+    test_guest_zshenv_sets_ssl_cert_file() {
+        local zshenv="$SCRIPT_DIR/../guest/home/.zshenv" unset_out preset_out
+        if [[ ! -r /etc/ssl/cert.pem ]]; then
+            fail "guest .zshenv sets SSL_CERT_FILE" "/etc/ssl/cert.pem readable" "missing"
+            return
+        fi
+        # shellcheck disable=SC2016 # expanded by zsh, not here
+        unset_out=$(env -u SSL_CERT_FILE SHARED_WORKSPACE='' ZSHENV="$zshenv" \
+            /bin/zsh -f -c 'source "$ZSHENV"; printf %s "${SSL_CERT_FILE:-}"' 2>&1)
+        # shellcheck disable=SC2016 # expanded by zsh, not here
+        preset_out=$(SSL_CERT_FILE=/custom/ca.pem SHARED_WORKSPACE='' ZSHENV="$zshenv" \
+            /bin/zsh -f -c 'source "$ZSHENV"; printf %s "${SSL_CERT_FILE:-}"' 2>&1)
+        if [[ "$unset_out" == "/etc/ssl/cert.pem" && "$preset_out" == "/custom/ca.pem" ]]; then
+            pass "guest .zshenv sets SSL_CERT_FILE without overriding the user's"
+        else
+            fail "guest .zshenv sets SSL_CERT_FILE without overriding the user's" \
+                "unset='/etc/ssl/cert.pem' preset='/custom/ca.pem'" \
+                "unset='$unset_out' preset='$preset_out'"
+        fi
+    }
+    queue_test test_guest_zshenv_sets_ssl_cert_file
+
     # Test that brew symlinks used by sv are accessible
     test_brew_symlink_accessible() {
         local brew_prefix

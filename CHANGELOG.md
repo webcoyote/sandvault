@@ -2,6 +2,12 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Fix `gh` and other Go programs failing TLS verification in the sandbox with `x509: OSStatus -26276`. The sandbox shell now sets `SSL_CERT_FILE=/etc/ssl/cert.pem` unless you already set it. Go tools then ignore root certificates added through Keychain Access or MDM; set `SSL_CERT_FILE` in `/Users/Shared/sv-$USER/user/.zshenv` to use your own bundle. Takes effect on the next `sv` run
+
 ## [1.40.0] - 2026-11-23
 
 ### Added
