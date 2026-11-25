@@ -309,6 +309,33 @@ info "Repository ready at $REPO_DIR"
 
 GITHUB_REPO_PATH=""
 if [[ "$DEPLOY_KEY" == true ]]; then
+    # Security: when the source is a local directory under the shared workspace,
+    # the sandbox controls its git config (including remote URLs and insteadOf
+    # rewriting). If the user gave a URL explicitly, the source URL is trusted;
+    # if it was derived from a workspace-local repo's origin, the sandbox could
+    # aim the deploy key at an arbitrary repository.
+    if [[ -n "$LOCAL_REPOSITORY" ]]; then
+        case "$LOCAL_REPOSITORY" in
+            "$SHARED_WORKSPACE"/*|"$SHARED_WORKSPACE")
+                abort "Deploy key (-k/-w) refused: the source repository is inside the" \
+                    "sandbox workspace ($SHARED_WORKSPACE), so its remote URL is" \
+                    "sandbox-controlled. Pass an explicit URL instead:" \
+                    "  sv-clone -k <URL>"
+                ;;
+            *) ;;
+        esac
+        # Also check if the source is writable by any sandvault group
+        _src_group="$(/usr/bin/stat -f '%Sg' "$LOCAL_REPOSITORY" 2>/dev/null || true)"
+        case "$_src_group" in
+            sandvault-*)
+                abort "Deploy key (-k/-w) refused: the source repository is writable" \
+                    "by the sandbox group ($_src_group). Pass an explicit URL instead:" \
+                    "  sv-clone -k <URL>"
+                ;;
+            *) ;;
+        esac
+    fi
+
     # Extract owner/repo from the host-supplied source URL (the URL argument,
     # or the local repository's own origin). Never read it from the clone's
     # .git/config: the sandbox can rewrite that between runs to aim the deploy
