@@ -1676,33 +1676,84 @@ STUB
     }
     queue_test test_sv_exports_no_sandbox
 
-    # Go programs (gh) need com.apple.trustd.agent to verify TLS, which the
-    # profile denies because it would resolve to the host user's agent. The
-    # guest .zshenv points SSL_CERT_FILE at the system bundle instead, but
-    # must not override a value the user already set. Sourced directly with
-    # zsh -f: sv tests run --no-build, so the sandbox home may hold an older
-    # copy of the file.
-    test_guest_zshenv_sets_ssl_cert_file() {
-        local zshenv="$SCRIPT_DIR/../guest/home/.zshenv" unset_out preset_out
-        if [[ ! -r /etc/ssl/cert.pem ]]; then
-            fail "guest .zshenv sets SSL_CERT_FILE" "/etc/ssl/cert.pem readable" "missing"
+    # Sessions must run in the sandvault user's own launchd domain, so the
+    # per-user agents the profile allows (cfprefsd.agent, trustd.agent) are the
+    # sandvault user's, not the host user's. In the host user's login session
+    # manageruid is the host uid. Nested sessions inherit the parent's domain,
+    # so a session started by an sv older than the launcher fails this.
+    # shellcheck disable=SC2016 # expanded by the sandbox shell
+    queue_test assert_sandbox_pipe_contains "session runs in the sandvault user's launchd domain" \
+        '[[ "$(launchctl manageruid)" == "$(id -u)" ]] && echo own-domain || echo "manageruid=$(launchctl manageruid) uid=$(id -u)"' \
+        "own-domain"
+
+    # Same contract as the sandbox profile: the launcher is root owned and
+    # written only when stale, so a missing file or another version must
+    # trigger a rewrite and the current version must not.
+    test_sv_rewrites_stale_session_launcher() {
+        local dir fn got version
+        fn=$(sed -n '/^launcher_needs_rewrite() {$/,/^}$/p' "$SV_BASE")
+        version=$(sed -n 's/^readonly SV_LAUNCHER_VERSION="\([0-9][0-9]*\)"$/\1/p' "$SV_BASE")
+        if [[ -z "$fn" || -z "$version" ]]; then
+            fail "sv rewrites a stale session launcher" \
+                "launcher_needs_rewrite and SV_LAUNCHER_VERSION in sv" "not found"
             return
         fi
-        # shellcheck disable=SC2016 # expanded by zsh, not here
-        unset_out=$(env -u SSL_CERT_FILE SHARED_WORKSPACE='' ZSHENV="$zshenv" \
-            /bin/zsh -f -c 'source "$ZSHENV"; printf %s "${SSL_CERT_FILE:-}"' 2>&1)
-        # shellcheck disable=SC2016 # expanded by zsh, not here
-        preset_out=$(SSL_CERT_FILE=/custom/ca.pem SHARED_WORKSPACE='' ZSHENV="$zshenv" \
-            /bin/zsh -f -c 'source "$ZSHENV"; printf %s "${SSL_CERT_FILE:-}"' 2>&1)
-        if [[ "$unset_out" == "/etc/ssl/cert.pem" && "$preset_out" == "/custom/ca.pem" ]]; then
-            pass "guest .zshenv sets SSL_CERT_FILE without overriding the user's"
+        dir="$(mktemp -d)"
+        printf '#!/bin/bash\n# sv-launcher-version: %s\n' "$((version - 1))" > "$dir/stale"
+        printf '#!/bin/bash\n# sv-launcher-version: %s\n' "$version" > "$dir/current"
+        got=$(
+            /bin/bash -c "$fn"'
+                printf "%s%s%s" \
+                    "$(launcher_needs_rewrite "$4" "$1"; echo $?)" \
+                    "$(launcher_needs_rewrite "$4" "$2"; echo $?)" \
+                    "$(launcher_needs_rewrite "$4" "$3"; echo $?)"
+            ' _ "$dir/missing" "$dir/stale" "$dir/current" "$version"
+        )
+        rm -rf "$dir"
+        if [[ "$got" == "001" ]]; then
+            pass "sv rewrites a stale session launcher"
         else
-            fail "guest .zshenv sets SSL_CERT_FILE without overriding the user's" \
-                "unset='/etc/ssl/cert.pem' preset='/custom/ca.pem'" \
-                "unset='$unset_out' preset='$preset_out'"
+            fail "sv rewrites a stale session launcher" \
+                "001 (missing and stale need a rewrite, version $version does not)" "$got"
         fi
     }
-    queue_test test_guest_zshenv_sets_ssl_cert_file
+    queue_test test_sv_rewrites_stale_session_launcher
+
+    # Render the launcher sv installs, swap launchctl and sudo for stubs that
+    # print their argv, and run it: it must enter the sandvault uid's domain,
+    # drop to the sandvault user, clear the environment, and pass every
+    # argument through unchanged (spaces and $ included).
+    test_session_launcher_passes_args() {
+        local dir body got expected
+        dir="$(mktemp -d)"
+        body=$(sed -n '/^heredoc SANDVAULT_LAUNCHER_CONTENT << EOF$/,/^EOF$/p' "$SV_BASE")
+        if [[ -z "$body" ]]; then
+            fail "session launcher passes its arguments through" "launcher heredoc in sv" "not found"
+            rm -rf "$dir"; return
+        fi
+        # shellcheck disable=SC2016 # expanded by the inner bash
+        SANDVAULT_USER=sv-test SANDVAULT_UID=4242 SANDVAULT_LAUNCHER=/var/sandvault/launch-sv-test \
+            /bin/bash -c 'heredoc(){ IFS=$'"'\n'"' read -r -d "" "${1}" || true; }
+                eval "$1"
+                printf "%s\n" "$SANDVAULT_LAUNCHER_CONTENT"' _ "$body" > "$dir/launch"
+        sed -i '' -e "s|/bin/launchctl|$dir/launchctl|" -e "s|/usr/bin/sudo|$dir/sudo|" "$dir/launch"
+        printf '#!/bin/bash\nprintf "launchctl"; printf " [%%s]" "$@"; echo\n' > "$dir/launchctl"
+        chmod +x "$dir/launch" "$dir/launchctl"
+        if ! /bin/bash -n "$dir/launch"; then
+            fail "session launcher passes its arguments through" "valid bash" "$(cat "$dir/launch")"
+            rm -rf "$dir"; return
+        fi
+        # shellcheck disable=SC2016 # the $HOME must reach zsh unexpanded
+        got=$("$dir/launch" "HOME=/Users/sv-test" /bin/zsh -c 'echo "$HOME" a  b' 2>&1)
+        expected="launchctl [asuser] [4242] [$dir/sudo] [--login] [--set-home] [--user=sv-test] [/usr/bin/env] [-i] [HOME=/Users/sv-test] [/bin/zsh] [-c] [echo \"\$HOME\" a  b]"
+        rm -rf "$dir"
+        if [[ "$got" == "$expected" ]]; then
+            pass "session launcher passes its arguments through"
+        else
+            fail "session launcher passes its arguments through" "$expected" "$got"
+        fi
+    }
+    queue_test test_session_launcher_passes_args
 
     # Test that brew symlinks used by sv are accessible
     test_brew_symlink_accessible() {
