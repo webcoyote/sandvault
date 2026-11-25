@@ -24,14 +24,20 @@ Write a clear, actionable summary of what the user wants done. Include:
 
 ### 2. Write the handoff file
 
-Write the task briefing to `/Users/Shared/sv-$USER/tmp/handoff-<repo>.md`,
-where `$USER` is the host user and `<repo>` is the source repo's
-basename (e.g. `/Users/Shared/sv-jesse/handoff-sandvault.md`). This is
-the sandvault shared workspace — readable from inside the sandbox via
-the mounted `/Users/Shared` tree, so the sandboxed Claude can read it
-at startup. The briefing is **not** copied into the clone; it lives in
-the shared workspace and the sandboxed Claude is pointed at it by path
-(see step 4). Nothing is written into the source repo itself.
+Write the task briefing to a **host-owned** temp file, then stage it
+safely into the workspace. The workspace is sandbox-writable, so the
+host must not write there by path (a symlink could redirect the write).
+
+```bash
+# Write to a host-owned temp file, then move atomically:
+tmpfile="$(mktemp /tmp/sv-handoff-XXXXXX.md)"
+# ... write briefing to $tmpfile ...
+mv -fh "$tmpfile" "/Users/Shared/sv-$USER/tmp/handoff-<repo>.md"
+```
+
+The briefing lives in the shared workspace and the sandboxed Claude is
+pointed at it by path (see step 4). Nothing is written into the source
+repo itself.
 
 The handoff file should include:
 - A "# Task Handoff" heading

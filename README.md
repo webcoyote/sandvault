@@ -178,7 +178,16 @@ full list of options, including `-k`/`-w` to provision a per-repository deploy k
 For local Git repositories, sandvault also wires remotes:
 
 - Your local Git repository gets/updates remote `sandvault` -> `/Users/Shared/sv-$USER/repos/<git-repository>`
-- This lets you run `git fetch sandvault` from the original local Git repository to pull commits made in the sandvault Git repository.
+- **Security note:** do not run `git fetch sandvault` from the host directly.
+  The sandvault remote points into the sandbox-writable workspace, so its
+  config (hooks, fsmonitor, etc.) is untrusted. Instead, have the sandbox
+  produce a bundle and fetch from a host-owned copy of it:
+  ```bash
+  # Inside sandvault:
+  git bundle create /Users/Shared/sv-$USER/tmp/changes.bundle HEAD
+  # On the host:
+  git fetch /Users/Shared/sv-$USER/tmp/changes.bundle
+  ```
 
 
 ## GitHub API access (issues, PRs, CI logs)

@@ -139,7 +139,7 @@ readonly VERSION="1.41.0"
 
 # Bump when the sandbox policy changes: the profile is root owned, so the
 # version line it carries is how an installed machine learns it is stale.
-readonly SV_SANDBOX_PROFILE_VERSION="5"
+readonly SV_SANDBOX_PROFILE_VERSION="6"
 
 # Bump when the session launcher (SANDVAULT_LAUNCHER) changes, for the same
 # reason: it is root owned, so its version line is how a machine learns it
@@ -1648,20 +1648,29 @@ if [[ "$MODE" == "ssh" && "$NESTED" == "true" ]]; then
     MODE="default"
 fi
 
-# REBUILD mode: always configure SSH
-# SSH mode: check configuration available
+# SSH group membership: only add when --ssh is used. On rebuild without
+# --ssh, remove the sandbox user from the SSH access group so the
+# sandbox-exec layer cannot be bypassed via direct SSH login.
 if [[ "$REBUILD" == "true" || "$MODE" == "ssh" ]]; then
     if dscl . -read /Groups/com.apple.access_ssh &>/dev/null; then
-        # Remote Login is enabled with specific users/groups; ensure sandvault user can SSH
-        if ! dseditgroup -o checkmember -m "$SANDVAULT_USER" com.apple.access_ssh &>/dev/null; then
-            if [[ "$NO_BUILD" == "true" ]]; then
-                abort "cannot add $SANDVAULT_USER to remote access because --no-build flag set"
+        if [[ "$MODE" == "ssh" ]]; then
+            # SSH mode requested; ensure sandbox user can connect
+            if ! dseditgroup -o checkmember -m "$SANDVAULT_USER" com.apple.access_ssh &>/dev/null; then
+                if [[ "$NO_BUILD" == "true" ]]; then
+                    abort "cannot add $SANDVAULT_USER to remote access because --no-build flag set"
+                fi
+                trace "Adding $SANDVAULT_USER to com.apple.access_ssh group"
+                # do not use sudo dscl; it creates duplicate entries
+                sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
+            else
+                trace "SSH access: $SANDVAULT_USER is already in com.apple.access_ssh group"
             fi
-            trace "Adding $SANDVAULT_USER to com.apple.access_ssh group"
-            # do not use sudo dscl; it creates duplicate entries
-            sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
-        else
-            trace "SSH access: $SANDVAULT_USER is already in com.apple.access_ssh group"
+        elif [[ "$REBUILD" == "true" ]]; then
+            # Rebuild without --ssh: remove SSH access if previously granted
+            if dseditgroup -o checkmember -m "$SANDVAULT_USER" com.apple.access_ssh &>/dev/null; then
+                trace "Removing $SANDVAULT_USER from com.apple.access_ssh group (not in SSH mode)"
+                sudo dseditgroup -o edit -d "$SANDVAULT_USER" -t user com.apple.access_ssh 2>/dev/null || true
+            fi
         fi
     elif pgrep -x sshd &>/dev/null; then
         # Remote Login is enabled for "All users" — sshd is running but
@@ -1851,9 +1860,18 @@ EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     trace "Setting $(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME") to 0755 (world-traversable)"
     sudo /bin/chmod 0755 "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
+    # Atomic write: temp file, validate, rename. A concurrent `sv` could
+    # exec a partial file if we wrote in place, and the script runs as root
+    # through a NOPASSWD sudoers rule.
+    BUILDHOME_TMP="$(sudo /usr/bin/mktemp "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")/.buildhome-$SANDVAULT_USER.XXXXXXXX")"
     # shellcheck disable=SC2154 # SUDOERS_BUILD_HOME_SCRIPT_CONTENTS is referenced but not assigned (yes it is)
-    echo "$SUDOERS_BUILD_HOME_SCRIPT_CONTENTS" | sudo tee "$SUDOERS_BUILD_HOME_SCRIPT_NAME" > /dev/null
-    sudo /bin/chmod 0554 "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+    echo "$SUDOERS_BUILD_HOME_SCRIPT_CONTENTS" | sudo tee "$BUILDHOME_TMP" > /dev/null
+    sudo /bin/chmod 0554 "$BUILDHOME_TMP"
+    if ! sudo /bin/bash -n "$BUILDHOME_TMP" 2>/dev/null; then
+        sudo rm -f "$BUILDHOME_TMP"
+        abort "Build-home script has syntax errors"
+    fi
+    sudo /bin/mv -f "$BUILDHOME_TMP" "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
 
     # Get the sandvault user's UID
     SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
@@ -1995,10 +2013,11 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
 (allow mach-lookup
   ;; CFPreferences: defaults, plutil, curl and the other CoreFoundation
   ;; clients look up com.apple.cfprefsd.agent and com.apple.cfprefsd.daemon.
-  ;; Kept as insurance, not as a fix: defaults write, read and delete pass
-  ;; with only com.apple.system. allowed, and a denied preferences lookup
-  ;; falls back to reading the plist, so a client that needs this one fails
-  ;; silently rather than loudly.
+  ;; No probe fails without it (defaults read/write/delete pass via
+  ;; com.apple.system alone, and a denied lookup falls back to reading the
+  ;; plist). Retained because the fallback is silent failure, not a crash,
+  ;; and removing it may surface latent issues. TODO: measure and remove if
+  ;; no probe requires it.
   (global-name-prefix "com.apple.cfprefsd")
   ;; opendirectoryd's libinfo, which carries the prefs path and user and group
   ;; names: without it id -un and whoami print a uid, id loses group names,
@@ -2034,8 +2053,9 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
   ;; which in user/<uid> is the sandvault user's own. Without it security
   ;; reports "One or more parameters passed to a function were not valid".
   (global-name "com.apple.SecurityServer")
-  ;; OCSP revocation checks. not measured: no probe failed without it.
-  (global-name "com.apple.ocspd")
+  ;; OCSP revocation checks: removed. No probe failed without it (security
+  ;; review 2026-11-24, item 11). Re-add only if a specific tool failure is
+  ;; traced to its absence.
   ;; File system change notifications, used by watchexec, fswatch, and other
   ;; file watchers. fseventsd is a root system daemon, not a per-user host
   ;; service. Without this name, FSEventStreamCreate never delivers events,
@@ -2560,13 +2580,11 @@ if [[ "$MODE" == "ssh" ]]; then
     sv_session_rc=0
     sv_session_runner=(run_session)
     [[ "$NESTED" == "true" ]] && sv_session_runner=(exec)
-    "${sv_session_runner[@]}" ssh \
-        -q \
-        "$SSH_TTY_OPT" \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -i "$SSH_KEYFILE_PRIV" \
-        "$SANDVAULT_USER@$SSH_HOST" \
+    # Build the remote command as a single quoted string. SSH joins all
+    # trailing arguments with spaces and passes them through the remote
+    # login shell, so every element must be individually quoted to survive
+    # spaces, metacharacters, and sandbox-chosen directory names.
+    SSH_REMOTE_CMD="$(quote_zsh_args \
         /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
@@ -2580,7 +2598,15 @@ if [[ "$MODE" == "ssh" ]]; then
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
-            /bin/zsh -c "$ZSH_COMMAND_SSH" || sv_session_rc=$?
+            /bin/zsh -c "$ZSH_COMMAND_SSH")"
+    "${sv_session_runner[@]}" ssh \
+        -q \
+        "$SSH_TTY_OPT" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -i "$SSH_KEYFILE_PRIV" \
+        "$SANDVAULT_USER@$SSH_HOST" \
+        "$SSH_REMOTE_CMD" || sv_session_rc=$?
     exit "$sv_session_rc"
 else
 
