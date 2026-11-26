@@ -181,6 +181,20 @@ struct ProfileLine {
     workspace: String,
 }
 
+/// The table `profile list` prints. Each column is as wide as its longest
+/// cell, with two spaces between columns; the last is not padded.
+fn format_profile_table(profiles: &[ProfileLine]) -> String {
+    let mut rows = vec![["PROFILE", "STATE", "ACCOUNT", "WORKSPACE"]];
+    for p in profiles {
+        rows.push([&p.name, &p.state, &p.account, &p.workspace]);
+    }
+    let width = |col: usize| rows.iter().map(|r| r[col].len()).max().unwrap_or(0);
+    let (w0, w1, w2) = (width(0), width(1), width(2));
+    rows.iter()
+        .map(|r| format!("{:<w0$}  {:<w1$}  {:<w2$}  {}\n", r[0], r[1], r[2], r[3]))
+        .collect()
+}
+
 /// Lines of `profile <name> <state> <account> <workspace>` from the helper.
 fn parse_profile_list(text: &str) -> Result<Vec<ProfileLine>, String> {
     text.lines()
@@ -220,16 +234,7 @@ fn profile_list() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(profiles) => {
-            println!(
-                "{:<17} {:<9} {:<32} WORKSPACE",
-                "PROFILE", "STATE", "ACCOUNT"
-            );
-            for p in profiles {
-                println!(
-                    "{:<17} {:<9} {:<32} {}",
-                    p.name, p.state, p.account, p.workspace
-                );
-            }
+            print!("{}", format_profile_table(&profiles));
             ExitCode::SUCCESS
         }
     }
@@ -362,6 +367,28 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_table_columns_fit_their_content() {
+        let line = |name: &str, state: &str| ProfileLine {
+            name: name.into(),
+            state: state.into(),
+            account: format!("sv2-pat-{name}"),
+            workspace: format!("/Users/Shared/sv2/pat/{name}"),
+        };
+        assert_eq!(
+            format_profile_table(&[line("default", "active")]),
+            "PROFILE  STATE   ACCOUNT          WORKSPACE\n\
+             default  active  sv2-pat-default  /Users/Shared/sv2/pat/default\n"
+        );
+        // A cell longer than its heading widens the column for every row.
+        assert_eq!(
+            format_profile_table(&[line("a", "active"), line("abcdefghijklmnop", "removing")]),
+            "PROFILE           STATE     ACCOUNT                   WORKSPACE\n\
+             a                 active    sv2-pat-a                 /Users/Shared/sv2/pat/a\n\
+             abcdefghijklmnop  removing  sv2-pat-abcdefghijklmnop  /Users/Shared/sv2/pat/abcdefghijklmnop\n"
+        );
+    }
 
     #[test]
     fn parses_helper_profile_list() {
