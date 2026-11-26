@@ -8,6 +8,9 @@
 //! sv2 [OPTIONS] NAME [ARGS...]        shorthand for sv2 run
 //! sv2 repair PATH | doctor
 //! sv2 agent new NAME [--from AGENT]
+//! sv2 deploy-key [--profile NAME] OWNER/REPO [--write]
+//! sv2 gh-token [--profile NAME] [--owner NAME] [--days N] [--no-browser]
+//!              [login | status | logout]
 //! ```
 //!
 //! Options come before NAME. Everything after NAME goes to the agent
@@ -23,6 +26,7 @@ use std::ffi::OsString;
 use sv2_common::{valid_profile, DEFAULT_PROFILE};
 
 use crate::agent::valid_agent_name;
+use crate::credentials::TokenVerb;
 
 pub const SUBCOMMANDS: &[&str] = &[
     "install",
@@ -32,6 +36,8 @@ pub const SUBCOMMANDS: &[&str] = &[
     "run",
     "repair",
     "doctor",
+    "deploy-key",
+    "gh-token",
     "agent",
     "help",
 ];
@@ -59,6 +65,22 @@ pub enum Cmd {
     },
     Repair(OsString),
     Doctor,
+    /// Make a deploy key for a repository in a profile's sandbox.
+    DeployKey {
+        profile: String,
+        /// As the user wrote it; checked where it is used.
+        repo: String,
+        /// Ask for a key that may push.
+        write: bool,
+    },
+    /// Give a profile's sandbox a read-only token for GitHub's API.
+    GhToken {
+        profile: String,
+        verb: TokenVerb,
+        owner: Option<String>,
+        days: Option<String>,
+        open_browser: bool,
+    },
     /// Create the user's definition of an agent.
     AgentNew {
         name: String,
@@ -180,6 +202,84 @@ fn parse_run(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
     })
 }
 
+/// The words of a command that takes options anywhere: `-p NAME`,
+/// `--profile NAME` and `--profile=NAME` are taken out, and the rest is
+/// returned with the profile.
+fn take_profile(rest: &[OsString]) -> Result<(String, Vec<String>), String> {
+    let mut profile = DEFAULT_PROFILE.to_string();
+    let mut words = Vec::new();
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        let a = utf8(arg, "argument")?;
+        if a == "-p" || a == "--profile" {
+            let value = it
+                .next()
+                .ok_or_else(|| format!("{a} needs a profile name"))?;
+            profile = utf8(value, "profile name")?;
+        } else if let Some(value) = a.strip_prefix("--profile=") {
+            profile = value.to_string();
+        } else {
+            words.push(a);
+        }
+    }
+    if !valid_profile(&profile) {
+        return Err(format!(
+            "invalid profile name '{profile}': use 1-16 characters from a-z and 0-9"
+        ));
+    }
+    Ok((profile, words))
+}
+
+fn parse_deploy_key(rest: &[OsString]) -> Result<Cmd, String> {
+    const USAGE: &str = "usage: sv2 deploy-key [--profile NAME] OWNER/REPO [--write]";
+    let (profile, words) = take_profile(rest)?;
+    let mut repo = None;
+    let mut write = false;
+    for w in words {
+        match w.as_str() {
+            "--write" => write = true,
+            w if w.starts_with('-') => return Err(format!("unknown option '{w}'; {USAGE}")),
+            _ if repo.is_some() => return Err(USAGE.to_string()),
+            _ => repo = Some(w),
+        }
+    }
+    Ok(Cmd::DeployKey {
+        profile,
+        repo: repo.ok_or(USAGE)?,
+        write,
+    })
+}
+
+fn parse_gh_token(rest: &[OsString]) -> Result<Cmd, String> {
+    const USAGE: &str = "usage: sv2 gh-token [--profile NAME] [--owner NAME] [--days N] [--no-browser] [login | status | logout]";
+    let (profile, words) = take_profile(rest)?;
+    let (mut verb, mut owner, mut days, mut open_browser) = (None, None, None, true);
+    let mut it = words.into_iter();
+    while let Some(w) = it.next() {
+        let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
+        match w.as_str() {
+            "--owner" => owner = Some(value("--owner")?),
+            "--days" => days = Some(value("--days")?),
+            "--no-browser" => open_browser = false,
+            "login" | "status" | "logout" if verb.is_none() => {
+                verb = Some(match w.as_str() {
+                    "login" => TokenVerb::Login,
+                    "status" => TokenVerb::Status,
+                    _ => TokenVerb::Logout,
+                });
+            }
+            _ => return Err(USAGE.to_string()),
+        }
+    }
+    Ok(Cmd::GhToken {
+        profile,
+        verb: verb.unwrap_or(TokenVerb::Login),
+        owner,
+        days,
+        open_browser,
+    })
+}
+
 /// `agents` is every agent name there is. Nothing else is ever run.
 pub fn parse(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
     let Some(first) = args.first() else {
@@ -242,6 +342,8 @@ pub fn parse(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
             _ => Err("usage: sv2 repair PATH".to_string()),
         },
         "doctor" => none(rest, "sv2 doctor").map(|()| Cmd::Doctor),
+        "deploy-key" => parse_deploy_key(rest),
+        "gh-token" => parse_gh_token(rest),
         "agent" => {
             const USAGE: &str = "sv2 agent new NAME [--from AGENT]";
             let words: Option<Vec<&str>> = rest.iter().map(|a| a.to_str()).collect();
@@ -379,6 +481,96 @@ mod tests {
     }
 
     #[test]
+    fn deploy_key() {
+        let key = |profile: &str, write: bool| {
+            Ok(Cmd::DeployKey {
+                profile: profile.into(),
+                repo: "octocat/Hello-World".into(),
+                write,
+            })
+        };
+        assert_eq!(
+            p(&["deploy-key", "octocat/Hello-World"]),
+            key("default", false)
+        );
+        assert_eq!(
+            p(&["deploy-key", "octocat/Hello-World", "--write"]),
+            key("default", true)
+        );
+        assert_eq!(
+            p(&["deploy-key", "-p", "work", "--write", "octocat/Hello-World"]),
+            key("work", true)
+        );
+        assert_eq!(
+            p(&["deploy-key", "octocat/Hello-World", "--profile=work"]),
+            key("work", false)
+        );
+        for bad in [
+            &["deploy-key"][..],
+            &["deploy-key", "--write"][..],
+            &["deploy-key", "a/b", "c/d"][..],
+            &["deploy-key", "a/b", "--force"][..],
+            &["deploy-key", "a/b", "-w"][..],
+            &["deploy-key", "a/b", "-p"][..],
+            &["deploy-key", "a/b", "-p", "Bad"][..],
+        ] {
+            assert!(p(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn gh_token() {
+        let token = |profile: &str, verb, owner: Option<&str>, days: Option<&str>, open| {
+            Ok(Cmd::GhToken {
+                profile: profile.into(),
+                verb,
+                owner: owner.map(Into::into),
+                days: days.map(Into::into),
+                open_browser: open,
+            })
+        };
+        assert_eq!(
+            p(&["gh-token"]),
+            token("default", TokenVerb::Login, None, None, true)
+        );
+        assert_eq!(
+            p(&["gh-token", "status", "-p", "work"]),
+            token("work", TokenVerb::Status, None, None, true)
+        );
+        assert_eq!(
+            p(&[
+                "gh-token",
+                "--owner",
+                "octo-org",
+                "--days",
+                "30",
+                "--no-browser",
+                "login"
+            ]),
+            token(
+                "default",
+                TokenVerb::Login,
+                Some("octo-org"),
+                Some("30"),
+                false
+            )
+        );
+        assert_eq!(
+            p(&["gh-token", "logout"]),
+            token("default", TokenVerb::Logout, None, None, true)
+        );
+        for bad in [
+            &["gh-token", "revoke"][..],
+            &["gh-token", "login", "status"][..],
+            &["gh-token", "--owner"][..],
+            &["gh-token", "--days"][..],
+            &["gh-token", "--token", "x"][..],
+        ] {
+            assert!(p(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn subcommand_arity() {
         for bad in [
             &["install", "x"][..],
@@ -496,7 +688,7 @@ mod tests {
         assert_eq!(p(&["s", "s", "ru"]), Ok(run("default", &["s", "ru"])));
         assert_eq!(p(&["i"]), Ok(Cmd::Install));
         assert_eq!(p(&["h"]), Ok(Cmd::Help));
-        assert_eq!(p(&["d"]), Ok(Cmd::Doctor));
+        assert_eq!(p(&["do"]), Ok(Cmd::Doctor));
         assert_eq!(p(&["rep", "x"]), Ok(Cmd::Repair("x".into())));
         assert_eq!(p(&["us", "a", "sam"]), Ok(Cmd::UserAllow("sam".into())));
         assert_eq!(p(&["us", "d", "sam"]), Ok(Cmd::UserDeny("sam".into())));

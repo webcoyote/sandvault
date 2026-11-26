@@ -296,6 +296,8 @@ sv2 [OPTIONS] NAME [ARGS...]      # shorthand for sv2 run
 sv2 repair PATH
 sv2 doctor
 sv2 agent new NAME [--from AGENT]
+sv2 deploy-key [--profile NAME] OWNER/REPO [--write]
+sv2 gh-token [--profile NAME] [login | status | logout]
 ```
 
 - `sv2 user allow USER` and `sv2 user deny USER` add a user to, or remove one
@@ -856,6 +858,43 @@ Decisions this milestone made:
   away. It never opens or follows what it finds. A user who keeps putting a
   directory with a file in it there can still block `install`; the message
   names them.
+- **Repository credentials (2026-11-26).** Built as decided under
+  "Repository credentials", in `crates/cli/src/credentials.rs`.
+  - *`sv2 deploy-key OWNER/REPO [--write]`.* The sandbox user makes an
+    ed25519 key in its home (`guest/deploy-key.sh`, passed on the command
+    line like the launcher) and prints the public key. `sv2` accepts that
+    answer only if it is exactly one ed25519 public key on one line, drops
+    its comment, and writes its own copy to
+    `~/.local/state/sandvault2/deploy-keys/PROFILE/`. It then prints
+    `gh repo deploy-key add FILE --repo OWNER/REPO --title ...`, with
+    `--allow-write` only when `--write` was given, for the user to run. The
+    repository is the one the user typed; the file is one the sandbox
+    cannot write (§1 rule 6). `sv2` adds nothing to GitHub itself.
+  - *In the sandbox,* everything is in `~/.ssh/sv2-deploy-keys/`: the key
+    pairs, GitHub's ed25519 host key, pinned (an agent cannot answer ssh's
+    question, and should not accept whatever answers), and an `ssh` that
+    chooses the key (`guest/git-ssh.sh`). git tells ssh the exact
+    repository; that program offers the repository's own key and no other,
+    and is plain ssh for everything else. The guest launcher sets
+    `GIT_SSH_COMMAND` to it when it exists. Nothing is written to
+    `~/.gitconfig` or `~/.ssh/config`, which are the user's and which a
+    later feature will copy in from the host. `docs/DEPLOY-KEYS.md`
+    describes all of it for a user.
+  - *Dropped on the way:* `url.insteadOf` rules to an ssh alias. They match
+    the start of an address, so a key for `acme/api` caught `acme/api-docs`
+    too, and they lived in the two files above.
+  - *`sv2 gh-token [login|status|logout]`* is v1's `sv-gh-token`: it opens
+    GitHub's fine-grained token form filled in with read-only permissions,
+    reads the token without echo (or from a pipe), refuses classic and app
+    tokens, and hands it to the sandbox's `gh auth login --with-token` on
+    standard input, never on a command line.
+  - `profile remove` forgets the host's copies of that profile's keys.
+  - *Measured:* with a key that GitHub does not know, in a session:
+    git reached GitHub through the key ("using the deploy key", then
+    "Permission denied (publickey)"), and a public repository of the same
+    owner still cloned over `https://`.
+  - *Not run:* a key actually added to a repository and used to clone and
+    push; a real token through `gh-token login`.
 - **Doctor (2026-11-26).** `sv2 doctor` looks and reports; it changes
   nothing, asks for no password, and runs as the host user
   (`crates/cli/src/doctor.rs`). Each line is `ok`, `note` or `PROBLEM`, a
@@ -971,6 +1010,28 @@ Decisions this milestone made:
 What milestone 1 left undone, untested, or knowingly imperfect. Remove an item
 when it is fixed. Design questions still to be answered are under "Open
 items" below.
+
+### Priority order
+
+**Decided 2026-11-25, brought up to date 2026-11-26.** The sections below
+group items by kind; this is the order to do them in. (This section was
+dropped from the document by mistake in commit 9a52da3 and put back.)
+
+1. Done: the helper's group rename, `next-id` kept across `uninstall`, and
+   the helper's security gaps that do not concern launchd.
+2. Done: the guest-side launcher, agent definitions (five built-ins),
+   quarantine handling, and `sv2 agent new`.
+3. Done: the safer `uninstall`, default deny, `sv2 doctor`, repository
+   credentials, and the verification that needed no push.
+4. Next, in this order: browser support (Playwright's headless Chromium
+   already runs; the full applications do not); the iOS bridge; Homebrew
+   packaging.
+5. Deferred until asked for: the planted `~/Library/LaunchAgents`
+   measurement (open item 7); per-profile capabilities (open item 8); a
+   position on localhost and port 22; CI on a runner.
+6. Last, the daemon: the measurement in open item 3, the move of account
+   changes into it, and with it what `sv2` does about the "administer your
+   computer" permission (open item 10).
 
 ### Not yet verified
 
@@ -1092,7 +1153,8 @@ None recorded.
 - [ ] Per-profile capabilities (open item 8), a position on localhost and
   port 22, and a narrower rule for reading files. All deferred on
   2026-11-26.
-- [ ] Repository credentials.
+- [x] Repository credentials: `sv2 deploy-key` and `sv2 gh-token`; see
+  "Repository credentials" under "Milestone 1".
 - [ ] Browser support. Playwright's headless Chromium already runs in a
   session; Google Chrome and Chrome for Testing do not (see "Default
   deny" under "Milestone 1" for what was measured).

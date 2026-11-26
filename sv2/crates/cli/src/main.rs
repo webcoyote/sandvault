@@ -7,6 +7,7 @@
 
 mod agent;
 mod args;
+mod credentials;
 mod doctor;
 mod repair;
 mod shell;
@@ -43,6 +44,15 @@ Usage:
                                     file or directory in one of your workspaces
                                     (for files moved in; profile add and remove
                                     do this for kept files themselves)
+  sv2 deploy-key OWNER/REPO [--write]
+                                    make a key in the sandbox for one GitHub
+                                    repository, and print the command that
+                                    adds it there (-p PROFILE for another
+                                    profile than default)
+  sv2 gh-token [login|status|logout]
+                                    give the sandbox's gh a read-only token
+                                    for GitHub's API (--owner NAME, --days N,
+                                    --no-browser, -p PROFILE)
   sv2 doctor                        say what is wrong with the installation,
                                     your profiles and the agents, and how to
                                     put it right; changes nothing
@@ -272,6 +282,67 @@ fn profile_list() -> ExitCode {
     }
 }
 
+/// The caller's profile `profile`, active and ready for a session. The
+/// default profile is created on first use; any other has to exist.
+fn ensure_profile(profile: &str) -> Result<ProfileLine, ExitCode> {
+    let mut profiles = list_profiles()?;
+    if !profiles.iter().any(|p| p.name == profile) {
+        if profile != DEFAULT_PROFILE {
+            return Err(fail(&format!(
+                "no profile named '{profile}'; create it with: sv2 profile add {profile}"
+            )));
+        }
+        eprintln!("sv2: creating the '{DEFAULT_PROFILE}' profile (first use)");
+        // The helper's report goes to stderr: stdout belongs to the session.
+        match call_command("profile-add")
+            .arg(DEFAULT_PROFILE)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(std::io::stderr()))
+            .status()
+        {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                explain_call_failure(s);
+                return Err(exit_code(s));
+            }
+            Err(e) => return Err(fail(&format!("cannot run {SUDO}: {e}"))),
+        }
+        // A workspace kept from an earlier 'default' profile.
+        repair::after_profile_add(DEFAULT_PROFILE);
+        profiles = list_profiles()?;
+    }
+    let Some(p) = profiles.into_iter().find(|p| p.name == profile) else {
+        return Err(fail("the helper did not list the profile it just created"));
+    };
+    if p.state != "active" {
+        let verb = if p.state == "removing" {
+            "remove"
+        } else {
+            "add"
+        };
+        return Err(fail(&format!(
+            "profile '{profile}' is {}; finish with: sv2 profile {verb} {profile}",
+            p.state
+        )));
+    }
+    Ok(p)
+}
+
+/// A command for one session in `p`: the launcher, asked to run `args` as a
+/// command, starting in the workspace.
+fn session_command(p: &ProfileLine, args: &[OsString]) -> Command {
+    let home = std::env::var_os("HOME");
+    let env = shell::forwarded_env(&|name| std::env::var_os(name), home.as_deref());
+    let mut cmd = call_command("launch");
+    cmd.arg(&p.name).arg("--").args(shell::argv(
+        &env,
+        OsStr::new(&p.workspace),
+        &shell::Kind::Shell,
+        args,
+    ));
+    cmd
+}
+
 /// Whether the host user can see a program at `path`.
 fn is_program(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -408,52 +479,10 @@ fn run(
         }
     }
 
-    let mut profiles = match list_profiles() {
+    let p = match ensure_profile(profile) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    if !profiles.iter().any(|p| p.name == profile) {
-        if profile != DEFAULT_PROFILE {
-            return fail(&format!(
-                "no profile named '{profile}'; create it with: sv2 profile add {profile}"
-            ));
-        }
-        eprintln!("sv2: creating the '{DEFAULT_PROFILE}' profile (first use)");
-        // The helper's report goes to stderr: stdout belongs to the session.
-        match call_command("profile-add")
-            .arg(DEFAULT_PROFILE)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(std::io::stderr()))
-            .status()
-        {
-            Ok(s) if s.success() => {}
-            Ok(s) => {
-                explain_call_failure(s);
-                return exit_code(s);
-            }
-            Err(e) => return fail(&format!("cannot run {SUDO}: {e}")),
-        }
-        // A workspace kept from an earlier 'default' profile.
-        repair::after_profile_add(DEFAULT_PROFILE);
-        profiles = match list_profiles() {
-            Ok(p) => p,
-            Err(code) => return code,
-        };
-    }
-    let Some(p) = profiles.iter().find(|p| p.name == profile) else {
-        return fail("the helper did not list the profile it just created");
-    };
-    if p.state != "active" {
-        let verb = if p.state == "removing" {
-            "remove"
-        } else {
-            "add"
-        };
-        return fail(&format!(
-            "profile '{profile}' is {}; finish with: sv2 profile {verb} {profile}",
-            p.state
-        ));
-    }
 
     let cwd = std::env::current_dir().ok();
     let dir = shell::initial_dir(cwd.as_deref(), &p.workspace);
@@ -566,6 +595,7 @@ fn main() -> ExitCode {
         Cmd::ProfileRemove(name) => match call("profile-remove", &[&name]) {
             Ok(()) => {
                 repair::after_profile_remove(&name);
+                credentials::forget_profile(&name);
                 ExitCode::SUCCESS
             }
             Err(code) => code,
@@ -584,6 +614,52 @@ fn main() -> ExitCode {
         },
         Cmd::AgentNew { name, from } => agent_new(&sources, &name, from.as_deref()),
         Cmd::Doctor => doctor::run(&sources),
+        Cmd::DeployKey {
+            profile,
+            repo,
+            write,
+        } => {
+            let repo = match credentials::Repo::parse(&repo) {
+                Ok(r) => r,
+                Err(e) => return fail(&e),
+            };
+            let p = match ensure_profile(&profile) {
+                Ok(p) => p,
+                Err(code) => return code,
+            };
+            let session = session_command(&p, &credentials::deploy_key_args(&repo));
+            credentials::deploy_key(&p, session, &repo, write)
+        }
+        Cmd::GhToken {
+            profile,
+            verb,
+            owner,
+            days,
+            open_browser,
+        } => {
+            let days = match days.as_deref().map(str::parse::<u32>) {
+                None => 90,
+                Some(Ok(n)) if (1..=366).contains(&n) => n,
+                Some(_) => return fail("--days must be a number from 1 to 366"),
+            };
+            if owner
+                .as_deref()
+                .is_some_and(|o| !credentials::valid_owner(o))
+            {
+                return fail("--owner must be a GitHub user or organization name");
+            }
+            let p = match ensure_profile(&profile) {
+                Ok(p) => p,
+                Err(code) => return code,
+            };
+            let opts = credentials::TokenOptions {
+                verb,
+                owner,
+                days,
+                open_browser,
+            };
+            credentials::gh_token(&p, &|args| session_command(&p, args), &opts)
+        }
     }
 }
 

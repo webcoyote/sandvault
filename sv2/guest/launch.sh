@@ -48,6 +48,17 @@ PATH="$HOME/.local/bin:$HOME/bin${BREW:+:$BREW/bin:$BREW/sbin}:/usr/local/bin:/u
 export PATH
 
 ###############################################################################
+# Deploy keys: when "sv2 deploy-key" has made any, git uses the ssh that
+# picks the right one per repository. Set here, in the environment, and not
+# in ~/.gitconfig, which is the user's. (It takes precedence over a
+# core.sshCommand set there.)
+###############################################################################
+if [[ -x "$HOME/.ssh/sv2-deploy-keys/ssh" ]]; then
+    GIT_SSH_COMMAND="$HOME/.ssh/sv2-deploy-keys/ssh"
+    export GIT_SSH_COMMAND
+fi
+
+###############################################################################
 # Shell startup files, written once.
 #
 # A login zsh runs /etc/zprofile, whose path_helper puts the system
