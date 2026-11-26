@@ -30,9 +30,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The helper itself: bump on any change to its code that an installed
 /// machine must get (a fix, a new check, a new verb or argument). Nothing
 /// can detect a forgotten bump here.
-pub const HELPER_VERSION: u32 = 1;
+pub const HELPER_VERSION: u32 = 2;
 /// `/etc/sudoers.d/sandvault2`.
-pub const SUDOERS_VERSION: u32 = 1;
+pub const SUDOERS_VERSION: u32 = 2;
 /// The sshd drop-in that refuses sandbox accounts.
 pub const SSHD_DROPIN_VERSION: u32 = 1;
 /// The rendered `sandbox-exec` profile: `base.sb` and how it is filled in.
@@ -73,7 +73,9 @@ pub fn stamped_version(text: &str, key: &str) -> Option<u32> {
 pub const HELPER_PATH: &str = "/Library/PrivilegedHelperTools/sv2-helper";
 
 /// Members of this group may run the helper's `call` verbs without a password.
-pub const ALLOWED_GROUP: &str = "sandvault-users";
+/// The `sv2-` prefix keeps it clear of v1, whose sandbox group for a host
+/// user is `sandvault-<user>`.
+pub const ALLOWED_GROUP: &str = "sv2-users";
 
 /// Every sandbox account is a member of this group, and of nothing else that
 /// sandvault creates besides its own primary group. The sshd drop-in refuses
@@ -207,7 +209,7 @@ mod tests {
     #[test]
     fn install_version_is_one_plain_word() {
         let v = install_version();
-        assert_eq!(v, "helper=1,sudoers=1,sshd=1,profile=1");
+        assert_eq!(v, "helper=2,sudoers=2,sshd=1,profile=1");
         assert!(v
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'=' || b == b','));

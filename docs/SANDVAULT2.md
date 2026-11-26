@@ -91,7 +91,7 @@ launchd daemon is a planned follow-up.
   version (see "Artifact versions" under "Milestone 1").
 - The helper is not setuid, because Homebrew cannot install a setuid binary.
 - One sudoers line:
-  `%sandvault-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper call *`.
+  `%sv2-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper call *`.
   There is no per-user sudoers file. The helper's first argument is a mode.
   `call` (the profile verbs and `launch`) is what the line covers. `install`,
   `uninstall`, `user-allow` and `user-deny` are in `admin` mode, which the
@@ -297,7 +297,7 @@ sv2 doctor
 ```
 
 - `sv2 user allow USER` and `sv2 user deny USER` add a user to, or remove one
-  from, the `sandvault-users` group named in the sudoers line. `sv2 install`
+  from, the `sv2-users` group named in the sudoers line. `sv2 install`
   adds the admin who runs it.
 - Options come before `NAME`. Everything after `NAME` is passed to the agent
   unchanged; no `--` is needed.
@@ -661,7 +661,7 @@ Decisions this milestone made:
     Bumping any of them makes every installed machine ask for
     `sv2 install`; a release that bumps none needs no reinstall.
   - *Comparison.* `sv2` passes all four as one word
-    (`helper=1,sudoers=1,sshd=1,profile=1`) where it used to pass the
+    (`helper=2,sudoers=2,sshd=1,profile=1`) where it used to pass the
     application version, and the helper refuses a word that is not its own,
     with exit status 3. `sv2 --version` prints the word on a second line.
     The numbers reach a machine only inside a new helper, because the
@@ -682,9 +682,12 @@ Decisions this milestone made:
   - *Not covered.* The registry has its own format number in its header.
     The two groups and the directories have none; `install` checks and
     repairs them each time it runs.
-- **Allowed-users group.** v1 would name the sandbox group of a host user
-  called `users` exactly `sandvault-users`. `install` therefore refuses a
-  group of that name it did not create (it checks the group's RealName).
+- **Allowed-users group.** It is `sv2-users`; `install` refuses a group of
+  that name it did not create (it checks the group's RealName). It was
+  `sandvault-users` at first, which is also what v1 names the sandbox group
+  of a host user called `users`. The rename bumped the helper and sudoers
+  versions to 2 but has no upgrade path: the one machine that had sv2 was
+  uninstalled first.
 
 ## Remaining work
 
@@ -692,9 +695,28 @@ What milestone 1 left undone, untested, or knowingly imperfect. Remove an item
 when it is fixed. Design questions still to be answered are under "Open
 items" below.
 
-### Not yet verified
+### Priority order
 
-Do these before building anything else on milestone 1.
+**Decided (2026-11-25).** The sections below group items by kind; this is the
+order to do them in.
+
+1. Done: the group `sandvault-users` is renamed to `sv2-users`.
+2. Keep `next-id` across `uninstall` ("Account IDs" under "Functional gaps").
+3. The helper's security gaps that do not concern launchd: `install` reading
+   its own executable by path, a suspended helper holding the lock, the fork
+   storm against `profile remove`, and a pre-created `/Users/Shared/sv2`.
+4. The embedded guest payload and the guest-side launcher, then agent
+   definitions, then quarantine handling.
+5. Everything else that is not the daemon, in this order: the planted
+   `~/Library/LaunchAgents` measurement (open item 7); the items under "Not
+   yet verified"; default deny and per-profile capabilities; `sv2 doctor`;
+   repository credentials; browser support; the iOS bridge; Homebrew
+   packaging.
+6. Last, the daemon: the measurement in open item 3, the move of account
+   changes into it, and with it what `sv2` does about the "administer your
+   computer" permission (open item 10).
+
+### Not yet verified
 
 - [ ] **CI steps are unverified.** `.github/workflows/ci.yml` gained "Install
   sandvault2" and "SandVault2 Tests"; neither has run on a runner. The first
@@ -768,17 +790,13 @@ Do these before building anything else on milestone 1.
   `/tmp`. Nothing reclaims IDs, so 600-60000 can be used up by repeated add
   and remove. Fix: keep `next-id` somewhere `uninstall` does not delete, and
   decide on wraparound.
-- [ ] **Group name `sandvault-users`.** v1 gives a host user named `users` a
-  sandbox group of exactly this name. `install` refuses a group it did not
-  create, so the two cannot be confused, but they also cannot coexist.
-  Renaming to `sv2-users` removes the overlap; do it before anyone installs.
 - [ ] **No guest payload.** Sessions get Homebrew on `PATH` from `sv2`, and the
   sandbox user's shell creates an empty `~/.zshrc`. The embedded payload
   (shell setup, `install.sh` runner) is not written.
 
 ### Features not in milestone 1
 
-In rough dependency order.
+See "Priority order" above for the order.
 
 - [ ] `sv2 doctor`. The name is reserved and reports "not implemented yet".
   It is also the place to report profiles left in `adding` or `removing`;
@@ -795,8 +813,8 @@ In rough dependency order.
 - [ ] iOS bridge, and the simulator trust question (open item 2).
 - [ ] Homebrew packaging of `sv2` itself, and upgrade handling when `sv2` and
   the installed helper differ in version.
-- [ ] Move from the sudoers helper to a launchd daemon (open item 3). Raised
-  in priority: see the note there about the privacy prompt.
+- [ ] Move from the sudoers helper to a launchd daemon (open item 3). Done
+  last: see "Priority order".
 
 ## Open items
 
@@ -808,7 +826,7 @@ In rough dependency order.
 3. **Daemon follow-up.** Scope and timing of the move from the sudoers helper
    to a launchd daemon.
 
-   **To do next (noted 2026-11-25):** the daemon is the likely fix for the
+   **Noted 2026-11-25; scheduled last, see "Priority order":** the daemon is the likely fix for the
    "administer your computer" prompt (open item 10). Under sudo, macOS
    charges the helper's account changes to the terminal app the user ran
    `sv2` from, prompts for it again every few minutes, and blocks the helper

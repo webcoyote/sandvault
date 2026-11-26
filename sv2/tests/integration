@@ -42,7 +42,7 @@ VERSION="$("$SV2" --version | /usr/bin/awk '$1 == "install-version" {print $2}')
 APP_VERSION="$("$SV2" --version | /usr/bin/awk 'NR == 1 {print $2}')"
 [[ -n "$VERSION" && -n "$APP_VERSION" ]] || { echo >&2 "cannot read versions from $SV2 --version"; exit 1; }
 /usr/bin/sudo -n -- "$HELPER" call "$VERSION" profile-list >/dev/null 2>&1 \
-    || skip "$(id -un) is not in the sandvault-users group"
+    || skip "$(id -un) is not in the sv2-users group"
 
 HOST_USER="$(id -un)"
 HOST_UID="$(id -u)"
@@ -150,7 +150,7 @@ check "profile add: repeat keeps the UID" "$SB_UID" \
 ###############################################################################
 check "session: runs as the sandbox account" "$ACCOUNT" "$(sb /usr/bin/id -un)"
 check "session: no staff, no host groups" "" \
-    "$(sb /usr/bin/id -Gn | /usr/bin/tr ' ' '\n' | /usr/bin/grep -xE 'staff|admin|wheel|sandvault-users' || true)"
+    "$(sb /usr/bin/id -Gn | /usr/bin/tr ' ' '\n' | /usr/bin/grep -xE 'staff|admin|wheel|sv2-users' || true)"
 # Acceptance test from the design: the session is in the sandbox user's own
 # launchd domain, not the host user's.
 check "session: own launchd domain (manageruid == uid)" "$SB_UID" "$(sb /bin/launchctl manageruid)"

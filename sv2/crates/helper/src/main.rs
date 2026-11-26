@@ -5,7 +5,7 @@
 //!
 //! - `call`: `profile-add NAME`, `profile-remove NAME`, `profile-list`,
 //!   `launch NAME -- ARGV`. The sudoers line lets members of
-//!   `sandvault-users` run this mode without a password.
+//!   `sv2-users` run this mode without a password.
 //! - `admin`: `install`, `uninstall`, `user-allow USER`, `user-deny USER`.
 //!   No sandvault sudoers rule covers it, so sudo asks for a password and
 //!   requires general sudo rights.

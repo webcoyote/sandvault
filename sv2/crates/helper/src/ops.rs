@@ -34,8 +34,7 @@ const HELPER_NAME: &str = "sv2-helper";
 const SUDOERS_DIR: &str = "/etc/sudoers.d";
 const SUDOERS_NAME: &str = "sandvault2";
 /// Marks the allowed-users group as ours. `install` and `uninstall` refuse a
-/// group of that name with any other RealName: v1 would name the sandbox
-/// group of a host user called `users` exactly `sandvault-users`.
+/// group of that name with any other RealName.
 const ALLOWED_GROUP_REAL_NAME: &str = "sandvault2 allowed users";
 /// Marks the group of all sandbox accounts as ours, in the same way.
 const SANDBOX_GROUP_REAL_NAME: &str = "sandvault2 sandbox accounts";
@@ -932,7 +931,7 @@ mod tests {
         ]
         .map(|(name, version, text)| (name, version, sys::fingerprint(&text)));
         let pinned = [
-            ("sudoers", 1, 12_711_600_353_197_359_900u64),
+            ("sudoers", 2, 2_912_536_391_597_273_097u64),
             ("sshd drop-in", 1, 1_053_182_674_171_491_837),
             ("sandbox profile", 1, 14_978_722_656_307_676_699),
         ];
@@ -995,7 +994,7 @@ mod tests {
         assert_eq!(
             rules,
             [
-                "%sandvault-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper call *",
+                "%sv2-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper call *",
                 "Defaults!/Library/PrivilegedHelperTools/sv2-helper use_pty",
             ]
         );
@@ -1008,7 +1007,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("sv2-sudoers-test-{}", std::process::id()));
         std::fs::write(&path, sudoers_content()).unwrap();
         let ok = validate_sudoers(path.to_str().unwrap());
-        std::fs::write(&path, "%sandvault-users ALL=(root NOPASSWD /x\n").unwrap();
+        std::fs::write(&path, "%sv2-users ALL=(root NOPASSWD /x\n").unwrap();
         let bad = validate_sudoers(path.to_str().unwrap());
         std::fs::remove_file(&path).unwrap();
         assert_eq!(ok, Ok(()));
