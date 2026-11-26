@@ -2479,11 +2479,8 @@ fi
 EXTRA_ENV=()
 EXTRA_ENV+=("GIT_CONFIG_COUNT=1")
 EXTRA_ENV+=("GIT_CONFIG_KEY_0=safe.directory")
-if [[ "$MODE" == "ssh" ]]; then
-    EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/\\*")
-else
-    EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/*")
-fi
+# Same literal value in SSH mode: quote_zsh_args protects the glob there.
+EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/*")
 
 # Pass identity so sandbox-side scripts can resolve the host user and profile
 # without ambiguous prefix-stripping.  See design spec section 3.
