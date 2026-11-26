@@ -27,6 +27,15 @@
 set -Eeuo pipefail
 trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 
+# git honors GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_CONFIG_PARAMETERS,
+# etc. over -C and the current directory. Git exports these to hooks,
+# `rebase --exec`, `bisect run`, ..., so running sv-clone from one of those
+# would point `git clone` and every git_safe call at the caller's repository
+# (e.g. rewriting its origin URL or core.sshCommand). Clear them so each git
+# call resolves the repo from the directory it is given.
+# shellcheck disable=SC2046 # word-split the list of variable names
+unset $(git rev-parse --local-env-vars 2>/dev/null)
+
 # Resolve script location
 # perform "readlink -f", which is not supported in macOS system bash
 SOURCE="${BASH_SOURCE[0]}"
