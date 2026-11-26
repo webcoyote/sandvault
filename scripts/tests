@@ -3554,7 +3554,10 @@ print(mod["DEFAULT_SUBPATHS"].get(sys.argv[2], "<missing>"))
 ###############################################################################
 # Cannot build sandvault if already running inside sandvault
 if [[ -z "${SV_SESSION_ID:-}" ]]; then
-    "$SV_BASE" build
+    # --ssh: a plain build does not add the sandbox user to
+    # com.apple.access_ssh, and the --ssh test pass runs with --no-build,
+    # which refuses to add it.
+    "$SV_BASE" --ssh build
 
     # Ensure that the shell doesn't have sudo permissions for tests
     sudo --reset-timestamp
