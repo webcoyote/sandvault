@@ -50,13 +50,15 @@ Agents:
                                       sv2 run shell tmux new -A -s main
 
 Everything after NAME is passed to the agent unchanged.
+
+A command or agent name may be shortened to any prefix that fits only one:
+'sv2 s' is 'sv2 shell', 'sv2 p l' is 'sv2 profile list'. A prefix that fits
+several is refused. 'uninstall' and 'remove' must be written in full.
 ";
 
 /// The only agent in this milestone, built in. Agent definitions
 /// (`agent.toml`) come later; nothing is ever looked up on PATH.
-fn is_agent(name: &str) -> bool {
-    name == "shell"
-}
+const AGENTS: &[&str] = &["shell"];
 
 fn fail(msg: &str) -> ExitCode {
     eprintln!("sv2: {msg}");
@@ -242,7 +244,7 @@ fn profile_list() -> ExitCode {
 
 fn run(profile: &str, agent: &str, agent_args: &[OsString]) -> ExitCode {
     // `shell` is the only agent; the parser has already refused the rest.
-    debug_assert!(is_agent(agent));
+    debug_assert!(AGENTS.contains(&agent));
 
     let mut profiles = match list_profiles() {
         Ok(p) => p,
@@ -311,7 +313,7 @@ fn main() -> ExitCode {
         return fail("do not run sv2 as root or with sudo; it asks for sudo itself when needed");
     }
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let cmd = match args::parse(&argv, &is_agent) {
+    let cmd = match args::parse(&argv, AGENTS) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("sv2: {e}");
@@ -413,14 +415,6 @@ mod tests {
             "\n",
         ] {
             assert!(parse_profile_list(bad).is_err(), "{bad:?}");
-        }
-    }
-
-    #[test]
-    fn only_shell_is_an_agent() {
-        assert!(is_agent("shell"));
-        for name in ["claude", "sh", "zsh", ""] {
-            assert!(!is_agent(name));
         }
     }
 }

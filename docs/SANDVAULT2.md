@@ -317,6 +317,23 @@ sv2 doctor
 - A first argument that is neither a subcommand nor a known agent is an error
   ("unknown command or agent"). `sv2` never searches `PATH` for it.
 
+**Decided (2026-11-25):** names may be shortened. A subcommand, a verb after
+`user` or `profile`, and an agent name are each accepted as any prefix that
+fits exactly one name: `sv2 s` and `sv2 sh` are `sv2 shell`, and `sv2 p l` is
+`sv2 profile list`.
+
+- A whole name is always itself, even when a longer name starts with it.
+- A prefix that fits several names runs nothing, and the error lists them
+  (`sv2 r`: `run`, `repair`). The first word is matched against subcommands
+  and agents together, so a prefix shared by one of each is ambiguous too.
+  A subcommand or agent added later can therefore turn a prefix that worked
+  into an error, but never into a different command.
+- `uninstall` and `profile remove` delete things without asking, and must be
+  written in full: `sv2 un` and `sv2 profile r NAME` are refused.
+- After `run` or an option only an agent can follow, so only agent names are
+  matched there.
+- Options and profile names are not shortened.
+
 ## Agents
 
 `NAME` in `sv2 run NAME` selects an agent definition. Adding an agent means
