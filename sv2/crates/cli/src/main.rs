@@ -26,63 +26,36 @@ use args::Cmd;
 
 const SUDO: &str = "/usr/bin/sudo";
 
+/// One line for each command, and no more: what a command refuses, and
+/// its lesser options, are in its own usage message and in the documents.
 const HELP: &str = "\
-sv2: run AI agents in a sandboxed macOS user account
+sv2: run AI agents in a separate, sandboxed macOS user account
 
 Usage:
-  sv2 install                       install application (sudo)
-  sv2 uninstall                     remove application (sudo); refuses while
-                                    any sandbox profile exists
-  sv2 uninstall --all-profiles      remove application and every user's
-                                    sandboxes, with what is in their homes
-  sv2 user allow USER               let USER create sandboxes (sudo)
-  sv2 user deny USER                stop USER creating/using sandboxes (sudo)
-  sv2 profile add NAME              create a sandbox profile
-  sv2 profile remove NAME           delete a profile but keeps workspace files
-  sv2 profile list
-  sv2 repair PATH                   let you and the sandbox both use PATH, a
-                                    file or directory in one of your workspaces
-                                    (for files moved in; profile add and remove
-                                    do this for kept files themselves)
-  sv2 deploy-key OWNER/REPO [--write]
-                                    make a key in the sandbox for one GitHub
-                                    repository, and print the command that
-                                    adds it there (-p PROFILE for another
-                                    profile than default)
-  sv2 gh-token [login|status|logout]
-                                    give the sandbox's gh a read-only token
-                                    for GitHub's API (--owner NAME, --days N,
-                                    --no-browser, -p PROFILE)
-  sv2 doctor                        say what is wrong with the installation,
-                                    your profiles and the agents, and how to
-                                    put it right; changes nothing
-  sv2 agent new NAME [--from AGENT] write your own definition of an agent,
-                                    from a template or as a copy of AGENT
-  sv2 run [OPTIONS] NAME [ARGS...]  run agent NAME in a sandbox
-  sv2 [OPTIONS] NAME [ARGS...]      shorthand for sv2 run
+  sv2 [run] [OPTIONS] AGENT [ARGS...]   run AGENT in a sandbox
+  sv2 profile add|remove|list [NAME]    manage sandbox profiles
 
-Options (before NAME):
-  -p, --profile PROFILE             profile to use (default: default)
-      --native                      install the agent with its own installer,
-                                    inside the sandbox, instead of Homebrew
+  sv2 deploy-key OWNER/REPO [--write]   make a GitHub deploy key in a sandbox
+  sv2 gh-token [login|status|logout]    give a sandbox's gh a read-only token
 
-Everything after NAME is passed to the agent unchanged.
+  sv2 install                           install sv2 (sudo)
+  sv2 uninstall [--all-profiles]        remove sv2 (sudo)
+  sv2 user allow|deny USER              let USER use sandboxes, or not (sudo)
+  sv2 agent new NAME [--from AGENT]     write your own agent definition
+  sv2 doctor                            report problems and how to fix them
+  sv2 repair PATH                       fix access to files in a workspace
 
-A command or agent name may be shortened to any prefix that fits only one:
-'sv2 s' is 'sv2 shell', 'sv2 p l' is 'sv2 profile list'. A prefix that fits
-several is refused. 'uninstall' and 'remove' must be written in full.
+Options (before AGENT):
+  -p, --profile NAME                    profile to use (default: default)
+      --native                          use the agent's own install
+
+Names can be shortened: 'sv2 s' is 'sv2 shell'.
 ";
 
 /// The agent that needs no definition. It is part of sv2, so that
 /// `sv2 run shell` works whatever state the definitions are in; a
 /// definition of the same name is never used.
 const SHELL: &str = "shell";
-
-const HELP_SHELL: &str = concat!(
-    "  shell                             a login shell, or ARGS as a command:\n",
-    "                                      sv2 run shell\n",
-    "                                      sv2 run shell tmux new -A -s main\n",
-);
 
 /// Every name `sv2 run` accepts: `shell`, then the definitions found.
 /// Nothing is ever looked up on PATH.
@@ -93,11 +66,7 @@ fn agent_names(sources: &agent::Sources) -> Vec<String> {
 }
 
 fn help(names: &[String]) -> String {
-    let mut text = format!("{HELP}\nAgents:\n{HELP_SHELL}");
-    for name in names.iter().filter(|n| *n != SHELL) {
-        text.push_str(&format!("  {name}\n"));
-    }
-    text
+    format!("{HELP}Agents: {}\n", names.join(", "))
 }
 
 fn fail(msg: &str) -> ExitCode {
@@ -658,6 +627,33 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The help stays short: one line a command, nothing wider than a
+    /// terminal, the agents on one line.
+    #[test]
+    fn help_is_one_line_a_command() {
+        let names: Vec<String> = ["shell", "claude", "codex"].map(String::from).to_vec();
+        let text = help(&names);
+        assert!(text.ends_with("Agents: shell, claude, codex\n"), "{text}");
+        for line in text.lines() {
+            assert!(line.len() <= 80, "wider than 80 columns: {line}");
+        }
+        let commands: Vec<&str> = text.lines().filter(|l| l.starts_with("  sv2 ")).collect();
+        assert_eq!(commands.len(), 10, "{commands:#?}");
+        // Every command is there, once.
+        for name in args::SUBCOMMANDS.iter().filter(|n| **n != "help") {
+            let mentions = commands
+                .iter()
+                .filter(|l| l.split([' ', '[', ']']).any(|w| w == *name))
+                .count();
+            assert_eq!(mentions, 1, "{name}");
+        }
+        assert!(
+            text.lines().count() <= 22,
+            "the help has grown: {} lines",
+            text.lines().count()
+        );
+    }
 
     #[test]
     fn profile_table_columns_fit_their_content() {
