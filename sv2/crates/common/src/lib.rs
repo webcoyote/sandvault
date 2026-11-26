@@ -30,7 +30,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The helper itself: bump on any change to its code that an installed
 /// machine must get (a fix, a new check, a new verb or argument). Nothing
 /// can detect a forgotten bump here.
-pub const HELPER_VERSION: u32 = 2;
+pub const HELPER_VERSION: u32 = 3;
 /// `/etc/sudoers.d/sandvault2`.
 pub const SUDOERS_VERSION: u32 = 2;
 /// The sshd drop-in that refuses sandbox accounts.
@@ -66,6 +66,22 @@ pub fn stamped_version(text: &str, key: &str) -> Option<u32> {
         }
         digits.parse().ok()
     })
+}
+
+/// The marker at the end of an error message a user sees: two words that
+/// occur at one place in the code, so that a screenshot or a bug report
+/// leads straight to the line that raised the error. See `docs/OBELUS.md`.
+///
+/// Written as a literal at the place the error is raised, and shown as
+/// `(two words)`. A test in this crate reads every source file and fails on
+/// an obelus that is used twice, is not two lowercase words, or is not a
+/// literal.
+pub struct Obelus(pub &'static str);
+
+impl std::fmt::Display for Obelus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({})", self.0)
+    }
 }
 
 /// Where `sv2 install` puts the root-owned helper. Outside the Homebrew
@@ -206,10 +222,90 @@ mod tests {
         );
     }
 
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    fn two_lowercase_words(s: &str) -> bool {
+        let words: Vec<&str> = s.split(' ').collect();
+        words.len() == 2
+            && words
+                .iter()
+                .all(|w| !w.is_empty() && w.bytes().all(|b| b.is_ascii_lowercase()))
+    }
+
+    /// Every obelus in the sources of all crates: a literal, two lowercase
+    /// words, and used once. This reads the source text, so it sees an
+    /// obelus on a path no test reaches.
+    #[test]
+    fn every_obelus_is_unique_and_two_lowercase_words() {
+        assert!(two_lowercase_words("dapper mackerel"));
+        for bad in [
+            "dapper",
+            "dapper  mackerel",
+            "Dapper mackerel",
+            "a b c",
+            "a b2",
+            " a b",
+            "",
+        ] {
+            assert!(!two_lowercase_words(bad), "{bad:?}");
+        }
+
+        // Spelled in two parts so that this line is not itself a use.
+        let open = concat!("Obel", "us(");
+        let definition = concat!("Obel", "us(pub &'static str)");
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut files = Vec::new();
+        rust_sources(&crates, &mut files);
+        assert!(files.len() >= 10, "found only {} source files", files.len());
+
+        let mut seen: Vec<(String, String)> = Vec::new();
+        let mut problems = Vec::new();
+        for file in &files {
+            let name = file.strip_prefix(&crates).unwrap().display().to_string();
+            let text = std::fs::read_to_string(file).unwrap();
+            for (at, _) in text.match_indices(open) {
+                if text[at..].starts_with(definition) {
+                    continue;
+                }
+                let rest = &text[at + open.len()..];
+                let literal = rest
+                    .strip_prefix('"')
+                    .and_then(|r| r.split_once('"'))
+                    .map(|(words, _)| words);
+                let Some(words) = literal else {
+                    problems.push(format!("{name}: an obelus that is not a literal"));
+                    continue;
+                };
+                if !two_lowercase_words(words) {
+                    problems.push(format!("{name}: \"{words}\" is not two lowercase words"));
+                }
+                if let Some((_, first)) = seen.iter().find(|(w, _)| w == words) {
+                    problems.push(format!("\"{words}\" is in {first} and in {name}"));
+                }
+                seen.push((words.to_string(), name.clone()));
+            }
+        }
+        assert_eq!(problems, Vec::<String>::new());
+        // A scan that finds nothing has stopped looking in the right place.
+        assert!(!seen.is_empty(), "found no obelus at all");
+    }
+
     #[test]
     fn install_version_is_one_plain_word() {
         let v = install_version();
-        assert_eq!(v, "helper=2,sudoers=2,sshd=1,profile=1");
+        assert_eq!(v, "helper=3,sudoers=2,sshd=1,profile=1");
         assert!(v
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'=' || b == b','));

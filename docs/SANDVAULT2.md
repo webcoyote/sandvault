@@ -557,10 +557,18 @@ Decisions this milestone made:
   system change and every later step is idempotent, so a killed
   `profile-add` or `profile-remove` is finished by running it again.
   `next-id` only grows: an account ID is never reused, so files a removed
-  sandbox left in `/tmp` are never owned by a later sandbox. Two limits:
-  `uninstall` deletes the registry, so a reinstall starts again at 600; and
-  nothing reclaims IDs, so the range (600-60000) can be used up by repeated
-  add and remove.
+  sandbox left in `/tmp` are never owned by a later sandbox. Reuse would go
+  wrong in two ways: a later sandbox, perhaps another user's, could read
+  what the earlier one left behind; and an earlier sandbox could leave files
+  for a later one to trust, such as a poisoned cache.
+  **Decided (2026-11-25):** `uninstall` therefore leaves the registry in
+  place, holding no profiles and the `next-id` it reached, without comment; a
+  later `install` carries on from it. IDs run from 600 to 2^31-1, the
+  largest value that is positive as a signed 32-bit number (the limit was
+  60000 at first, for no measured reason). There is no wraparound: if the
+  range were used up, `profile add` would fail with a message that says
+  why. Nothing reclaims IDs. An admin who accepts that old files may change hands
+  starts again at 600 by deleting the registry after `sv2 uninstall`.
 - **Launch (part of open item 5).** The helper takes no environment and no
   path from its caller. A session gets a fixed environment (`HOME`, `USER`,
   `LOGNAME`, `SHELL`, a system `PATH`, `TMPDIR`, `SV2_HOST_USER`,
@@ -678,7 +686,7 @@ Decisions this milestone made:
     Bumping any of them makes every installed machine ask for
     `sv2 install`; a release that bumps none needs no reinstall.
   - *Comparison.* `sv2` passes all four as one word
-    (`helper=2,sudoers=2,sshd=1,profile=1`) where it used to pass the
+    (`helper=3,sudoers=2,sshd=1,profile=1`) where it used to pass the
     application version, and the helper refuses a word that is not its own,
     with exit status 3. `sv2 --version` prints the word on a second line.
     The numbers reach a machine only inside a new helper, because the
@@ -718,7 +726,7 @@ items" below.
 order to do them in.
 
 1. Done: the group `sandvault-users` is renamed to `sv2-users`.
-2. Keep `next-id` across `uninstall` ("Account IDs" under "Functional gaps").
+2. Done: `next-id` is kept across `uninstall`.
 3. The helper's security gaps that do not concern launchd: `install` reading
    its own executable by path, a suspended helper holding the lock, the fork
    storm against `profile remove`, and a pre-created `/Users/Shared/sv2`.
@@ -748,6 +756,16 @@ order to do them in.
   suite's login attempt succeeds against a build without the drop-in. On
   the development Mac Remote Login is limited to listed users, so that
   attempt is refused either way.
+- [ ] **The kept registry is partly verified.** Run by hand on 2026-11-25:
+  `sv2 uninstall` kept the registry and `sv2 install` after it succeeded.
+  Not checked: that the next account's ID is above the last one given out
+  before the uninstall. No test covers either, because the integration suite
+  cannot run `uninstall`.
+- [ ] **Large account IDs have not been tried.** IDs may now go up to
+  2^31-1, but every account so far has had an ID just above 600. To measure:
+  as root, set `next-id` in the registry to a value near the top, then run
+  the integration suite (`launchctl asuser`, the sandbox profile, the ACLs
+  and sshd's group check all see the ID).
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -802,11 +820,6 @@ order to do them in.
 
 ### Functional gaps
 
-- [ ] **Account IDs.** `uninstall` deletes the registry, so a reinstall starts
-  numbering at 600 again and a new sandbox can own files an old one left in
-  `/tmp`. Nothing reclaims IDs, so 600-60000 can be used up by repeated add
-  and remove. Fix: keep `next-id` somewhere `uninstall` does not delete, and
-  decide on wraparound.
 - [ ] **No guest payload.** Sessions get Homebrew on `PATH` from `sv2`, and the
   sandbox user's shell creates an empty `~/.zshrc`. The embedded payload
   (shell setup, `install.sh` runner) is not written.

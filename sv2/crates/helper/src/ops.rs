@@ -804,7 +804,11 @@ pub fn install(caller: &Caller) -> Res<()> {
     Ok(())
 }
 
-/// Removes exactly what the registry lists, then the installed artifacts.
+/// Removes exactly what the registry lists, then the installed artifacts,
+/// except the registry itself. With every profile gone it holds only
+/// `next-id`, which is what keeps an account ID from being given out twice:
+/// a sandbox created after a reinstall must not get the ID of an earlier
+/// one, and with it the files that one left in `/tmp`.
 ///
 /// The exclusive lock keeps every `call` verb out while accounts go. One
 /// profile that cannot be removed does not stop the others, but it does stop
@@ -835,7 +839,6 @@ pub fn uninstall() -> Res<()> {
             }
         }
         sys::remove_file(&sudoers_path())?;
-        sys::remove_file(&registry_path())?;
         if let Ok(state) = sys::open_dir(STATE_DIR) {
             let _ = sys::rmdir_at(&state, PROFILES_DIR_NAME);
         }
@@ -849,9 +852,13 @@ pub fn uninstall() -> Res<()> {
         Some(_) => println!("kept group {SANDBOX_GROUP}: it was not created by sv2"),
         None => {}
     }
-    if let Ok(parent) = sys::open_dir("/Library/Application Support") {
-        if !sys::rmdir_at(&parent, "sandvault2")? {
-            println!("kept {STATE_DIR}: it is not empty");
+    // The registry stays, and nothing is said about it: it is sandvault's
+    // own bookkeeping, not something the user has to look after.
+    if !sys::exists(&registry_path()) {
+        if let Ok(parent) = sys::open_dir("/Library/Application Support") {
+            if !sys::rmdir_at(&parent, "sandvault2")? {
+                println!("kept {STATE_DIR}: it is not empty");
+            }
         }
     }
 

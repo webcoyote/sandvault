@@ -21,14 +21,30 @@
 //!
 //! `next-id` only grows. An ID is never handed out twice, so files a removed
 //! sandbox left in `/tmp` or `/var/folders` are never owned by a later one.
+//! Reuse would go wrong in two ways:
+//!
+//! - a later sandbox, perhaps another user's, could read what the earlier
+//!   one left behind;
+//! - an earlier sandbox could leave files for a later one to trust, such as
+//!   a poisoned cache.
+//!
+//! For the same reason `uninstall` leaves this file in place, with no
+//! profiles in it, and `install` carries on from it. If the range (see
+//! `MAX_ID`) were ever used up, allocation would fail; it does not start
+//! again from the bottom.
 
-use sv2_common::{account_name, valid_host_user, valid_profile};
+use sv2_common::{account_name, valid_host_user, valid_profile, Obelus};
 
 pub const HEADER: &str = "sv2-registry 1";
 
 /// Above macOS service accounts (below 500) and the first local users (501+).
 pub const MIN_ID: u32 = 600;
-pub const MAX_ID: u32 = 60_000;
+/// The largest ID that is positive as a signed 32-bit number. `initgroups`
+/// takes the group ID as an `int` and some tools print IDs signed, and the
+/// two IDs above this range that mean something (-1, "no change", and -2,
+/// `nobody`) stay out of reach. With about two thousand million IDs, running
+/// out is not a practical concern; allocation still fails rather than wraps.
+pub const MAX_ID: u32 = i32::MAX as u32;
 
 /// Each profile is a real account, so cap how many one user can create.
 pub const MAX_PROFILES_PER_USER: usize = 16;
@@ -239,7 +255,12 @@ impl Registry {
             }
             id += 1;
         }
-        Err("no free account ID left".to_string())
+        Err(format!(
+            "No previously unused user ID is available. Reusing an ID could grant \
+             the sandbox access to orphaned files. Search the Internet for \
+             \"macOS UID reuse and orphaned files\" for solutions. {}",
+            Obelus("dapper mackerel")
+        ))
     }
 }
 
@@ -396,7 +417,16 @@ mod tests {
             entries: vec![],
         };
         assert_eq!(reg.allocate_id(|_| false).unwrap(), MAX_ID);
-        assert!(reg.allocate_id(|_| false).is_err());
+        let err = reg.allocate_id(|_| false).unwrap_err();
+        // The obelus is not repeated here: it names one place in the code.
+        // It ends with its obelus, shown in brackets.
+        assert!(
+            err.contains(" for solutions. (") && err.ends_with(')'),
+            "{err}"
+        );
+        for part in ["UID reuse", "orphaned files"] {
+            assert!(err.contains(part), "{part}: {err}");
+        }
         // The exhausted state still serializes and parses.
         assert_eq!(Registry::parse(&reg.serialize()).unwrap(), reg);
     }

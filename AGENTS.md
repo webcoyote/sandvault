@@ -4,6 +4,7 @@
 
 Before finalizing work ensure it conforms to docs/review-guidelines.md
 
+Before adding or changing an error message read docs/OBELUS.md
 
 <!-- BACKLOG.MD GUIDELINES START -->
 <!-- backlog.md-instructions-version: 1.57.4 -->
