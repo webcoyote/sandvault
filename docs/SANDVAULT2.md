@@ -96,6 +96,8 @@ launchd daemon is a planned follow-up.
   `uninstall`, `user-allow` and `user-deny` are in `admin` mode, which the
   line does not match, so sudo itself asks for a password and requires general
   sudo rights. The helper cannot tell whether a password was typed; sudo can.
+  The same file sets `use_pty` for the helper, so every session runs on a
+  terminal of its own (see "Milestone 1").
 - The helper's interface is designed as a wire protocol so it can move behind
   a daemon without redesign:
   - narrow verbs only: `profile-add NAME`, `profile-remove NAME`,
@@ -550,6 +552,16 @@ Decisions this milestone made:
 - **Removal and launch.** `launch` holds the registry lock (shared) until its
   process has become the sandbox user; `profile-remove` takes it exclusively
   before it kills the account's processes.
+- **Terminal (open item 4).** A session does not share the host's terminal.
+  sudo runs the helper on a new pty and relays input, output and window size.
+  On a shared terminal the sandbox could queue keystrokes with `TIOCSTI` for
+  the host shell to run after the session ends; the integration suite plants
+  that attack, with a control that shows it works when the terminal is
+  shared. sudo 1.9.14 and later do this by default; the sudoers file says
+  `Defaults!<helper> use_pty` so it does not depend on the sudo version or on
+  another sudoers file turning the default off. tmux needs nothing further:
+  the base profile allows writes under `/private/tmp`, where its socket
+  directory is.
 - **Allowed-users group.** v1 would name the sandbox group of a host user
   called `users` exactly `sandvault-users`. `install` therefore refuses a
   group of that name it did not create (it checks the group's RealName).
@@ -566,14 +578,15 @@ Do these before building anything else on milestone 1.
 
 - [ ] **CI steps are unverified.** `.github/workflows/ci.yml` gained "Install
   sandvault2" and "SandVault2 Tests"; neither has run on a runner.
-- [ ] **tmux and the shared terminal** (open item 4). Check in the
-  first working session.
-- [ ] **Unit tests that only compare strings.** The ACL entries
-  (`ops::workspace_aces`), the sudoers line, and the session environment are
-  asserted as text. Their effect is covered only by the integration suite, so
-  it needs cases for: sandbox cannot delete/rename/chmod the workspace
-  directory, new files are not executable by inheritance, host user can read
-  and write what the sandbox creates.
+- [ ] **`use_pty` has not been tested against its absence.** The terminal
+  checks passed before the `use_pty` line existed, because this machine's sudo
+  (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
+  with `Defaults !use_pty` set elsewhere, to show the line is what holds.
+- [ ] **The workspace ACL checks have not been mutation-checked.** The
+  integration cases for the workspace directory (sandbox cannot chmod, chown,
+  re-ACL, delete or rename it) and for inheritance (no execute bit, host
+  access to sandbox-private entries) pass, but no build with a weakened ACL
+  has been installed to confirm they fail.
 
 ### Security gaps
 
@@ -581,9 +594,11 @@ Do these before building anything else on milestone 1.
   users, a sandbox account can `ssh localhost` and get a shell without the
   `sandbox-exec` profile. Fix: the sshd drop-in and shared sandbox group
   ("Closing other routes out of the sandbox").
-- [ ] **launchd as a route around the profile** (open item 7). Measure
-  whether a session can start a job in its own launchd domain; such a job
-  would run unconfined as the sandbox user.
+- [ ] **launchd as a route around the profile** (open item 7). The direct
+  routes are refused (measured, not yet a test). Still open: a plist the
+  sandbox plants in `~/Library/LaunchAgents` may load when the account's
+  launchd domain is next created, and would run unconfined as the sandbox
+  user.
 - [ ] **`install` reads its own executable by path.** The helper copies itself
   to `/Library/PrivilegedHelperTools` by reopening the path. Whoever can write
   the directory it was run from (the Homebrew prefix) can swap the file
@@ -653,9 +668,7 @@ In rough dependency order.
    unconfined as the host user, then document what `--ios` grants.
 3. **Daemon follow-up.** Scope and timing of the move from the sudoers helper
    to a launchd daemon.
-4. **Terminal.** The launch does nothing special with the terminal. Check in
-   the first working build whether tmux inside the sandbox works, and whether
-   the session sharing the host's terminal (finding 8) needs a fix.
+4. **Terminal.** Decided in milestone 1; see "Milestone 1".
 5. **Guest-side launcher.** Which component, running as the sandbox user,
    resolves the agent binary, runs `install.sh`, and builds the final
    argument vector: the helper after it drops privileges, or a script in the
@@ -668,6 +681,17 @@ In rough dependency order.
    start a job in its own launchd domain (`launchctl bootstrap` or `submit`,
    or a plist in `~/Library/LaunchAgents`). Such a job would run as the
    sandbox user without the `sandbox-exec` profile.
+
+   Measured on macOS 26.7 from inside a session: `launchctl submit`,
+   `bootstrap user/<uid>`, `bootstrap gui/<uid>` and `load` all fail, and no
+   job ran. Not measured: whether a planted `~/Library/LaunchAgents` plist
+   (with `LimitLoadToSessionType` `Background`, the domain's session type)
+   loads when the domain is created. The domain outlives the session, because
+   launchd starts system agents in it (`distnoted`) that keep running, so the
+   test needs `launchctl bootout user/<uid>` as root, or a reboot, before the
+   next session. Those system agents also run as the sandbox user outside the
+   profile; they are Apple's code, reachable only through what the profile
+   allows.
 8. **Per-profile capabilities.** The format the host user uses to define a
    profile's capabilities: a fixed set of named capabilities the helper maps
    to rules it already contains, or raw SBPL rules added to the base profile.

@@ -464,7 +464,10 @@ fn sudoers_content() -> String {
          # Members of {ALLOWED_GROUP} may create, list, remove and enter their own\n\
          # sandboxes without a password. Only the helper's '{MODE_CALL}' mode is covered;\n\
          # install, uninstall and user allow/deny fall through to ordinary sudo rules.\n\
-         %{ALLOWED_GROUP} ALL=(root) NOPASSWD: {HELPER_PATH} {MODE_CALL} *\n"
+         %{ALLOWED_GROUP} ALL=(root) NOPASSWD: {HELPER_PATH} {MODE_CALL} *\n\
+         # A session gets a terminal of its own. On the caller's terminal it could\n\
+         # queue keystrokes (TIOCSTI) for the caller's shell to run afterwards.\n\
+         Defaults!{HELPER_PATH} use_pty\n"
     )
 }
 
@@ -671,7 +674,10 @@ mod tests {
         let rules: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
         assert_eq!(
             rules,
-            ["%sandvault-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper call *"]
+            [
+                "%sandvault-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper call *",
+                "Defaults!/Library/PrivilegedHelperTools/sv2-helper use_pty",
+            ]
         );
         assert!(text.ends_with('\n'));
     }

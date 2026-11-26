@@ -15,6 +15,8 @@
 set -euo pipefail
 
 BIN_DIR="${1:?usage: integration DIR}"
+# Absolute: some checks run sv2 from another directory.
+BIN_DIR="$(cd "$BIN_DIR" && pwd)"
 SV2="$BIN_DIR/sv2"
 BUILT_HELPER="$BIN_DIR/sv2-helper"
 HELPER="/Library/PrivilegedHelperTools/sv2-helper"
@@ -53,8 +55,12 @@ fail() { FAILED=$((FAILED + 1)); echo -e "${RED}FAIL${NC} $1"; [[ -z "${2:-}" ]]
 # check NAME EXPECTED GOT
 check() { if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1" "expected [$2] got [$3]"; fi; }
 
+# Host-only scratch (never the workspace).
+SCRATCH="$(/usr/bin/mktemp -d)"
+
 cleanup() {
     set +e
+    /bin/rm -rf "$SCRATCH"
     # Host-owned test files only, by name; then let the helper remove the rest.
     /bin/rm -f "$WS/host-file" 2>/dev/null
     "$SV2" profile remove "$P" >/dev/null 2>&1
@@ -123,6 +129,79 @@ check "environment: host variables do not leak" "" \
 check "environment: TERM is forwarded" "sv2-test-term" "$(TERM=sv2-test-term sb /bin/sh -c 'echo "$TERM"')"
 
 ###############################################################################
+# terminal
+###############################################################################
+# The session must not share the host's terminal: a process holding the host's
+# tty can push keystrokes into its input queue (TIOCSTI), and the host shell
+# runs them after the session ends. sudo gives the session a pty of its own.
+#
+# on_pty runs a bash script on a fresh pty. script(1) forwards its stdin to
+# the pty and sends EOF when that ends, which a later `read` would see instead
+# of injected input. So stdin is a pipe that a sleep holds open (script
+# rejects a fifo), and the sleep is killed afterwards.
+on_pty() {
+    # The holder's stderr is redirected so it does not keep this function's
+    # output pipe open.
+    SV2="$SV2" P="$P" INJECT="$INJECT" /usr/bin/script -q /dev/null /bin/bash -c "$1" \
+        < <(/bin/sh -c 'echo $$ > "$0"; exec /bin/sleep 120' "$SCRATCH/holder.pid" 2>/dev/null) 2>&1 \
+        | /usr/bin/tr -d '\r'
+    kill "$(/bin/cat "$SCRATCH/holder.pid")" 2>/dev/null || true
+}
+field() { /usr/bin/sed -n "s/^$1=//p" <<<"$2" | /usr/bin/head -1; }
+# 0x80017472 is TIOCSTI.
+INJECT='for (split //, qq(sv2-injected\n)) { ioctl(STDIN, 0x80017472, $_) or die qq(TIOCSTI: $!\n) }'
+
+# Control: without sv2 in between, the injection reaches the shell. If this
+# fails the probe proves nothing and the check after it must not be believed.
+OUT="$(on_pty '/usr/bin/perl -e "$INJECT"; IFS= read -r -t 2 line; echo "host-read=[$line]"')"
+check "terminal: control, injection reaches a shell on the same tty" "[sv2-injected]" "$(field host-read "$OUT")"
+
+OUT="$(on_pty '
+    /bin/stty rows 41 cols 101
+    echo "host-tty=$(/usr/bin/tty)"
+    "$SV2" --profile "$P" shell /bin/sh -c '\''echo "sandbox-tty=$(/usr/bin/tty)"; echo "size=$(/bin/stty size)"'\''
+    "$SV2" --profile "$P" shell /usr/bin/perl -e "$INJECT"; echo "inject-rc=$?"
+    IFS= read -r -t 2 line; echo "host-read=[$line]"
+')"
+HOST_TTY="$(field host-tty "$OUT")"
+SB_TTY="$(field sandbox-tty "$OUT")"
+if [[ "$HOST_TTY" == /dev/ttys* && "$SB_TTY" == /dev/ttys* && "$HOST_TTY" != "$SB_TTY" ]]; then
+    pass "terminal: the session has its own tty"
+else
+    fail "terminal: the session has its own tty" "host [$HOST_TTY] sandbox [$SB_TTY]"
+fi
+check "terminal: window size reaches the session" "41 101" "$(field size "$OUT")"
+# inject-rc 0: the ioctl itself worked, so an empty read means the keystrokes
+# went to the session's own tty, not that the probe was refused.
+check "terminal: session cannot inject input into the host's tty" "0 []" \
+    "$(field inject-rc "$OUT") $(field host-read "$OUT")"
+
+# tmux inside the sandbox (design: "Terminal multiplexers"): the server
+# outlives the session that started it and a later session attaches to it.
+if sb /bin/sh -c 'command -v tmux' >/dev/null 2>&1; then
+    sb tmux new-session -d -s sv2test '/bin/sleep 600'
+    check "tmux: server outlives the session that started it" "sv2test" \
+        "$(sb tmux list-sessions -F '#{session_name}' 2>&1)"
+    if /usr/bin/pgrep -u "$SB_UID" -x tmux >/dev/null; then
+        pass "tmux: server runs as the sandbox account"
+    else
+        fail "tmux: server runs as the sandbox account"
+    fi
+    OUT="$(on_pty '"$SV2" --profile "$P" shell tmux new-session -s sv2attach "echo tmux-says-$((6*7)); /bin/sleep 1"')"
+    if [[ "$OUT" == *tmux-says-42* ]]; then
+        pass "tmux: a client attaches on the session's tty"
+    else
+        fail "tmux: a client attaches on the session's tty"
+    fi
+    sb tmux kill-server 2>/dev/null || true
+else
+    echo -e "${ORANGE}     tmux is not installed: tmux checks NOT RUN${NC}"
+    if [[ "${SV_TESTS_FAIL_ON_SKIP:-0}" == "1" ]]; then
+        fail "tmux: checks ran" "tmux not found in the session's PATH"
+    fi
+fi
+
+###############################################################################
 # confinement (judged from the host side)
 ###############################################################################
 MARK="sv2-test-$$-$RANDOM"
@@ -145,6 +224,56 @@ if [[ -d "$WS" && ! -e "/private/tmp/$MARK" ]]; then
     pass "sandbox: cannot move the workspace away"
 else
     fail "sandbox: cannot move the workspace away"
+fi
+
+# The sandbox can use the workspace but not re-permission, re-own, delete or
+# replace the directory itself. Judged by the directory's listing (mode,
+# owner, ACL) as the host sees it before and after.
+WS_BEFORE="$(/bin/ls -lde "$WS")"
+sb /bin/sh -c '
+    chmod 777 .
+    chmod +a "everyone allow list,search,add_file,delete_child" .
+    chmod -N .
+    chown "$(id -u)" .
+    rmdir "$SV2_WORKSPACE"
+    mv "$SV2_WORKSPACE" "$SV2_WORKSPACE.moved"
+' >/dev/null 2>&1 || true
+check "workspace: sandbox cannot change the directory's mode, owner or ACL" "$WS_BEFORE" "$(/bin/ls -lde "$WS" 2>&1)"
+if [[ ! -e "$WS.moved" ]]; then
+    pass "workspace: sandbox cannot rename the directory in place"
+else
+    fail "workspace: sandbox cannot rename the directory in place"
+fi
+
+# Entries the sandbox creates as private (umask 077) are still the host
+# user's to read and write: access comes from the inherited ACL entries, not
+# from the mode bits.
+sb /bin/sh -c 'umask 077; mkdir -p private/sub && echo secret > private/sub/file'
+check "workspace: sandbox-private entries have no mode bits for the host" "700 600" \
+    "$($STAT -f '%Lp' "$WS/private") $($STAT -f '%Lp' "$WS/private/sub/file")"
+check "workspace: host can read a sandbox-private file" "secret" "$(/bin/cat "$WS/private/sub/file" 2>&1)"
+if echo appended >> "$WS/private/sub/file" && echo from-host > "$WS/private/sub/host-new"; then
+    pass "workspace: host can write inside a sandbox-private directory"
+else
+    fail "workspace: host can write inside a sandbox-private directory"
+fi
+check "workspace: sandbox sees the host's changes there" "secret appended from-host" \
+    "$(sb /bin/sh -c 'cat private/sub/file private/sub/host-new' | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+# Execute permission is never inherited, in either direction.
+sb /bin/sh -c 'printf "#!/bin/sh\necho ran\n" > private/script'
+if [[ -r "$WS/private/script" && ! -x "$WS/private/script" ]]; then
+    pass "workspace: sandbox-created files are not executable by the host"
+else
+    fail "workspace: sandbox-created files are not executable by the host"
+fi
+printf '#!/bin/sh\necho ran\n' > "$WS/private/host-script"
+check "workspace: host-created files are not executable by the sandbox" "readable not-executable" \
+    "$(sb /bin/sh -c 'test -r private/host-script && echo readable; test -x private/host-script || echo not-executable' | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+if /bin/rm -f "$WS/private/script" "$WS/private/host-script" "$WS/private/sub/file" "$WS/private/sub/host-new" \
+    && /bin/rmdir "$WS/private/sub" "$WS/private"; then
+    pass "workspace: host can remove sandbox-private entries"
+else
+    fail "workspace: host can remove sandbox-private entries"
 fi
 
 sb /bin/sh -c 'echo from-sandbox > sandbox-file && mkdir -p d/e && echo x > d/e/f'
