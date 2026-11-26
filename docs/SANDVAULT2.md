@@ -909,6 +909,11 @@ Decisions this milestone made:
     (`com.apple.coreservices.launchservicesd`, the Chrome and Crashpad
     prefixes), which come back with browser support and a probe of their
     own.
+  - *A consequence:* a session can no longer push keystrokes into a
+    terminal's input queue at all. The kernel asks the sandbox for
+    `hid-control` before `TIOCSTI`, and nothing allows it (seen in the
+    first installed run: the ioctl fails with "Operation not permitted").
+    The session's own pty is still there as the second defence.
   - *Not narrowed, by decision:* file reads are still everything but
     `/Users`, `/Volumes`, `/Library/Keychains` and raw disks, and the
     network is still everything, localhost and port 22 included. Both
@@ -1016,11 +1021,9 @@ is run by hand: `sv2/tests/root-checks sv2/target/release
   list and the arguments. Not yet run on a machine: `sv2 uninstall` with a
   profile present (refused, nothing removed), and `--all-profiles`
   (root-checks).
-- [ ] **The default-deny profile has not run in a session.** All probes
-  pass under it as the current user (unit test). Not yet run: the same
-  probes as a sandbox account in its own launchd domain, which the
-  integration suite does once this build is installed; and real work in a
-  session, above all a logged-in agent. What was removed is listed under
+- [ ] **The default-deny profile has not done real work.** The probes pass
+  under it in a real session (integration suite, 2026-11-26). Not yet: a
+  logged-in agent working in a session. What was removed is listed under
   "Default deny"; a tool that stops working points there first.
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo

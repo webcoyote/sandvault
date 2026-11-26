@@ -256,9 +256,13 @@ else
     fail "terminal: the session has its own tty" "host [$HOST_TTY] sandbox [$SB_TTY]"
 fi
 check "terminal: window size reaches the session" "41 101" "$(field size "$OUT")"
-# inject-rc 0: the ioctl itself worked, so an empty read means the keystrokes
-# went to the session's own tty, not that the probe was refused.
-check "terminal: session cannot inject input into the host's tty" "0 []" \
+# Two things stand in the way, and this shows the first: the default-deny
+# profile refuses the ioctl itself (the kernel asks the sandbox for
+# "hid-control", which nothing allows), so inject-rc is 1 and nothing is
+# read. The second is that the session's tty is not the host's (checked
+# above): under the allow-default profile the ioctl worked, inject-rc was 0,
+# and the keystrokes went to the session's own tty.
+check "terminal: session cannot inject input into the host's tty" "1 []" \
     "$(field inject-rc "$OUT") $(field host-read "$OUT")"
 
 # tmux inside the sandbox (design: "Terminal multiplexers"): the server
