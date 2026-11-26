@@ -1,4 +1,4 @@
-//! The built-in `shell` agent: the command line a session runs.
+//! The command line a session runs.
 //!
 //! This is built here, as the host user, and executed by the helper as the
 //! sandbox user under the sandbox profile. It is a vector the whole way; the
@@ -7,8 +7,14 @@
 //!
 //! The helper gives a session a fixed minimal environment and takes neither
 //! environment nor paths from its caller. What the terminal needs (TERM,
-//! locale) and where the session starts are therefore expressed here, through
-//! `/usr/bin/env` and `cd`, which run as the sandbox user.
+//! locale) is therefore expressed here, through `/usr/bin/env`, which runs
+//! as the sandbox user.
+//!
+//! Everything else a session needs before its program starts is done by the
+//! guest launcher, `guest/launch.sh`: a script whose text is compiled into
+//! `sv2` and passed on the command line. No copy of it is kept in the
+//! sandbox home, so there is nothing there to unpack, to version, or for one
+//! session to change for the next.
 
 use std::ffi::{OsStr, OsString};
 
@@ -27,24 +33,28 @@ pub const FORWARDED: &[&str] = &[
     "LC_TIME",
 ];
 
-pub fn brew_prefix() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "/opt/homebrew"
-    } else {
-        "/usr/local"
-    }
+/// The guest launcher. See the file for what it does and what it is given.
+pub const LAUNCHER: &str = include_str!("../../../guest/launch.sh");
+
+/// What the launcher is asked to start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A login zsh, or the arguments as a command in its environment.
+    Shell,
 }
 
-/// Homebrew first, so tools installed for the session (tmux) are found.
-pub fn session_path() -> String {
-    let brew = brew_prefix();
-    format!("{brew}/bin:{brew}/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+impl Kind {
+    fn word(self) -> &'static str {
+        match self {
+            Kind::Shell => "shell",
+        }
+    }
 }
 
 /// `NAME=value` pairs for `/usr/bin/env`, from the host environment.
 /// TERMINFO (set by terminals such as Ghostty to a directory in their app
 /// bundle) is forwarded unless it is in the host home, which the sandbox
-/// cannot read.
+/// cannot read. `PATH` is not forwarded: the launcher sets it.
 pub fn forwarded_env(
     get: &dyn Fn(&str) -> Option<OsString>,
     host_home: Option<&OsStr>,
@@ -68,7 +78,6 @@ pub fn forwarded_env(
             out.push(pair("TERMINFO", &v));
         }
     }
-    out.push(pair("PATH", OsStr::new(&session_path())));
     out
 }
 
@@ -82,42 +91,25 @@ pub fn initial_dir(cwd: Option<&std::path::Path>, workspace: &str) -> OsString {
     }
 }
 
-/// zsh offers to write startup files (zsh-newuser-install) when the home has
-/// none. The sandbox user creates an empty one itself.
-const ENSURE_ZSHRC: &str = r#"[[ -e ~/.zshrc ]] || : >> ~/.zshrc"#;
-
-/// The command for `sv2 run shell [ARGS...]`.
+/// The command for a session: the launcher, told where to start and what.
 ///
-/// - No arguments: a login zsh. Interactive on a terminal; with piped stdin
-///   it reads commands from the pipe.
-/// - Arguments: a login zsh sources the startup files once (for `PATH`) and
-///   then `exec`s the arguments as given.
-pub fn argv(env: &[OsString], dir: &OsStr, args: &[OsString]) -> Vec<OsString> {
+/// `args` go to the launcher as positional parameters and from there to the
+/// program, unchanged.
+pub fn argv(env: &[OsString], dir: &OsStr, kind: Kind, args: &[OsString]) -> Vec<OsString> {
     let mut v: Vec<OsString> = vec!["/usr/bin/env".into()];
     v.extend(env.iter().cloned());
-    v.push("/bin/zsh".into());
-    if args.is_empty() {
-        // -f: this outer shell reads no startup files; the login shell it
-        // becomes reads them, once.
-        v.push("-fc".into());
-        v.push(format!(r#"{ENSURE_ZSHRC}; cd -- "$1" 2>/dev/null; exec /bin/zsh -l"#).into());
-        v.push("sv2".into());
-        v.push(dir.to_owned());
-    } else {
-        v.push("-lc".into());
-        v.push(format!(r#"{ENSURE_ZSHRC}; cd -- "$1" 2>/dev/null; shift; exec -- "$@""#).into());
-        v.push("sv2".into());
-        v.push(dir.to_owned());
-        v.extend(args.iter().cloned());
-    }
+    v.extend(["/bin/bash", "-c", LAUNCHER, "sv2-launch"].map(OsString::from));
+    v.push(dir.to_owned());
+    v.push(kind.word().into());
+    v.extend(args.iter().cloned());
     v
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    use std::process::Command;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output, Stdio};
 
     fn os(v: &[&str]) -> Vec<OsString> {
         v.iter().map(OsString::from).collect()
@@ -144,7 +136,6 @@ mod tests {
                 "TERM=xterm-ghostty",
                 "LANG=en_US.UTF-8",
                 "TERMINFO=/Applications/Ghostty.app/Contents/Resources/terminfo",
-                &format!("PATH={}", session_path()),
             ])
         );
     }
@@ -155,13 +146,13 @@ mod tests {
             (name == "TERMINFO").then(|| "/Users/pat/.terminfo".into())
         };
         let env = forwarded_env(&get, Some(OsStr::new("/Users/pat")));
-        assert_eq!(env, os(&[&format!("PATH={}", session_path())]));
+        assert_eq!(env, os(&[]));
         // A sibling whose name merely starts with the home is not the home.
         let get = |name: &str| -> Option<OsString> {
             (name == "TERMINFO").then(|| "/Users/patricia/.terminfo".into())
         };
         let env = forwarded_env(&get, Some(OsStr::new("/Users/pat")));
-        assert_eq!(env.len(), 2);
+        assert_eq!(env.len(), 1);
     }
 
     #[test]
@@ -180,37 +171,88 @@ mod tests {
     }
 
     #[test]
-    fn argv_shapes() {
+    fn argv_shape() {
         let env = os(&["TERM=xterm"]);
-        let v = argv(&env, OsStr::new("/ws"), &[]);
+        let v = argv(&env, OsStr::new("/ws"), Kind::Shell, &os(&["tmux", "new"]));
         assert_eq!(
-            &v[..4],
-            &os(&["/usr/bin/env", "TERM=xterm", "/bin/zsh", "-fc"])[..]
+            v,
+            os(&[
+                "/usr/bin/env",
+                "TERM=xterm",
+                "/bin/bash",
+                "-c",
+                LAUNCHER,
+                "sv2-launch",
+                "/ws",
+                "shell",
+                "tmux",
+                "new"
+            ])
         );
-        assert_eq!(&v[5..], &os(&["sv2", "/ws"])[..]);
-
-        let v = argv(&env, OsStr::new("/ws"), &os(&["tmux", "new", "-A"]));
-        assert_eq!(
-            &v[..4],
-            &os(&["/usr/bin/env", "TERM=xterm", "/bin/zsh", "-lc"])[..]
-        );
-        assert_eq!(&v[5..], &os(&["sv2", "/ws", "tmux", "new", "-A"])[..]);
         // The helper requires an absolute command.
         assert!(v[0].to_str().unwrap().starts_with('/'));
+        // The launcher travels on every command line, and sudo logs it.
+        assert!(LAUNCHER.len() < 16 * 1024, "the launcher has grown large");
     }
 
-    /// Run the real command line (as the current user, with a scratch HOME)
-    /// and check that arguments arrive exactly as given: no word splitting,
-    /// no expansion, no option parsing.
+    /// A scratch home and starting directory for running the real launcher
+    /// as the current user.
+    struct Scratch {
+        root: PathBuf,
+        home: PathBuf,
+        dir: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let root =
+                std::env::temp_dir().join(format!("sv2-launch-test-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            // Resolved, so that it compares equal to what `pwd` prints.
+            std::fs::create_dir_all(&root).unwrap();
+            let root = root.canonicalize().unwrap();
+            let home = root.join("home");
+            let dir = root.join("dir with space");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch { root, home, dir }
+        }
+
+        fn command(&self, v: &[OsString]) -> Command {
+            let mut c = Command::new(&v[0]);
+            c.args(&v[1..]).env_clear().env("HOME", &self.home);
+            c
+        }
+
+        /// The launcher as a session gets it, with ARGS.
+        fn run(&self, args: &[&str]) -> Output {
+            let v = argv(&[], self.dir.as_os_str(), Kind::Shell, &os(args));
+            self.command(&v).stdin(Stdio::null()).output().unwrap()
+        }
+
+        fn stdout(&self, args: &[&str]) -> String {
+            let out = self.run(args);
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Arguments arrive exactly as given: no word splitting, no expansion,
+    /// no option parsing.
     #[test]
     fn arguments_survive_unchanged() {
-        let scratch = std::env::temp_dir().join(format!("sv2-shell-test-{}", std::process::id()));
-        let home = scratch.join("home");
-        let dir = scratch.join("dir with space");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let tricky = os(&[
+        let s = Scratch::new("args");
+        let tricky = [
             "/usr/bin/printf",
             "%s\\n",
             "a b",
@@ -223,58 +265,47 @@ mod tests {
             "--",
             "ünï",
             "*",
-        ]);
-        let v = argv(&[], dir.as_os_str(), &tricky);
-        let out = Command::new(&v[0])
-            .args(&v[1..])
-            .env_clear()
-            .env("HOME", &home)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        ];
         assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
+            s.stdout(&tricky),
             "a b\n$HOME\n`id`\nsemi;colon\nquote'\"\n\n-l\n--\nünï\n*\n"
         );
+    }
 
-        // The session starts in the requested directory, and the sandbox
-        // user's own shell created the empty .zshrc.
-        let v = argv(&[], dir.as_os_str(), &os(&["/bin/pwd"]));
-        let out = Command::new(&v[0])
-            .args(&v[1..])
-            .env_clear()
-            .env("HOME", &home)
-            .output()
-            .unwrap();
-        let pwd = String::from_utf8_lossy(&out.stdout);
-        assert!(pwd.trim_end().ends_with("/dir with space"), "{pwd}");
-        assert!(home.join(".zshrc").exists());
+    #[test]
+    fn starts_in_the_directory_and_passes_the_exit_status_on() {
+        let s = Scratch::new("dir");
+        assert_eq!(s.stdout(&["/bin/pwd"]).trim_end(), s.dir.to_str().unwrap());
+        assert_eq!(s.run(&["/bin/sh", "-c", "exit 7"]).status.code(), Some(7));
 
-        // Exit status propagates.
-        let v = argv(&[], dir.as_os_str(), &os(&["/bin/sh", "-c", "exit 7"]));
-        let st = Command::new(&v[0])
-            .args(&v[1..])
-            .env_clear()
-            .env("HOME", &home)
-            .status()
-            .unwrap();
-        assert_eq!(st.code(), Some(7));
+        // A directory that is not there is not an error: the session stays
+        // where the helper put it.
+        let v = argv(
+            &[],
+            OsStr::new("/nonexistent/sv2"),
+            Kind::Shell,
+            &os(&["/bin/pwd"]),
+        );
+        let out = s.command(&v).current_dir(&s.home).output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim_end(),
+            s.home.to_str().unwrap()
+        );
+    }
 
-        // No arguments and piped stdin: the login shell reads the pipe.
-        let v = argv(&[], dir.as_os_str(), &[]);
-        let mut child = Command::new(&v[0])
-            .args(&v[1..])
-            .env_clear()
-            .env("HOME", &home)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
+    /// No arguments and piped input: the login shell reads the pipe.
+    #[test]
+    fn a_shell_without_arguments_reads_piped_input() {
+        use std::io::Write;
+        let s = Scratch::new("pipe");
+        let v = argv(&[], s.dir.as_os_str(), Kind::Shell, &[]);
+        let mut child = s
+            .command(&v)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        use std::io::Write;
         child
             .stdin
             .take()
@@ -283,7 +314,87 @@ mod tests {
             .unwrap();
         let out = child.wait_with_output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "piped-42\n");
+    }
 
-        std::fs::remove_dir_all(&scratch).unwrap();
+    #[test]
+    fn the_users_bin_directories_come_first_in_a_login_shell() {
+        let s = Scratch::new("path");
+        let path = s.stdout(&["/bin/sh", "-c", "printf %s \"$PATH\""]);
+        let home = s.home.to_str().unwrap();
+        assert!(
+            path.starts_with(&format!("{home}/.local/bin:{home}/bin:")),
+            "{path}"
+        );
+        let at = |dir: &str| path.split(':').position(|p| p == dir);
+        let system = at("/usr/bin").expect("no /usr/bin in PATH");
+        for brew in ["/opt/homebrew", "/usr/local"] {
+            if Path::new(brew).join("bin/brew").exists() {
+                let brew_bin = at(&format!("{brew}/bin")).expect("Homebrew is not in PATH");
+                assert!(brew_bin < system, "Homebrew comes after the system: {path}");
+                break;
+            }
+        }
+        // Nothing from the environment this test runs in.
+        assert!(!path.contains(".cargo"), "{path}");
+    }
+
+    #[test]
+    fn startup_files_are_written_once_and_then_left_alone() {
+        let s = Scratch::new("seed");
+        let zprofile = s.home.join(".zprofile");
+        let zshrc = s.home.join(".zshrc");
+
+        s.stdout(&["/usr/bin/true"]);
+        let seeded = std::fs::read_to_string(&zprofile).unwrap();
+        assert!(seeded.contains("Written once by sandvault2"), "{seeded}");
+        assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), "");
+
+        // The user's own versions: a file with other content, and a link
+        // that points nowhere. Neither is replaced, and the first is read.
+        std::fs::write(&zprofile, "export SV2_TEST_MARK=mine\n").unwrap();
+        std::fs::remove_file(&zshrc).unwrap();
+        std::os::unix::fs::symlink(s.root.join("nowhere"), &zshrc).unwrap();
+        assert_eq!(
+            s.stdout(&["/bin/sh", "-c", "printf %s \"$SV2_TEST_MARK\""]),
+            "mine"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&zprofile).unwrap(),
+            "export SV2_TEST_MARK=mine\n"
+        );
+        assert!(zshrc.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(!s.root.join("nowhere").exists());
+    }
+
+    /// A home that cannot be written still gets a session.
+    #[test]
+    fn a_read_only_home_is_reported_and_does_not_stop_the_session() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = Scratch::new("readonly");
+        std::fs::set_permissions(&s.home, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let out = s.run(&["/bin/echo", "ran"]);
+        std::fs::set_permissions(&s.home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "ran\n");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("could not write"), "{err}");
+    }
+
+    #[test]
+    fn the_launcher_refuses_what_it_does_not_know() {
+        let s = Scratch::new("usage");
+        let bash = |args: &[&str]| {
+            Command::new("/bin/bash")
+                .args(["-c", LAUNCHER, "sv2-launch"])
+                .args(args)
+                .env_clear()
+                .env("HOME", &s.home)
+                .output()
+                .unwrap()
+        };
+        assert_eq!(bash(&[]).status.code(), Some(2));
+        assert_eq!(bash(&["/"]).status.code(), Some(2));
+        let out = bash(&["/", "claude", "/bin/echo", "ran"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
     }
 }

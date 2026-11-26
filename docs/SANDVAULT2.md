@@ -369,8 +369,9 @@ adding one definition; `sv2` does not change.
 - **Versioning:** each definition carries a schema version that `sv2` checks.
   `sv2 doctor` reports missing or incompatible built-ins.
 - **How they reach the sandbox:** `sv2` reads the definition, including its
-  guest scripts, as the host user and passes it to the session over a pipe.
-  Root never opens it, and the sandbox cannot edit it.
+  guest scripts, as the host user and passes it to the session on the
+  command line, as it does the guest launcher (see "Guest launcher" under
+  "Milestone 1"). Root never opens it, and the sandbox cannot edit it.
 - **Names** match `^[a-z0-9][a-z0-9-]*$` and are looked up only in the places
   above, never on `PATH`.
 - `shell` is a built-in definition, embedded in the binary (see above).
@@ -511,8 +512,10 @@ versions" under "Milestone 1") and has an upgrade path, and each is written
 to a temporary file, validated, then renamed into place (§2, §5). Upgrading the base profile means re-rendering every profile
 file listed in the registry.
 
-There are no generated root scripts (finding 10) and no per-launch setup. The
-guest side unpacks the embedded payload only when its version stamp changes.
+There are no generated root scripts (finding 10) and no per-launch setup as
+root. The guest side has no installed copy to upgrade: the launcher travels
+on the command line of every session (see "Guest launcher" under
+"Milestone 1").
 
 ## Tests
 
@@ -707,6 +710,32 @@ Decisions this milestone made:
   - *Not covered.* The registry has its own format number in its header.
     The two groups and the directories have none; `install` checks and
     repairs them each time it runs.
+- **Guest launcher (2026-11-25; most of open item 5).** What a session needs
+  done before its program starts is done by `sv2/guest/launch.sh`, a bash
+  script run as the sandbox user under the sandbox profile.
+  - *How it gets there.* Its text is compiled into `sv2` and passed on the
+    command line: `/bin/bash -c TEXT sv2-launch DIR KIND ARGS...`. There is
+    no payload unpacked into the sandbox home and so no version stamp: every
+    session runs the launcher of the `sv2` that started it, and one session
+    cannot change it for the next. The design first had an unpacked payload;
+    sudo passes only standard input, output and error, and standard input
+    has to stay the terminal. The cost: sudo logs the command line, so the
+    script (under 4 KB; a unit test caps it at 16) is in the log once per
+    session. Nothing secret may ever go this way (§2).
+  - *What it does.* Sets `PATH` (the account's `~/.local/bin` and `~/bin`,
+    then Homebrew, then the system), writes the startup files below, changes
+    to DIR, and starts the program: for KIND `shell` a login zsh, or ARGS as
+    a command in a login zsh's environment. ARGS stay positional parameters
+    from `sv2` to the program and are never parsed as shell text.
+  - *Startup files.* A login zsh runs `/etc/zprofile`, whose `path_helper`
+    puts the system directories first again, so the order has to be restored
+    from a file zsh reads later. The launcher writes `~/.zprofile` (Homebrew
+    and the bin directories) and an empty `~/.zshrc`, each only when nothing
+    has that name. From then on the file is the user's: `sv2` never rewrites
+    it, so a later change to the text does not reach an existing home.
+  - *Still open from item 5:* how an agent definition's data and guest
+    scripts are handed to the launcher. They are to travel the same way, as
+    further arguments; that comes with agent definitions.
 - **Holding the lock (2026-11-25).** The registry lock is shared by every
   user, and the caller controls a good deal about the helper that holds it.
   Three things keep one caller from making everyone else wait:
@@ -784,8 +813,8 @@ order to do them in.
    account's processes" and "A taken workspace root" under "Milestone 1").
    Closed as not a gap: `install` reading its own executable by path (see
    "Installing from a path" there).
-4. The embedded guest payload and the guest-side launcher, then agent
-   definitions, then quarantine handling.
+4. Done: the guest-side launcher. Next: agent definitions, then quarantine
+   handling.
 5. Everything else that is not the daemon, in this order: the planted
    `~/Library/LaunchAgents` measurement (open item 7); the items under "Not
    yet verified"; default deny and per-profile capabilities; `sv2 doctor`;
@@ -820,13 +849,12 @@ order to do them in.
   as root, set `next-id` in the registry to a value near the top, then run
   the integration suite (`launchctl asuser`, the sandbox profile, the ACLs
   and sshd's group check all see the ID).
-- [ ] **The lock, kill and workspace-root changes have not run installed.**
-  Unit tests pass, and the measurements above were made against the helper
-  before the change. Not yet run: the integration suite against this build
-  (it has new checks for the full pipe, the fork storm, and stop signals in
-  a session). Not covered by any test: `^Z` at a helper that holds the
-  lock; an account that stops the kill child; `install` over a `sv2`
-  directory another user made (the logic is unit-tested without root).
+- [ ] **Parts of the lock, kill and workspace-root changes are untested.**
+  The integration suite has run against them (114 of 114, 2026-11-25),
+  with its checks for the full pipe, the fork storm, and stop signals in a
+  session. Not covered by any test: `^Z` at a helper that holds the lock;
+  an account that stops the kill child; `install` over a `sv2` directory
+  another user made (the logic is unit-tested without root).
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -861,9 +889,7 @@ order to do them in.
 
 ### Functional gaps
 
-- [ ] **No guest payload.** Sessions get Homebrew on `PATH` from `sv2`, and the
-  sandbox user's shell creates an empty `~/.zshrc`. The embedded payload
-  (shell setup, `install.sh` runner) is not written.
+None recorded.
 
 ### Features not in milestone 1
 
@@ -874,7 +900,8 @@ See "Priority order" above for the order.
   those are finished by running `profile add` or `profile remove` again.
   And the place to ask sshd what it would do with each sandbox account (see
   "SSH lockdown" under "Milestone 1").
-- [ ] Embedded guest payload and the guest-side launcher (open item 5).
+- [x] The guest-side launcher (open item 5); see "Guest launcher" under
+  "Milestone 1". There is no unpacked payload.
 - [ ] Agent definitions: format, `install.sh`, Homebrew and native install,
   `--native`.
 - [ ] Quarantine handling for installed agent binaries (open item 1).
@@ -908,13 +935,12 @@ See "Priority order" above for the order.
    creation and deletion into the daemon; `launch` can stay on sudo if that
    keeps the session's terminal handling simple.
 4. **Terminal.** Decided in milestone 1; see "Milestone 1".
-5. **Guest-side launcher.** Which component, running as the sandbox user,
-   resolves the agent binary, runs `install.sh`, and builds the final
-   argument vector: the helper after it drops privileges, or a script in the
-   embedded payload. Also how the agent definition, initial directory, and
-   terminal variables reach it, given that sudo passes only stdin, stdout,
-   and stderr. Milestone 1 answers the last part for `shell` (see
-   "Milestone 1"); agent definitions are still open.
+5. **Guest-side launcher.** Mostly decided on 2026-11-25: a script compiled
+   into `sv2` and passed on the command line; see "Guest launcher" under
+   "Milestone 1". It was not to be the helper after it drops privileges:
+   that would put definition parsing into the binary that runs as root.
+   Still open: the arguments by which an agent definition's data and guest
+   scripts reach the launcher.
 6. **Registry format.** Decided in milestone 1; see "Milestone 1".
 7. **launchd as a route around the profile.** Measure whether a session can
    start a job in its own launchd domain (`launchctl bootstrap` or `submit`,

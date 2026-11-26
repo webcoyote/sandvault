@@ -155,6 +155,26 @@ check "session: no staff, no host groups" "" \
 # launchd domain, not the host user's.
 check "session: own launchd domain (manageruid == uid)" "$SB_UID" "$(sb /bin/launchctl manageruid)"
 check "session: starts in the workspace" "$WS" "$(cd / && sb /bin/pwd)"
+# The guest launcher: the session's own bin directories lead PATH, Homebrew
+# comes before the system (a login zsh would otherwise put the system first),
+# and the startup file that arranges it was written into the sandbox home.
+SB_PATH="$(sb /bin/sh -c 'printf %s "$PATH"')"
+if [[ "$SB_PATH" == "/Users/$ACCOUNT/.local/bin:/Users/$ACCOUNT/bin:"* ]]; then
+    pass "launcher: the account's bin directories lead PATH"
+else
+    fail "launcher: the account's bin directories lead PATH" "$SB_PATH"
+fi
+for BREW in /opt/homebrew /usr/local; do
+    [[ -x "$BREW/bin/brew" ]] || continue
+    if [[ "${SB_PATH%%:/usr/bin:*}" == *":$BREW/bin"* ]]; then
+        pass "launcher: Homebrew comes before the system in PATH"
+    else
+        fail "launcher: Homebrew comes before the system in PATH" "$SB_PATH"
+    fi
+    break
+done
+check "launcher: startup files are written into the sandbox home" "yes yes" \
+    "$(sb /bin/sh -c 'grep -q "Written once by sandvault2" ~/.zprofile && printf "yes "; test -f ~/.zshrc && printf yes')"
 # The helper ignores the terminal's stop signals so that ^Z cannot park it
 # with the registry lock held. An ignored signal stays ignored across exec,
 # and a session in which ^Z did nothing would be no use.

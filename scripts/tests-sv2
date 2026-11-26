@@ -21,6 +21,13 @@ QUIET=(--quiet)
 [[ "$VERBOSE" -ne 0 ]] && QUIET=()
 
 cd "$SV2_DIR"
+# The guest launcher is compiled into sv2 and run inside every session.
+if command -v shellcheck >/dev/null; then
+    shellcheck guest/launch.sh
+else
+    echo >&2 "sv2 tests: shellcheck not found; guest/launch.sh NOT LINTED"
+    [[ "${SV_TESTS_FAIL_ON_SKIP:-0}" != "1" ]] || exit 1
+fi
 cargo fmt --all --check
 cargo clippy --locked --all-targets "${QUIET[@]+"${QUIET[@]}"}" -- -D warnings
 cargo test --locked "${QUIET[@]+"${QUIET[@]}"}"

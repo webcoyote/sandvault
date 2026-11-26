@@ -297,7 +297,7 @@ fn run(profile: &str, agent: &str, agent_args: &[OsString]) -> ExitCode {
     let dir = shell::initial_dir(cwd.as_deref(), &p.workspace);
     let home = std::env::var_os("HOME");
     let env = shell::forwarded_env(&|name| std::env::var_os(name), home.as_deref());
-    let argv = shell::argv(&env, OsStr::new(&dir), agent_args);
+    let argv = shell::argv(&env, OsStr::new(&dir), shell::Kind::Shell, agent_args);
 
     let err = call_command("launch")
         .arg(profile)
