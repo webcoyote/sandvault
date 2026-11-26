@@ -23,10 +23,20 @@
 //!   the host user, by this profile's sandbox account, or by an account that
 //!   no longer exists (a removed sandbox) are repaired.
 //!
-//! The ACL written is the one the kernel would have inherited from the
-//! workspace directory, computed from that directory's own ACL. The helper
-//! writes that ACL, and the sandbox cannot change it. Mode bits and ownership
-//! are left as they are.
+//! Two things are put right:
+//!
+//! - **Ownership.** An entry of the sandbox account, or of a removed one,
+//!   becomes the host user's. No root is needed: the inherited ACL entry
+//!   gives the host user the right to take ownership. Set-user-ID and
+//!   set-group-ID bits are cleared first, so no file that runs as the host
+//!   user comes out of this. Other mode bits are left as they are.
+//! - **The ACL.** It becomes the one the kernel would have inherited from the
+//!   workspace directory, computed from that directory's own ACL. The helper
+//!   writes that ACL, and the sandbox cannot change it.
+//!
+//! The same walk runs by itself after `sv2 profile add` (both steps, so a
+//! kept workspace works with the new account) and after `sv2 profile remove`
+//! (ownership only: what is kept is then simply the host user's files).
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString, OsStr, OsString};
 use std::io;
@@ -253,11 +263,56 @@ struct Walk {
     host_uid: u32,
     sandbox_uid: Option<u32>,
     dev: libc::dev_t,
+    /// `None`: ownership only, ACLs are left alone.
+    models: Option<Models>,
+    stats: Stats,
+}
+
+/// The ACLs to write, with their text for comparison.
+struct Models {
     file_acl: Acl,
     file_text: String,
     dir_acl: Acl,
     dir_text: String,
-    stats: Stats,
+}
+
+impl Models {
+    /// From the ACL of the open workspace directory `root`.
+    fn from_root(root: RawFd, root_path: &Path) -> Result<Models, String> {
+        let root_acl = Acl::of_fd(root)
+            .map_err(|e| format!("cannot read the ACL of {}: {e}", root_path.display()))?
+            .map(|a| a.text())
+            .transpose()?
+            .unwrap_or_else(|| format!("{ACL_HEADER}\n"));
+        let file_model = inherited_acl_text(&root_acl, false)?;
+        let dir_model = inherited_acl_text(&root_acl, true)?;
+        let header_only = format!("{ACL_HEADER}\n");
+        if file_model == header_only || dir_model == header_only {
+            return Err(format!(
+                "{} has no inheritable ACL to copy",
+                root_path.display()
+            ));
+        }
+        // Through the system once, so the text compares equal to what
+        // acl_to_text reports for a file that already has this ACL.
+        let file_acl = Acl::from_text(&file_model)?;
+        let dir_acl = Acl::from_text(&dir_model)?;
+        Ok(Models {
+            file_text: file_acl.text()?,
+            file_acl,
+            dir_text: dir_acl.text()?,
+            dir_acl,
+        })
+    }
+}
+
+/// What a walk changes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum What {
+    /// Ownership and ACLs.
+    Everything,
+    /// Ownership only. Needs nothing from the workspace directory's ACL.
+    OwnershipOnly,
 }
 
 fn cstr(name: &OsStr) -> Result<CString, String> {
@@ -413,25 +468,38 @@ impl Walk {
             return self.skip(path, format!("it belongs to another account (UID {owner})"));
         }
 
-        let current = match Acl::of_fd(fd.as_raw_fd()) {
-            Ok(Some(acl)) => match acl.text() {
-                Ok(t) => t,
-                Err(e) => return self.skip(path, e),
-            },
-            Ok(None) => String::new(),
-            Err(e) => return self.skip(path, format!("cannot read its ACL: {e}")),
-        };
-        let (acl, text) = if is_dir {
-            (&self.dir_acl, &self.dir_text)
-        } else {
-            (&self.file_acl, &self.file_text)
-        };
-        if current == *text {
-            self.stats.unchanged += 1;
-        } else if let Err(e) = acl.set_on(fd.as_raw_fd()) {
-            self.skip(path, format!("cannot change its ACL: {e}"));
-        } else {
+        let mut changed = false;
+        if owner != self.host_uid {
+            if let Err(why) = self.take_ownership(fd.as_raw_fd(), &st) {
+                return self.skip(path, why);
+            }
+            changed = true;
+        }
+        if let Some(models) = &self.models {
+            let current = match Acl::of_fd(fd.as_raw_fd()) {
+                Ok(Some(acl)) => match acl.text() {
+                    Ok(t) => t,
+                    Err(e) => return self.skip(path, e),
+                },
+                Ok(None) => String::new(),
+                Err(e) => return self.skip(path, format!("cannot read its ACL: {e}")),
+            };
+            let (acl, text) = if is_dir {
+                (&models.dir_acl, &models.dir_text)
+            } else {
+                (&models.file_acl, &models.file_text)
+            };
+            if current != *text {
+                if let Err(e) = acl.set_on(fd.as_raw_fd()) {
+                    return self.skip(path, format!("cannot change its ACL: {e}"));
+                }
+                changed = true;
+            }
+        }
+        if changed {
             self.stats.repaired += 1;
+        } else {
+            self.stats.unchanged += 1;
         }
 
         if is_dir {
@@ -443,6 +511,45 @@ impl Walk {
             }
             self.children(fd.as_raw_fd(), path, depth + 1);
         }
+    }
+
+    /// Make the open entry the host user's.
+    ///
+    /// A set-ID file that became the host user's would run as the host user,
+    /// so those bits are cleared before the change. Its present owner can
+    /// set them again in the moment between, so they are cleared after it as
+    /// well; from then on nobody but the host user can set them (the kernel
+    /// lets only the owner, whatever the ACL says).
+    fn take_ownership(&self, fd: RawFd, st: &libc::stat) -> Result<(), String> {
+        const SET_ID: libc::mode_t = libc::S_ISUID | libc::S_ISGID;
+        let clear_set_id = |mode: libc::mode_t| -> Result<(), String> {
+            if mode & SET_ID == 0 {
+                return Ok(());
+            }
+            // SAFETY: `fd` is an open descriptor.
+            if unsafe { libc::fchmod(fd, mode & 0o7777 & !SET_ID) } == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "cannot clear its set-ID bits: {}",
+                    io::Error::last_os_error()
+                ))
+            }
+        };
+        clear_set_id(st.st_mode)?;
+        // SAFETY: `fd` is an open descriptor; a GID of -1 leaves the group.
+        if unsafe { libc::fchown(fd, self.host_uid, libc::gid_t::MAX) } != 0 {
+            return Err(format!(
+                "cannot take ownership of it: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        clear_set_id(fstat(fd).map_err(|e| e.to_string())?.st_mode)?;
+        let now = fstat(fd).map_err(|e| e.to_string())?;
+        if now.st_uid != self.host_uid || now.st_mode & SET_ID != 0 {
+            return Err("it did not end up as an ordinary file of yours".to_string());
+        }
+        Ok(())
     }
 
     fn children(&mut self, dir: RawFd, path: &Path, depth: usize) {
@@ -466,25 +573,12 @@ pub fn repair_in(
     rel: &[OsString],
     host_uid: u32,
     sandbox_uid: Option<u32>,
+    what: What,
 ) -> Result<Stats, String> {
-    let root_acl = Acl::of_fd(root.as_raw_fd())
-        .map_err(|e| format!("cannot read the ACL of {}: {e}", root_path.display()))?
-        .map(|a| a.text())
-        .transpose()?
-        .unwrap_or_else(|| format!("{ACL_HEADER}\n"));
-    let file_model = inherited_acl_text(&root_acl, false)?;
-    let dir_model = inherited_acl_text(&root_acl, true)?;
-    let header_only = format!("{ACL_HEADER}\n");
-    if file_model == header_only || dir_model == header_only {
-        return Err(format!(
-            "{} has no inheritable ACL to copy",
-            root_path.display()
-        ));
-    }
-    // Through the system once, so the text compares equal to what
-    // acl_to_text reports for a file that already has this ACL.
-    let file_acl = Acl::from_text(&file_model)?;
-    let dir_acl = Acl::from_text(&dir_model)?;
+    let models = match what {
+        What::Everything => Some(Models::from_root(root.as_raw_fd(), root_path)?),
+        What::OwnershipOnly => None,
+    };
     let dev = fstat(root.as_raw_fd())
         .map_err(|e| format!("{}: {e}", root_path.display()))?
         .st_dev;
@@ -492,10 +586,7 @@ pub fn repair_in(
         host_uid,
         sandbox_uid,
         dev,
-        file_text: file_acl.text()?,
-        file_acl,
-        dir_text: dir_acl.text()?,
-        dir_acl,
+        models,
         stats: Stats::default(),
     };
 
@@ -602,12 +693,15 @@ pub fn run(arg: &OsStr) -> Result<bool, String> {
             target.profile
         ));
     }
-    let stats = repair_in(&ws, &ws_path, &target.rel, host_uid, sandbox_uid)?;
-    // Names below the workspace are the sandbox's to choose: {:?} keeps
-    // control characters out of the terminal.
-    for (path, why) in &stats.skipped {
-        eprintln!("sv2: skipped {path:?}: {why}");
-    }
+    let stats = repair_in(
+        &ws,
+        &ws_path,
+        &target.rel,
+        host_uid,
+        sandbox_uid,
+        What::Everything,
+    )?;
+    report_skipped(&stats);
     println!(
         "repaired {}, already correct {}, skipped {}",
         stats.repaired,
@@ -615,6 +709,71 @@ pub fn run(arg: &OsStr) -> Result<bool, String> {
         stats.skipped.len()
     );
     Ok(stats.skipped.is_empty())
+}
+
+/// Names below the workspace are the sandbox's to choose: {:?} keeps control
+/// characters out of the terminal.
+fn report_skipped(stats: &Stats) {
+    for (path, why) in &stats.skipped {
+        eprintln!("sv2: skipped {path:?}: {why}");
+    }
+}
+
+/// The walk `sv2` runs by itself over a whole workspace, after the helper
+/// has added or removed the profile. Reports on stderr, and only when there
+/// was something to do: stdout may belong to a session.
+///
+/// A problem here does not undo the add or remove, so it is reported and
+/// not returned.
+fn automatic(profile: &str, what: What) {
+    let result = (|| -> Result<Option<(PathBuf, Stats)>, String> {
+        let (host_uid, host_user) = current_user()?;
+        if !valid_host_user(&host_user) || !valid_profile(profile) {
+            return Ok(None);
+        }
+        let ws_path = PathBuf::from(format!("{WORKSPACE_ROOT}/{host_user}/{profile}"));
+        // A look at the name only. An empty workspace is removed with its
+        // profile, so there is often nothing here.
+        if std::fs::symlink_metadata(&ws_path).is_err() {
+            return Ok(None);
+        }
+        let ws = open_workspace(&host_user, host_uid, profile)?;
+        let sandbox_uid = uid_of(&account_name(&host_user, profile));
+        let stats = repair_in(&ws, &ws_path, &[], host_uid, sandbox_uid, what)?;
+        Ok(Some((ws_path, stats)))
+    })();
+    match result {
+        Ok(None) => {}
+        Ok(Some((ws_path, stats))) => {
+            report_skipped(&stats);
+            if stats.repaired > 0 || !stats.skipped.is_empty() {
+                let did = match what {
+                    What::Everything => "made usable by you and the sandbox",
+                    What::OwnershipOnly => "made yours",
+                };
+                eprintln!(
+                    "sv2: {}: {} kept files and directories {did}, {} skipped",
+                    ws_path.display(),
+                    stats.repaired,
+                    stats.skipped.len()
+                );
+            }
+        }
+        Err(e) => eprintln!("sv2: could not check the kept files in the workspace: {e}"),
+    }
+}
+
+/// After `profile add`: files kept from an earlier profile of this name
+/// become the host user's and get ACLs for the new sandbox account.
+pub fn after_profile_add(profile: &str) {
+    automatic(profile, What::Everything);
+}
+
+/// After `profile remove`: what the removed sandbox account owned in the
+/// kept workspace becomes the host user's. ACLs are left; the account they
+/// name is gone and its UID is never used again.
+pub fn after_profile_remove(profile: &str) {
+    automatic(profile, What::OwnershipOnly);
 }
 
 #[cfg(test)]
@@ -761,7 +920,12 @@ mod tests {
 
         fn repair(&self, rel: &[&str]) -> Result<Stats, String> {
             let fd = open_dir_path(self.root.to_str().unwrap()).unwrap();
-            repair_in(&fd, &self.root, &os(rel), self.uid, None)
+            repair_in(&fd, &self.root, &os(rel), self.uid, None, What::Everything)
+        }
+
+        fn ownership_only(&self) -> Result<Stats, String> {
+            let fd = open_dir_path(self.root.to_str().unwrap()).unwrap();
+            repair_in(&fd, &self.root, &[], self.uid, None, What::OwnershipOnly)
         }
     }
 
@@ -912,6 +1076,32 @@ mod tests {
         let fd = open_at(libc::AT_FDCWD, &c, false).unwrap();
         let st = fstat(fd.as_raw_fd()).unwrap();
         assert_eq!(st.st_mode & libc::S_IFMT, libc::S_IFIFO);
+    }
+
+    /// The pass after `profile remove`: ACLs are not its business, so it
+    /// neither writes them nor needs the workspace directory to have one.
+    #[test]
+    fn ownership_only_leaves_acls_alone() {
+        let s = Scratch::new("owner");
+        std::fs::create_dir(s.dir.join("d")).unwrap();
+        std::fs::write(s.dir.join("d/f"), "x").unwrap();
+        std::fs::rename(s.dir.join("d"), s.root.join("moved")).unwrap();
+        let stats = s.ownership_only().unwrap();
+        // Already this user's, so nothing to take.
+        assert_eq!((stats.repaired, stats.unchanged), (0, 2));
+        assert!(stats.skipped.is_empty());
+        assert_eq!(acl_of(&s.root.join("moved")), "");
+        assert_eq!(acl_of(&s.root.join("moved/f")), "");
+
+        let ok = Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(&s.root)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        assert!(s.ownership_only().is_ok());
+        assert!(s.repair(&[]).is_err());
     }
 
     #[test]

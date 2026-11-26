@@ -323,7 +323,14 @@ check "repair: a directory by relative path, with its contents" "repaired 3, alr
     "$(cd "$WS" && "$SV2" repair moved-dir 2>&1)"
 check "repair: sandbox can use the repaired directory" "inner" \
     "$(sb /bin/sh -c 'cat moved-dir/sub/inner && echo new > moved-dir/sub/from-sandbox' 2>&1)"
-# moved, moved-dir, sub, inner, from-sandbox, and host-file from above.
+# moved, moved-dir, sub, inner and host-file (from above) are right already.
+# from-sandbox is the sandbox account's, and becomes the host user's.
+check "repair: sandbox-owned entries are counted as repaired" "repaired 1, already correct 5, skipped 0" \
+    "$("$SV2" repair "$WS" 2>&1)"
+check "repair: takes ownership for the host user" "$HOST_UID" "$($STAT -f '%u' "$WS/moved-dir/sub/from-sandbox")"
+check "repair: the sandbox can still use and chmod what it no longer owns" "new ok" \
+    "$(sb /bin/sh -c 'cat moved-dir/sub/from-sandbox && echo more >> moved-dir/sub/from-sandbox && chmod +x moved-dir/sub/from-sandbox && echo ok' 2>&1 \
+        | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
 check "repair: a second run changes nothing" "repaired 0, already correct 6, skipped 0" "$("$SV2" repair "$WS" 2>&1)"
 check "repair: the workspace directory itself is untouched" "$WS_BEFORE" "$(security_of "$WS" 2>&1)"
 /bin/rm -rf "$WS/moved" "$WS/moved-dir"
@@ -420,6 +427,10 @@ if [[ -f "$WS/host-file" && "$OUT" == *"kept $WS"* ]]; then
 else
     fail "remove: non-empty workspace is kept and reported" "$OUT"
 fi
+# sv2 itself, as the host user, takes over what the removed account owned.
+check "remove: kept files become the host user's" "$HOST_UID $HOST_UID" \
+    "$($STAT -f '%u' "$WS/sandbox-kept") $($STAT -f '%u' "$WS/host-file")"
+check "remove: kept files keep their mode" "600" "$($STAT -f '%Lp' "$WS/sandbox-kept")"
 check "remove: no longer listed" "" "$("$SV2" profile list | /usr/bin/awk -v p="$P" '$1 == p')"
 refused "remove: no session after removal" "${CALL[@]}" launch "$P" -- /usr/bin/true
 
@@ -431,19 +442,34 @@ if [[ "$NEW_UID" =~ ^[0-9]+$ && "$NEW_UID" -gt "$SB_UID" ]]; then
 else
     fail "re-add: UID is not reused" "old $SB_UID new $NEW_UID"
 fi
-# The directory is reused. Files already in it carry ACL entries for the old
-# account and one belongs to it, so the new account cannot open that one
-# until 'sv2 repair' rewrites the entries.
+# The directory is reused, and 'profile add' rewrites the ACLs of the files
+# in it for the new account: no separate repair.
 check "re-add: kept workspace directory is reused" "host-file sandbox-kept" \
     "$(sb /bin/ls | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
-check "re-add: the old account's file belongs to no account" "$SB_UID" "$($STAT -f '%u' "$WS/sandbox-kept")"
-check "re-add: precondition, the new account cannot open the old one's file" "" \
-    "$(sb /bin/cat sandbox-kept 2>/dev/null || true)"
-check "re-add: repair rewrites the kept files" "repaired 2, already correct 0, skipped 0" "$("$SV2" repair "$WS" 2>&1)"
-check "re-add: the new account can use the kept files" "kept changed" \
+check "re-add: the new account can use the kept files at once" "kept changed" \
     "$(sb /bin/sh -c 'cat sandbox-kept host-file && echo more >> sandbox-kept && echo more >> host-file' 2>&1 \
         | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+check "re-add: nothing is left to repair" "repaired 0, already correct 2, skipped 0" "$("$SV2" repair "$WS" 2>&1)"
+
+# The same when the account went without sv2 seeing it (here: the helper
+# called directly), so its files belong to no account when the profile is
+# added again.
+sb /bin/sh -c 'umask 077; mkdir orphans && echo orphan > orphans/file'
 /bin/rm -f "$WS/host-file" "$WS/sandbox-kept"
+"${CALL[@]}" profile-remove "$P" >/dev/null
+check "re-add: precondition, kept files belong to no account" "$NEW_UID $NEW_UID" \
+    "$($STAT -f '%u' "$WS/orphans") $($STAT -f '%u' "$WS/orphans/file")"
+OUT="$("$SV2" profile add "$P" 2>&1 >/dev/null)"
+if [[ "$OUT" == *"2 kept files and directories made usable"* ]]; then
+    pass "re-add: says what it did to the kept files"
+else
+    fail "re-add: says what it did to the kept files" "$OUT"
+fi
+check "re-add: files of a vanished account become the host user's" "$HOST_UID $HOST_UID" \
+    "$($STAT -f '%u' "$WS/orphans") $($STAT -f '%u' "$WS/orphans/file")"
+check "re-add: and the new account can use them" "orphan" \
+    "$(sb /bin/sh -c 'cat orphans/file && echo more >> orphans/file' 2>&1)"
+/bin/rm -rf "$WS/orphans"
 "$SV2" profile remove "$P" >/dev/null
 if [[ -e "$WS" ]]; then fail "remove: empty workspace is removed"; else pass "remove: empty workspace is removed"; fi
 

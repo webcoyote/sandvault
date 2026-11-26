@@ -217,14 +217,20 @@ separates user from profile unambiguously.
   today.
 - Files moved in from elsewhere keep their old permissions. The host user owns
   them and can fix them without root: `sv2 repair PATH` does this explicitly.
-- `sv2 repair PATH` only fixes permissions, and only inside the caller's own
-  workspace tree; any other path is an error. It runs as the host user, never
-  as root. Because it is a host operation on sandbox-writable paths, it is an
-  exception to the rule and is held to §1: it walks the tree without following
-  links, changes each entry through an open file descriptor rather than by
-  path, and skips (with a warning, and a failing exit status) a file that has
-  more than one hard link and anything that belongs to another account. See
-  "`sv2 repair`" under "Milestone 1" for what was built.
+- `sv2 repair PATH` only fixes ownership and permissions, and only inside
+  the caller's own workspace tree; any other path is an error. It runs as the
+  host user, never as root. Because it is a host operation on
+  sandbox-writable paths, it is an exception to the rule and is held to §1:
+  it walks the tree without following links, changes each entry through an
+  open file descriptor rather than by path, and skips (with a warning, and a
+  failing exit status) a file that has more than one hard link and anything
+  that belongs to another account. See "`sv2 repair`" under "Milestone 1" for
+  what was built.
+- **Decided (2026-11-25):** the same pass runs by itself, as the host user,
+  after `sv2 profile add` and `sv2 profile remove`, and it makes the host
+  user the owner of what the sandbox account owned. A kept workspace is the
+  host user's own files after a remove, and works with the new account after
+  an add.
 - `sv2 profile remove` never deletes the user's files. The helper removes the
   workspace directory only if it is empty. Otherwise it leaves it, says so,
   and a later `profile add` of the same name reuses it.
@@ -565,26 +571,35 @@ Decisions this milestone made:
   directory is.
 - **`sv2 repair` (implemented after the rest of the milestone).** It lives in
   `crates/cli/src/repair.rs` and does not use the helper.
-  - *What it writes.* Each file and directory under PATH gets the ACL the
-    kernel would have given it by inheritance, replacing whatever ACL it had.
-    That ACL is computed from the workspace directory's own, which the helper
-    writes and the sandbox cannot change, so the rights are listed in one
-    place (`ops::workspace_aces`). Mode bits and ownership are not changed,
-    and neither is the workspace directory.
-  - *Whose entries.* The design said to skip what the host user does not own.
-    That would leave a kept workspace unusable after `profile remove` and
-    `profile add`, because most of its files belong to the removed account.
-    So repair also handles entries owned by this profile's sandbox account and
-    by a UID with no account. It needs no extra privilege for those: the old
-    inherited entry gives the host user the right to rewrite the ACL. Entries
-    of any other existing account are skipped.
+  - *Ownership.* An entry owned by this profile's sandbox account, or by a
+    UID with no account (a removed sandbox), becomes the host user's. This
+    needs no root: the inherited ACL entry gives the host user the right to
+    take ownership (measured). Set-user-ID and set-group-ID bits are cleared
+    before and after the change. Afterwards the sandbox cannot set them: the
+    kernel lets only a file's owner do that, whatever the ACL says
+    (measured). The sandbox can still `chmod +x` such a file through its ACL
+    entry. Entries of any other existing account are skipped. Other mode
+    bits and the group are not changed.
+  - *ACL.* Each file and directory gets the ACL the kernel would have given
+    it by inheritance, replacing whatever ACL it had. That ACL is computed
+    from the workspace directory's own, which the helper writes and the
+    sandbox cannot change, so the rights are listed in one place
+    (`ops::workspace_aces`). The workspace directory itself is not changed.
+  - *When it runs.* `sv2 repair PATH` does both steps under PATH. `sv2`
+    also runs it over the whole workspace after the helper returns from
+    `profile-add` (both steps) and from `profile-remove` (ownership only: the
+    ACLs then name an account that is gone and a UID that is never used
+    again). The first-use creation of `default` counts as an add. A problem
+    in the automatic pass is reported and does not fail the add or remove.
   - *PATH.* Checked as text first (inside `sv2/<caller>/<profile>`, no `..`),
     then opened one component at a time without following links. A link
     named by PATH or on the way to it is an error; links found during the
     walk are left alone.
-  - *Limits.* A sandbox-owned entry whose ACL the sandbox removed cannot be
-    repaired from the host; it is reported. `profile add` does not yet say
-    that a reused workspace needs `sv2 repair`.
+  - *Limits.* An entry whose ACL the sandbox removed cannot be taken over or
+    repaired from the host (it can be deleted); it is reported. The
+    automatic pass visits every entry, so `profile add` on a very large kept
+    workspace takes as long as that walk; this has not been measured. The
+    helper's `profile-remove` message still says "until 'sv2 repair' exists".
 - **Allowed-users group.** v1 would name the sandbox group of a host user
   called `users` exactly `sandvault-users`. `install` therefore refuses a
   group of that name it did not create (it checks the group's RealName).
@@ -658,11 +673,6 @@ Do these before building anything else on milestone 1.
 
 ### Functional gaps
 
-- [ ] **Kept workspaces need a manual `sv2 repair` after re-add.**
-  `profile remove` keeps a non-empty workspace. A later `profile add` reuses
-  the directory, but the new account has a new ID and the old files' ACLs name
-  the deleted one. `sv2 repair PATH` fixes that; `profile add` should say so
-  when it reuses a directory that is not empty.
 - [ ] **Account IDs.** `uninstall` deletes the registry, so a reinstall starts
   numbering at 600 again and a new sandbox can own files an old one left in
   `/tmp`. Nothing reclaims IDs, so 600-60000 can be used up by repeated add
@@ -734,15 +744,19 @@ In rough dependency order.
    to rules it already contains, or raw SBPL rules added to the base profile.
    Named capabilities keep root's parser small and every rule reviewed. Raw
    SBPL is more flexible, but the helper then has to parse and validate it.
-9. **What `sv2 repair` should do.** Go over the behaviour that was built
-   (see "`sv2 repair`" under "Milestone 1") and decide whether it is right:
-   - whose entries it repairs. The design said only the host user's; the
-     build also takes this profile's sandbox account and UIDs with no account;
-   - whether it replaces an entry's ACL or adds to it, and whether it should
-     also fix mode bits or ownership;
+9. **What `sv2 repair` should do.** Partly decided on 2026-11-25: it runs
+   automatically after `profile add` and `profile remove`, and it makes the
+   host user the owner (see "Workspace permissions" and "`sv2 repair`" under
+   "Milestone 1"). Still to go over:
+   - whether it replaces an entry's ACL, as built, or adds to it;
+   - whether it should also fix mode bits (a kept file of mode 000 stays
+     that way) or the group;
    - whether PATH is required, or `sv2 repair` alone means a whole profile;
-   - whether `profile add` runs it, or only mentions it, when it reuses a
-     workspace.
+   - what to do with entries it cannot take over because the sandbox removed
+     their ACL: leave and report them, as built, or have the sandbox account
+     put the ACL back before the account is deleted;
+   - the cost of the automatic pass on a very large workspace, and whether
+     `profile add` of a profile that is already active should skip it.
 10. **The "administer your computer" permission.** `profile remove`, a
     repeated `profile add` and `uninstall` depend on a TCC permission held by
     the user's terminal app (see "Account changes need a macOS privacy

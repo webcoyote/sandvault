@@ -36,6 +36,8 @@ Usage:
   sv2 profile list
   sv2 repair PATH                   let you and the sandbox both use PATH, a
                                     file or directory in one of your workspaces
+                                    (for files moved in; profile add and remove
+                                    do this for kept files themselves)
   sv2 run [OPTIONS] NAME [ARGS...]  run agent NAME in a sandbox
   sv2 [OPTIONS] NAME [ARGS...]      shorthand for sv2 run
 
@@ -157,17 +159,15 @@ fn in_allowed_group() -> bool {
 }
 
 /// Run a helper verb that prints and returns (not `launch`).
-fn call(verb: &str, extra: &[&str]) -> ExitCode {
-    if let Err(e) = check_installed() {
-        return fail(&e);
-    }
+fn call(verb: &str, extra: &[&str]) -> Result<(), ExitCode> {
+    check_installed().map_err(|e| fail(&e))?;
     match call_command(verb).args(extra).status() {
-        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(s) if s.success() => Ok(()),
         Ok(s) => {
             explain_call_failure(s);
-            exit_code(s)
+            Err(exit_code(s))
         }
-        Err(e) => fail(&format!("cannot run {SUDO}: {e}")),
+        Err(e) => Err(fail(&format!("cannot run {SUDO}: {e}"))),
     }
 }
 
@@ -262,6 +262,8 @@ fn run(profile: &str, agent: &str, agent_args: &[OsString]) -> ExitCode {
             }
             Err(e) => return fail(&format!("cannot run {SUDO}: {e}")),
         }
+        // A workspace kept from an earlier 'default' profile.
+        repair::after_profile_add(DEFAULT_PROFILE);
         profiles = match list_profiles() {
             Ok(p) => p,
             Err(code) => return code,
@@ -322,8 +324,22 @@ fn main() -> ExitCode {
         Cmd::Uninstall => admin("uninstall", &[]),
         Cmd::UserAllow(user) => admin("user-allow", &[&user]),
         Cmd::UserDeny(user) => admin("user-deny", &[&user]),
-        Cmd::ProfileAdd(name) => call("profile-add", &[&name]),
-        Cmd::ProfileRemove(name) => call("profile-remove", &[&name]),
+        // After the helper has done its part, `sv2` itself (the host user,
+        // not root) puts the files of a kept workspace right.
+        Cmd::ProfileAdd(name) => match call("profile-add", &[&name]) {
+            Ok(()) => {
+                repair::after_profile_add(&name);
+                ExitCode::SUCCESS
+            }
+            Err(code) => code,
+        },
+        Cmd::ProfileRemove(name) => match call("profile-remove", &[&name]) {
+            Ok(()) => {
+                repair::after_profile_remove(&name);
+                ExitCode::SUCCESS
+            }
+            Err(code) => code,
+        },
         Cmd::ProfileList => profile_list(),
         Cmd::Run {
             profile,
