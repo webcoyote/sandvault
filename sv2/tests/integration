@@ -155,6 +155,11 @@ check "session: no staff, no host groups" "" \
 # launchd domain, not the host user's.
 check "session: own launchd domain (manageruid == uid)" "$SB_UID" "$(sb /bin/launchctl manageruid)"
 check "session: starts in the workspace" "$WS" "$(cd / && sb /bin/pwd)"
+# The helper ignores the terminal's stop signals so that ^Z cannot park it
+# with the registry lock held. An ignored signal stays ignored across exec,
+# and a session in which ^Z did nothing would be no use.
+check "session: can be suspended (stop signals are not ignored)" "default default default" \
+    "$(sb /usr/bin/perl -e 'print join(" ", map { ($SIG{$_} // "") eq "IGNORE" ? "ignored" : "default" } qw(TSTP TTIN TTOU))')"
 /bin/mkdir "$WS/host dir"
 check "session: starts in the host's directory inside the workspace" "$WS/host dir" \
     "$(cd "$WS/host dir" && sb /bin/pwd)"
@@ -473,6 +478,36 @@ else
         /usr/bin/sudo -k -n -- "$HELPER" stage2 "$SB_UID" "$HOST_USER" "$P" -- /usr/bin/true
 fi
 
+# The caller chooses the helper's standard output. A pipe that is already
+# full blocks the helper where it prints, for as long as the caller likes;
+# the registry lock must not be held there, or everybody else's sv2 waits.
+# The first helper lists profiles into a full pipe; the second command needs
+# the lock exclusively. "first=blocked" shows the attack was in place.
+FULL_PIPE='
+use strict; use Fcntl; use POSIX ":sys_wait_h"; use Time::HiRes qw(sleep);
+my ($helper, $version, $profile, $sv2) = @ARGV;
+pipe(my $r, my $w) or die;
+my $fl = fcntl($w, F_GETFL, 0); fcntl($w, F_SETFL, $fl | O_NONBLOCK);
+1 while defined(syswrite($w, "x"));
+fcntl($w, F_SETFL, $fl);
+my $pid = fork;
+if (!$pid) { open(STDOUT, ">&", $w) or die; close $r;
+  exec "/usr/bin/sudo", "-n", "--", $helper, "call", $version, "profile-list"; die }
+sleep 1.5;
+my $first = waitpid($pid, WNOHANG) == 0 ? "blocked" : "finished";
+my $pid2 = fork;
+if (!$pid2) { open(STDOUT, ">", "/dev/null"); open(STDERR, ">", "/dev/null");
+  exec $sv2, "profile", "add", $profile; die }
+my $second = "waited";
+for (1..100) { if (waitpid($pid2, WNOHANG) != 0) { $second = "ran"; last } sleep 0.1 }
+kill "KILL", $pid2 if $second eq "waited";
+close $w; my $buf; 1 while sysread($r, $buf, 65536);
+waitpid($pid, 0); waitpid($pid2, 0) if $second eq "waited";
+print "first=$first second=$second";
+'
+check "helper: printing into a full pipe does not hold the lock" "first=blocked second=ran" \
+    "$(/usr/bin/perl -e "$FULL_PIPE" "$HELPER" "$VERSION" "$P" "$SV2")"
+
 ###############################################################################
 # profile remove
 ###############################################################################
@@ -488,7 +523,32 @@ sb /bin/sh -c 'umask 077; echo kept > sandbox-kept'
 # A home laid out to resist deletion: immutable file, unreadable directories.
 sb /bin/sh -c 'mkdir -p ~/deep/tree && echo x > ~/deep/tree/file && chflags uchg ~/deep/tree/file && chmod 000 ~/deep/tree ~/deep'
 
-OUT="$("$SV2" profile remove "$P")"
+# A fork storm: processes that fork and exit without pause, so that a pass of
+# SIGKILL always leaves some that were born during it. It is bounded (400
+# processes, by a limit it cannot raise) and ends by itself after a minute,
+# whatever becomes of this test. Measured on 2026-11-25: the removal used
+# until then (SIGKILL every 100 ms, 20 times) left 391 of these running and
+# failed.
+STORM='$SIG{HUP}="IGNORE"; my $end=time+60; while (time < $end) { my $p=fork; if (defined $p && $p==0) { srand; next } exit if rand() < 0.2 }'
+sb /bin/sh -c 'ulimit -u 400; /usr/bin/perl -e "$1" >/dev/null 2>&1 &' sh "$STORM"
+STORM_START="$(/bin/date +%s)"
+/bin/sleep 1
+STORM_SIZE="$(/bin/ps -u "$SB_UID" -o pid= | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+if [[ "$STORM_SIZE" -ge 300 ]]; then
+    pass "fork storm: running before the removal"
+else
+    fail "fork storm: running before the removal" "only $STORM_SIZE processes"
+fi
+
+OUT="$("$SV2" profile remove "$P")" && RC=0 || RC=$?
+check "remove: succeeds against a fork storm" "0" "$RC"
+if [[ "$RC" -ne 0 ]]; then
+    # Let the storm end by itself, then finish the removal, so that the
+    # checks below fail for their own reasons only.
+    echo "     waiting for the fork storm to end"
+    while [[ "$(/bin/date +%s)" -lt $((STORM_START + 62)) ]]; do /bin/sleep 1; done
+    OUT="$("$SV2" profile remove "$P")"
+fi
 if /usr/bin/pgrep -u "$SB_UID" >/dev/null; then fail "remove: kills the account's processes"; else pass "remove: kills the account's processes"; fi
 if account_exists; then fail "remove: account deleted"; else pass "remove: account deleted"; fi
 if [[ -e "/Users/$ACCOUNT" ]]; then fail "remove: home deleted"; else pass "remove: home deleted"; fi

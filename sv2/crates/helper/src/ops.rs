@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use sv2_common::{
     home_path, stamped_version, valid_host_user, valid_profile, workspace_path, workspace_user_dir,
-    ALLOWED_GROUP, HELPER_PATH, MODE_CALL, SANDBOX_GROUP, SANDBOX_PROFILE_STAMP,
+    Obelus, ALLOWED_GROUP, HELPER_PATH, MODE_CALL, SANDBOX_GROUP, SANDBOX_PROFILE_STAMP,
     SANDBOX_PROFILE_VERSION, SSHD_DROPIN_STAMP, SSHD_DROPIN_VERSION, SUDOERS_STAMP,
     SUDOERS_VERSION, WORKSPACE_ROOT,
 };
@@ -212,7 +212,7 @@ pub fn profile_add(caller: &Caller, profile: &str) -> Res<()> {
     build_profile(&entry, caller.gid)?;
     reg.set_state(caller.uid, profile, State::Active);
     save_registry(&reg)?;
-    println!(
+    say!(
         "profile {} ready: account {}, workspace {}",
         entry.profile,
         entry.account(),
@@ -387,6 +387,10 @@ fn processes_remain(uid: u32) -> Res<bool> {
     }
 }
 
+/// How long removal goes on killing an account's processes before it gives
+/// up (and leaves the profile `removing`, to be finished by another run).
+const KILL_WAIT: Duration = Duration::from_secs(10);
+
 /// Detached processes may outlive `sv2 run`, so removal kills every process
 /// of the sandbox UID. The caller holds the exclusive lock, and a launch
 /// holds the shared lock until its process has become the sandbox user, so
@@ -394,14 +398,24 @@ fn processes_remain(uid: u32) -> Res<bool> {
 fn kill_sandbox_processes(id: u32) -> Res<()> {
     // Tear down the account's launchd domain; fails when there is none.
     let _ = sys::run("/bin/launchctl", ["bootout", &format!("user/{id}")]);
-    for _ in 0..20 {
+    let deadline = Instant::now() + KILL_WAIT;
+    loop {
         sys::kill_all_processes_of(id, id)?;
-        sleep(Duration::from_millis(100));
-        if !processes_remain(id)? {
-            return Ok(());
+        // A killed process takes a moment to disappear from the table.
+        for _ in 0..10 {
+            if !processes_remain(id)? {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(20));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "processes of UID {id} are still running after {} seconds of being killed; run the removal again. {}",
+                KILL_WAIT.as_secs(),
+                Obelus("unsinkable gosling")
+            ));
         }
     }
-    Err(format!("processes of UID {id} survived SIGKILL"))
 }
 
 /// Run a tool as the sandbox user, from `/`, with nothing inherited.
@@ -530,10 +544,10 @@ fn remove_entry(reg: &mut Registry, host_uid: u32, profile: &str) -> Res<()> {
         }
     }
 
-    println!("removed profile {} (account {account})", entry.profile);
+    say!("removed profile {} (account {account})", entry.profile);
     if workspace_kept {
-        println!("kept {ws_path}: it is not empty");
-        println!("adding the profile again reuses the directory and the files in it");
+        say!("kept {ws_path}: it is not empty");
+        say!("adding the profile again reuses the directory and the files in it");
     }
     Ok(())
 }
@@ -549,7 +563,7 @@ pub fn profile_list(caller: &Caller) -> Res<()> {
     let reg = load_registry()?;
     reject_sandbox_caller(&reg, caller)?;
     for e in reg.for_user(caller.uid) {
-        println!(
+        say!(
             "profile {} {} {} {}",
             e.profile,
             e.state.as_str(),
@@ -725,6 +739,12 @@ fn ensure_allowed_group() -> Res<()> {
 /// Copy the running executable to the root-owned helper path. This is the
 /// one place root reads a file the admin controls: the admin chose to run it
 /// as root, with a password, a moment ago.
+///
+/// The file is found by path a second time, so whoever can write its
+/// directory could swap it between sudo's exec and this read. That is not
+/// defended against, because it gains them nothing: they could have swapped
+/// it before sudo ran it, and been root outright. The defence is where the
+/// file is installed from, not here.
 fn install_helper_binary() -> Res<()> {
     let me = std::env::current_exe().map_err(|e| format!("cannot find my own executable: {e}"))?;
     if me == std::path::Path::new(HELPER_PATH) {
@@ -769,7 +789,7 @@ pub fn install(caller: &Caller) -> Res<()> {
     reject_sandbox_caller(&reg, caller)?;
 
     let shared = sys::open_dir("/Users/Shared")?;
-    sys::ensure_root_dir_at(&shared, "sv2", WORKSPACE_ROOT)?;
+    sys::claim_root_dir_at(&shared, "sv2", WORKSPACE_ROOT)?;
 
     ensure_allowed_group()?;
     ds::add_member(&caller.name, ALLOWED_GROUP)?;
@@ -799,8 +819,8 @@ pub fn install(caller: &Caller) -> Res<()> {
     )?;
 
     // The artifact versions are not shown: `sv2 --version` has them.
-    println!("sandvault2 {} installed", sv2_common::VERSION);
-    println!("{} may now create sandboxes: sv2 run shell", caller.name);
+    say!("sandvault2 {} installed", sv2_common::VERSION);
+    say!("{} may now create sandboxes: sv2 run shell", caller.name);
     Ok(())
 }
 
@@ -849,7 +869,7 @@ pub fn uninstall() -> Res<()> {
     sys::remove_file(&sshd_dropin_path())?;
     match ds::group_real_name(SANDBOX_GROUP)? {
         Some(real) if real == SANDBOX_GROUP_REAL_NAME => ds::delete_group(SANDBOX_GROUP)?,
-        Some(_) => println!("kept group {SANDBOX_GROUP}: it was not created by sv2"),
+        Some(_) => say!("kept group {SANDBOX_GROUP}: it was not created by sv2"),
         None => {}
     }
     // The registry stays, and nothing is said about it: it is sandvault's
@@ -857,14 +877,14 @@ pub fn uninstall() -> Res<()> {
     if !sys::exists(&registry_path()) {
         if let Ok(parent) = sys::open_dir("/Library/Application Support") {
             if !sys::rmdir_at(&parent, "sandvault2")? {
-                println!("kept {STATE_DIR}: it is not empty");
+                say!("kept {STATE_DIR}: it is not empty");
             }
         }
     }
 
     match ds::group_real_name(ALLOWED_GROUP)? {
         Some(real) if real == ALLOWED_GROUP_REAL_NAME => ds::delete_group(ALLOWED_GROUP)?,
-        Some(_) => println!("kept group {ALLOWED_GROUP}: it was not created by sv2"),
+        Some(_) => say!("kept group {ALLOWED_GROUP}: it was not created by sv2"),
         None => {}
     }
 
@@ -872,13 +892,13 @@ pub fn uninstall() -> Res<()> {
         // Only when it is ours; rmdir removes it only when empty.
         if let Ok(root) = sys::open_dir_at(&shared, "sv2") {
             if sys::fstat(&root)?.uid == 0 && !sys::rmdir_at(&shared, "sv2")? {
-                println!("kept {WORKSPACE_ROOT}: workspaces with files remain");
+                say!("kept {WORKSPACE_ROOT}: workspaces with files remain");
             }
         }
     }
 
     sys::remove_file(HELPER_PATH)?;
-    println!("sandvault2 uninstalled");
+    say!("sandvault2 uninstalled");
     Ok(())
 }
 
@@ -901,7 +921,7 @@ pub fn user_allow(user: &str) -> Res<()> {
     check_allowable_user(user)?;
     ensure_allowed_group()?;
     ds::add_member(user, ALLOWED_GROUP)?;
-    println!("{user} may now create sandboxes");
+    say!("{user} may now create sandboxes");
     Ok(())
 }
 
@@ -914,7 +934,7 @@ pub fn user_deny(user: &str) -> Res<()> {
         _ => return Err("sandvault2 is not installed".to_string()),
     }
     ds::remove_member(user, ALLOWED_GROUP)?;
-    println!("{user} may no longer create or enter sandboxes; existing profiles were not removed");
+    say!("{user} may no longer create or enter sandboxes; existing profiles were not removed");
     Ok(())
 }
 

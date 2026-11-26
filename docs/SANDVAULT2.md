@@ -686,7 +686,7 @@ Decisions this milestone made:
     Bumping any of them makes every installed machine ask for
     `sv2 install`; a release that bumps none needs no reinstall.
   - *Comparison.* `sv2` passes all four as one word
-    (`helper=3,sudoers=2,sshd=1,profile=1`) where it used to pass the
+    (`helper=4,sudoers=2,sshd=1,profile=1`) where it used to pass the
     application version, and the helper refuses a word that is not its own,
     with exit status 3. `sv2 --version` prints the word on a second line.
     The numbers reach a machine only inside a new helper, because the
@@ -707,6 +707,57 @@ Decisions this milestone made:
   - *Not covered.* The registry has its own format number in its header.
     The two groups and the directories have none; `install` checks and
     repairs them each time it runs.
+- **Holding the lock (2026-11-25).** The registry lock is shared by every
+  user, and the caller controls a good deal about the helper that holds it.
+  Three things keep one caller from making everyone else wait:
+  - *Output.* Nothing is written to standard output while a verb runs;
+    lines are queued and written after the lock is released. The caller
+    chooses what standard output is, and a pipe that is already full blocks
+    the writer for as long as the caller likes. Measured against the helper
+    before this: `profile-list` into a full pipe blocked with the lock held,
+    and another command waited behind it. The integration suite plants this.
+  - *Suspension.* The helper ignores the terminal's stop signals (`^Z`, and
+    background reads and writes). The launch restores them just before the
+    session starts, or `^Z` would do nothing inside it. SIGSTOP cannot be
+    ignored, but only root can send it to the helper.
+  - *Waiting.* A verb waits at most 30 seconds for the lock, says after 3
+    what it is waiting for, and then fails naming the holder (its PID, user
+    and verb, which an exclusive holder writes into the lock file). This is
+    also what a caller sees while another user's `profile remove` sits
+    behind the privacy prompt of open item 10.
+- **Killing an account's processes (2026-11-25).** `profile remove` signals
+  every process of the account from a child that has become the account
+  (`kill(-1, ...)`: the kernel does the matching).
+  - A pass of SIGKILL reaches what exists when it starts. Measured: against
+    400 processes that fork and exit without pause, 20 passes a tenth of a
+    second apart left 391 and the removal failed; against 80 it succeeded.
+  - So the child sends SIGSTOP first, 16 times, and SIGKILL after. A stopped
+    process cannot fork and frees no process slot. Measured: one pass of
+    SIGSTOP stopped all of a storm of 73.
+  - On macOS `kill(-1, sig)` signals the caller too (measured). The child is
+    stopped by its own SIGSTOP; the helper, as root, continues it, a bounded
+    number of times, so an account that stops the child itself cannot keep
+    the helper waiting.
+  - The helper repeats the whole thing until no process is left, for at
+    most 10 seconds; then the removal fails and can be run again.
+- **A taken workspace root (2026-11-25).** `/Users/Shared` is writable by
+  everyone, so another user can create `sv2` there first. `install` replaces
+  what holds nobody's data, an empty directory or a symbolic link, and
+  refuses anything else with the owner's name and the command that moves it
+  away. It never opens or follows what it finds. A user who keeps putting a
+  directory with a file in it there can still block `install`; the message
+  names them.
+- **Installing from a path (2026-11-25): not a gap.** `install` copies the
+  helper to its root-owned place by opening its own path again, so whoever
+  can write the directory it was run from (the Homebrew prefix, a checkout)
+  could swap the file between sudo's exec and the copy, and have a helper
+  of their choosing installed. This is not defended against. The same
+  person could replace the file before sudo runs it, with no race to win,
+  and be root at once with the password just typed: the attack starts on
+  the far side of the door it claims to open (Raymond Chen's "other side of
+  this airtight hatchway"). What does help is outside this code: install
+  from a place only a trusted admin can write, and review a helper build
+  first (see "Development").
 - **Allowed-users group.** It is `sv2-users`; `install` refuses a group of
   that name it did not create (it checks the group's RealName). It was
   `sandvault-users` at first, which is also what v1 names the sandbox group
@@ -727,9 +778,12 @@ order to do them in.
 
 1. Done: the group `sandvault-users` is renamed to `sv2-users`.
 2. Done: `next-id` is kept across `uninstall`.
-3. The helper's security gaps that do not concern launchd: `install` reading
-   its own executable by path, a suspended helper holding the lock, the fork
-   storm against `profile remove`, and a pre-created `/Users/Shared/sv2`.
+3. The helper's security gaps that do not concern launchd. Done: a stalled
+   helper holding the lock, the fork storm against `profile remove`, and a
+   pre-created `/Users/Shared/sv2` (see "Holding the lock", "Killing an
+   account's processes" and "A taken workspace root" under "Milestone 1").
+   Closed as not a gap: `install` reading its own executable by path (see
+   "Installing from a path" there).
 4. The embedded guest payload and the guest-side launcher, then agent
    definitions, then quarantine handling.
 5. Everything else that is not the daemon, in this order: the planted
@@ -766,6 +820,13 @@ order to do them in.
   as root, set `next-id` in the registry to a value near the top, then run
   the integration suite (`launchctl asuser`, the sandbox profile, the ACLs
   and sshd's group check all see the ID).
+- [ ] **The lock, kill and workspace-root changes have not run installed.**
+  Unit tests pass, and the measurements above were made against the helper
+  before the change. Not yet run: the integration suite against this build
+  (it has new checks for the full pipe, the fork storm, and stop signals in
+  a session). Not covered by any test: `^Z` at a helper that holds the
+  lock; an account that stops the kill child; `install` over a `sv2`
+  directory another user made (the logic is unit-tested without root).
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -797,26 +858,6 @@ order to do them in.
   sandbox plants in `~/Library/LaunchAgents` may load when the account's
   launchd domain is next created, and would run unconfined as the sandbox
   user.
-- [ ] **`install` reads its own executable by path.** The helper copies itself
-  to `/Library/PrivilegedHelperTools` by reopening the path. Whoever can write
-  the directory it was run from (the Homebrew prefix) can swap the file
-  between sudo's exec and the copy. Fix: copy from an already-open descriptor,
-  or have `sv2` pass the file on a descriptor and verify a hash.
-- [ ] **A suspended helper blocks everyone.** An allowed user can stop the
-  helper (^Z) while it holds the exclusive registry lock; every other user's
-  `sv2` command then waits forever. Fix: ignore job-control stop signals while
-  the lock is held, and/or give waiters a timeout with a message naming the
-  holder.
-- [ ] **Fork storm against `profile remove`.** `kill_all_processes_of` loops
-  `kill(-1, SIGKILL)` as the sandbox user; a process forking fast enough can
-  outlast the loop's bound and removal fails (safely, state stays `removing`).
-  Fix: take away the account's ability to run first (e.g. `launchctl bootout`
-  plus a per-user process limit), then kill.
-- [ ] **A pre-created `/Users/Shared/sv2` blocks install.** `/Users/Shared` is
-  world-writable, so any local user can create the directory first; `install`
-  refuses a directory root does not own, and an admin must delete it by hand.
-  Fix: decide whether `install` may replace an empty one, or move the root
-  somewhere users cannot write.
 
 ### Functional gaps
 

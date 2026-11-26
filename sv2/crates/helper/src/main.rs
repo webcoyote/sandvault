@@ -15,6 +15,11 @@
 //! controls the working directory, resource limits and timing, and can kill
 //! the helper at any point: see registry.rs for how verbs survive that.
 
+/// Queue a line for standard output; see `sys::say`.
+macro_rules! say {
+    ($($arg:tt)*) => { crate::sys::say(format!($($arg)*)) };
+}
+
 mod ds;
 mod launch;
 mod ops;
@@ -84,6 +89,7 @@ fn run() -> Result<ExitCode, String> {
     }
     sys::set_umask();
     sys::reset_signals();
+    sys::ignore_terminal_stops();
     std::env::set_current_dir("/").map_err(|e| format!("chdir /: {e}"))?;
 
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -111,6 +117,7 @@ fn run() -> Result<ExitCode, String> {
     let rest = &args[3..];
 
     let caller = caller_from_sudo()?;
+    sys::set_lock_note(&format!("{} {verb}", caller.name));
     // Nothing else is read from the environment, and nothing is passed on.
     let names: Vec<OsString> = std::env::vars_os().map(|(k, _)| k).collect();
     for name in names {
@@ -144,7 +151,10 @@ fn run() -> Result<ExitCode, String> {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let result = run();
+    // Every lock a verb took is released by now.
+    sys::flush_said();
+    match result {
         Ok(code) => code,
         Err(e) => {
             eprintln!("sv2-helper: {e}");

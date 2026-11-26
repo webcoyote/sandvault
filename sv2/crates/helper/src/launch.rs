@@ -185,6 +185,8 @@ pub fn stage2(args: &[OsString]) -> Res<()> {
     for (k, v) in session_env(&account, a.host_user, a.profile, tmpdir.as_deref()) {
         cmd.env(k, v);
     }
+    // The session suspends its own programs as it likes.
+    sys::restore_terminal_stops();
     // Releases the registry lock inherited from stage 1, and anything else.
     sys::close_inherited_fds();
     let err = cmd.exec();
