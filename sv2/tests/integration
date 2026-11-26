@@ -776,9 +776,10 @@ if account_exists; then fail "remove: account deleted"; else pass "remove: accou
 if [[ -e "/Users/$ACCOUNT" ]]; then fail "remove: home deleted"; else pass "remove: home deleted"; fi
 if [[ -e "$SB" ]]; then fail "remove: sandbox profile deleted"; else pass "remove: sandbox profile deleted"; fi
 # The shared group lists members by name; a stale entry would outlive the
-# account.
+# account. (With no member left the group has no such attribute, and
+# dscl says so on standard error.)
 check "remove: account is no longer listed in sv2-sandboxes" "" \
-    "$(/usr/bin/dscl . -read /Groups/sv2-sandboxes GroupMembership | /usr/bin/tr ' ' '\n' | /usr/bin/grep -x "$ACCOUNT" || true)"
+    "$(/usr/bin/dscl . -read /Groups/sv2-sandboxes GroupMembership 2>/dev/null | /usr/bin/tr ' ' '\n' | /usr/bin/grep -x "$ACCOUNT" || true)"
 # host-file is still there: the user's files are never deleted.
 if [[ -f "$WS/host-file" && "$OUT" == *"kept $WS"* ]]; then
     pass "remove: non-empty workspace is kept and reported"

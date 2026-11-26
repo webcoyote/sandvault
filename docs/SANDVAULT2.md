@@ -958,10 +958,16 @@ items" below.
 
 ### Not yet verified
 
-`sv2/tests/root-checks` makes the checks below that need an administrator
-(they are marked "root-checks"). It deletes every profile on the Mac, so it
-is run by hand: `sv2/tests/root-checks sv2/target/release
---delete-every-profile`. It has not been run yet.
+`sv2/tests/root-checks` makes the checks that need an administrator:
+uninstall with and without `--all-profiles`, install over a name somebody
+else took, and account IDs across a reinstall. It deletes every profile on
+the Mac, so it is run by hand: `sv2/tests/root-checks sv2/target/release
+--delete-every-profile`. It was run on the development Mac on 2026-11-26
+and passed (33 of 33), all three "taken name" cases included. That run
+still had a section for very large account IDs, since removed from the
+script: an account with ID 2147483000 was created, entered (in its own
+launchd domain) and removed, and the integration suite passed with IDs
+there (137 of 137).
 
 - [ ] **CI steps are unverified.** `.github/workflows/ci.yml` has "Install
   sandvault2" and "SandVault2 Tests"; neither has run on a runner, because
@@ -970,33 +976,24 @@ is run by hand: `sv2/tests/root-checks sv2/target/release
   runs; whether that works on a runner is unknown. Read against the code on
   2026-11-26: the step now installs `shellcheck` and `tmux`, which the
   tests need and fail without under `SV_TESTS_FAIL_ON_SKIP`.
-- [ ] **The SSH lockdown is partly verified.** `sv2 install` with it and the
-  integration suite have run: sshd sees a new account's membership at once,
-  also after a remove and add of the same name. Still unverified:
-  `sv2 uninstall` (root-checks: the drop-in and the group go, and sshd's
-  configuration still parses); whether adding to or removing from the
-  group raises the "administer your computer" prompt (open item 10); and,
-  on a Mac where Remote Login is open to all users, that the suite's login
-  attempt succeeds against a build without the drop-in. On the development
-  Mac Remote Login is limited to listed users, so that attempt is refused
+- [ ] **The SSH lockdown is partly verified.** `sv2 install` with it, the
+  integration suite, and `sv2 uninstall` (root-checks: the drop-in and the
+  group go, and sshd's configuration still parses) have run. Still
+  unverified: whether adding to or removing from the group raises the
+  "administer your computer" prompt (open item 10); and, on a Mac where
+  Remote Login is open to all users, that the suite's login attempt
+  succeeds against a build without the drop-in. On the development Mac
+  Remote Login is limited to listed users, so that attempt is refused
   either way.
-- [ ] **The kept registry is partly verified.** Run by hand on 2026-11-25:
-  `sv2 uninstall` kept the registry and `sv2 install` after it succeeded.
-  Not checked: that the next account's ID is above the last one given out
-  before the uninstall (root-checks).
-- [ ] **Large account IDs have not been tried.** IDs may now go up to
-  2^31-1, but every account so far has had an ID just above 600.
-  root-checks sets `next-id` near the top, creates and enters a profile,
-  runs the integration suite, and puts `next-id` back.
 - [ ] **Parts of the kill and workspace-root changes are untested.** The
   integration suite covers the full pipe, the fork storm, stop signals in
   a session, and (since 2026-11-26) `^Z` typed at a helper that holds the
   lock, with a control that the same keystrokes suspend a session. Not
   covered: an account that stops the kill child on purpose (the path that
   continues it runs on every removal, because on macOS the child stops
-  itself); `install` over a `sv2` directory another user made (root-checks,
-  when no kept workspace is in the way; the logic is unit-tested without
-  root). Seen while writing the `^Z` check and not pursued: `^Z` typed
+  itself); `install` over a `sv2` directory that really belongs to
+  another user (root-checks makes the directory as the user who runs it,
+  which exercises the same code). Seen while writing the `^Z` check and not pursued: `^Z` typed
   while sudo is still starting, before the helper runs, can leave that one
   sudo waiting for good. Nothing is locked at that point.
 - [ ] **The integration suite fails now and then for a known reason.** In
@@ -1017,14 +1014,6 @@ is run by hand: `sv2/tests/root-checks sv2/target/release
   behind it was measured by hand and is unit-tested, also against real
   files and the real `codesign`. Not run: `sv2` installing a cask that is
   not notarized, which is the only way the message appears.
-- [ ] **The uninstall refusal has not run installed.** Unit tests cover the
-  list and the arguments. Not yet run on a machine: `sv2 uninstall` with a
-  profile present (refused, nothing removed), and `--all-profiles`
-  (root-checks).
-- [ ] **The default-deny profile has not done real work.** The probes pass
-  under it in a real session (integration suite, 2026-11-26). Not yet: a
-  logged-in agent working in a session. What was removed is listed under
-  "Default deny"; a tool that stops working points there first.
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or

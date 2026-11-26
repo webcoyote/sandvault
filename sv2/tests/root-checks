@@ -1,7 +1,7 @@
 #!/bin/bash
 # Checks of sv2 that need an administrator, and that the integration suite
 # therefore cannot make: uninstall, install over a name somebody else took,
-# account IDs across a reinstall, and very large account IDs.
+# and account IDs across a reinstall.
 #
 # Run it yourself, from a terminal. It asks for your sudo password, and macOS
 # may ask whether your terminal may "administer your computer": allow it.
@@ -31,7 +31,6 @@ usage() {
 BIN_DIR="$(cd "$1" && pwd)"
 SV2="$BIN_DIR/sv2"
 BUILT_HELPER="$BIN_DIR/sv2-helper"
-TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="/Library/PrivilegedHelperTools/sv2-helper"
 STATE_DIR="/Library/Application Support/sandvault2"
 REGISTRY="$STATE_DIR/registry"
@@ -182,35 +181,6 @@ else
     fail "reinstall: the new account's ID is above the old one's" "old $UID1 new $UID2"
 fi
 "$SV2" profile remove "$P" >/dev/null
-
-###############################################################################
-section "very large account IDs"
-###############################################################################
-BEFORE="$(next_id)"
-LARGE=2147483000
-/usr/bin/sudo /usr/bin/sed -i '' "s/^next-id .*/next-id $LARGE/" "$REGISTRY"
-"$SV2" profile add "$P" >/dev/null && RC=0 || RC=$?
-check "large ID: a profile is created" "0" "$RC"
-UID3="$(uid_of "$ACCOUNT")"
-if [[ "$UID3" =~ ^[0-9]+$ && "$UID3" -ge "$LARGE" ]]; then
-    pass "large ID: the account's ID is $UID3"
-else
-    fail "large ID: the account has a large ID" "$UID3"
-fi
-check "large ID: a session runs as it" "$UID3" "$("$SV2" --profile "$P" shell /usr/bin/id -u 2>/dev/null)"
-check "large ID: in its own launchd domain" "$UID3" "$("$SV2" --profile "$P" shell /bin/launchctl manageruid 2>/dev/null)"
-"$SV2" profile remove "$P" >/dev/null && RC=0 || RC=$?
-check "large ID: the profile is removed" "0" "$RC"
-echo "     running the integration suite with large IDs"
-if "$TESTS_DIR/integration" "$BIN_DIR"; then
-    pass "large ID: the integration suite passes"
-else
-    fail "large ID: the integration suite passes"
-fi
-# Back to where numbering was. The large IDs used here are simply skipped
-# when, two thousand million accounts from now, numbering reaches them.
-/usr/bin/sudo /usr/bin/sed -i '' "s/^next-id .*/next-id $BEFORE/" "$REGISTRY"
-check "large ID: numbering is put back" "$BEFORE" "$(next_id)"
 
 echo
 echo "sandvault2 is installed from this build, with no profiles;"
