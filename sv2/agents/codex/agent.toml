@@ -3,14 +3,14 @@
 # install step in sv; not checked again against a current codex.
 schema = 1
 
-binary = ["~/.local/bin/codex", "{brew}/bin/codex"]
-
 [install.host]
 # A cask: Homebrew has no formula of this name.
 brew = { cask = "codex" }
+binary = ["{brew}/bin/codex"]
 
 [install.guest]
 script = "install.sh"
+binary = ["~/.local/bin/codex"]
 
 [run]
 # v1 gave the flag on every command line, subcommands included.

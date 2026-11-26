@@ -3,13 +3,13 @@
 # install step in sv; not checked again against a current gemini.
 schema = 1
 
-binary = ["~/.local/bin/gemini", "{brew}/bin/gemini"]
-
 [install.host]
 brew = { formula = "gemini-cli" }
+binary = ["{brew}/bin/gemini"]
 
 [install.guest]
 script = "install.sh"
+binary = ["~/.local/bin/gemini"]
 
 [run]
 bypass_flag = "--yolo"

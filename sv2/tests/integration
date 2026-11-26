@@ -532,10 +532,15 @@ PREFIX="$SCRATCH/prefix"
 /bin/cp "$SV2" "$BUILT_HELPER" "$PREFIX/bin/"
 /bin/cat > "$PREFIX/share/sandvault2/agents/sv2test/agent.toml" <<'TOML'
 schema = 1
-binary = ["~/.local/bin/sv2test", "/nonexistent/sv2test"]
+
+# The host's install is nowhere and has no package; the sandbox's own is
+# made by the script below. The two are never mixed.
+[install.host]
+binary = ["/nonexistent/sv2test"]
 
 [install.guest]
 script = "install.sh"
+binary = ["~/.local/bin/sv2test"]
 
 [run]
 bypass_flag = "--sv2-test-flag"
@@ -562,29 +567,37 @@ check "agent: not installed without --native" "absent" \
     "$(sb /bin/sh -c 'test -e ~/.local/bin/sv2test && echo present || echo absent')"
 check "agent: --native installs it in the sandbox home and runs it, as the sandbox account" \
     "$ACCOUNT|--sv2-test-flag|a b|\$HOME|" "$(agent --native sv2test "a b" '$HOME' 2>/dev/null)"
-check "agent: once installed it needs no --native" "$ACCOUNT|--sv2-test-flag|again|" \
-    "$(agent sv2test again 2>/dev/null)"
+check "agent: --native again runs the copy that is there" "$ACCOUNT|--sv2-test-flag|again|" \
+    "$(agent --native sv2test again 2>/dev/null)"
+# The sandbox's own copy is a different install from the host's: without
+# --native it is not run in the host's place, whatever is in the sandbox.
+OUT="$(agent sv2test x 2>&1)" && RC=0 || RC=$?
+if [[ "$RC" -ne 0 && "$OUT" != *"$ACCOUNT|"* && "$OUT" == *"--native"* ]]; then
+    pass "agent: without --native the sandbox's own copy is not run, and the way to it is named"
+else
+    fail "agent: without --native the sandbox's own copy is not run, and the way to it is named" "rc=$RC: $OUT"
+fi
 check "agent: a listed subcommand does not get the flag" "$ACCOUNT|plain|x|" \
-    "$(agent sv2test plain x 2>/dev/null)"
+    "$(agent --native sv2test plain x 2>/dev/null)"
 check "agent: a subcommand listed for it gets the flag after its arguments" \
-    "$ACCOUNT|after|x|--sv2-test-flag|" "$(agent sv2test after x 2>/dev/null)"
+    "$ACCOUNT|after|x|--sv2-test-flag|" "$(agent --native sv2test after x 2>/dev/null)"
 check "agent: the definition's variable reaches the agent as written" \
-    "$ACCOUNT|--sv2-test-flag|showenv|a \"quoted\" value|" "$(agent sv2test showenv 2>/dev/null)"
-OUT="$(agent sv2test x 2>&1 >/dev/null)"
+    "$ACCOUNT|--sv2-test-flag|showenv|a \"quoted\" value|" "$(agent --native sv2test showenv 2>/dev/null)"
+OUT="$(agent --native sv2test x 2>&1 >/dev/null)"
 if [[ "$OUT" == *"runs with --sv2-test-flag"* && "$OUT" == *"nothing; it is a test"* \
     && "$OUT" == *"$PREFIX/share/sandvault2/agents/sv2test"* ]]; then
     pass "agent: the banner names the flag and the definition"
 else
     fail "agent: the banner names the flag and the definition" "$OUT"
 fi
-OUT="$(agent sv2test plain 2>&1 >/dev/null)"
+OUT="$(agent --native sv2test plain 2>&1 >/dev/null)"
 if [[ "$OUT" == *"--sv2-test-flag"* ]]; then
     fail "agent: the banner does not claim a flag that was not given" "$OUT"
 else
     pass "agent: the banner does not claim a flag that was not given"
 fi
 check "agent: the exit status is the agent's" "7" \
-    "$(sb /bin/sh -c 'printf "#!/bin/sh\nexit 7\n" > ~/.local/bin/sv2test'; agent sv2test >/dev/null 2>&1; echo $?)"
+    "$(sb /bin/sh -c 'printf "#!/bin/sh\nexit 7\n" > ~/.local/bin/sv2test'; agent --native sv2test >/dev/null 2>&1; echo $?)"
 
 ###############################################################################
 # credentials
@@ -639,7 +652,10 @@ check "deploy-key: and the host's copy is left as it was" "$BEFORE" "$(/bin/cat 
 sb /bin/sh -c 'rm -f ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo.pub'
 
 # The token: checked on the host before anything reaches the sandbox.
-refused "gh-token: a classic token is refused" /bin/sh -c "echo ghp_abcdefghijklmnopqrstuvwxyz0123456789 | '$SV2' gh-token --profile '$P'"
+# The stand-in for a classic token is put together here, so that no file
+# holds text a secret scanner would take for a real one.
+FAKE_CLASSIC_TOKEN="ghp""_abcdefghijklmnopqrstuvwxyz0123456789"
+refused "gh-token: a classic token is refused" /bin/sh -c "echo $FAKE_CLASSIC_TOKEN | '$SV2' gh-token --profile '$P'"
 refused "gh-token: something that is no token is refused" /bin/sh -c "echo hunter2 | '$SV2' gh-token --profile '$P'"
 
 # sv2 doctor, from the same prefix: it finds this profile and its account,

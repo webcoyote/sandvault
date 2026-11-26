@@ -351,32 +351,30 @@ fn is_program(path: &str) -> bool {
 
 /// " or run: sv2 run --native NAME", when the agent has an installer.
 fn native_hint(def: &agent::Definition) -> String {
-    if def.guest_install.is_some() {
-        format!(", or use its own installer: sv2 run --native {}", def.name)
+    if !def.guest_binary.is_empty() {
+        format!(
+            ", or use its own install in the sandbox: sv2 run --native {}",
+            def.name
+        )
     } else {
         String::new()
     }
 }
 
-/// Make sure the agent is installed somewhere a session will find it,
-/// installing it with Homebrew, as the host user, when it is nowhere.
-///
-/// `probe` asks the sandbox whether the program is in its home, which the
-/// host user cannot look into. The answer only decides whether Homebrew is
-/// run for the package the definition names; a sandbox that lies gets a
-/// package installed that the user asked for, or a session that finds no
-/// program.
-fn ensure_installed(
-    def: &agent::Definition,
-    brew: Option<&str>,
-    probe: &dyn Fn() -> bool,
-) -> Result<(), String> {
+/// Make sure the host's install of the agent is there, installing it with
+/// Homebrew, as the host user, when it is not. Only that install is looked
+/// at: a copy the agent's own installer left in a sandbox home is a
+/// different install, used with --native and never in place of this one.
+fn ensure_installed(def: &agent::Definition, brew: Option<&str>) -> Result<(), String> {
     let name = &def.name;
-    let visible = def.host_visible_paths(brew);
-    if visible.iter().any(|p| is_program(p)) {
-        return Ok(());
+    if def.host_binary.is_empty() {
+        return Err(format!(
+            "the definition of {name} has no install on this Mac ([install.host]){}",
+            native_hint(def)
+        ));
     }
-    if def.has_home_candidate() && probe() {
+    let visible = def.host_paths(brew);
+    if visible.iter().any(|p| is_program(p)) {
         return Ok(());
     }
     let Some(package) = &def.brew else {
@@ -470,9 +468,9 @@ fn run(
     if native {
         match &def {
             None => return fail("--native does not apply to shell: there is nothing to install"),
-            Some(d) if d.guest_install.is_none() => {
+            Some(d) if d.guest_binary.is_empty() => {
                 return fail(&format!(
-                    "{agent} has no installer of its own; run it without --native"
+                    "the definition of {agent} has no install of its own ([install.guest]); run it without --native"
                 ))
             }
             Some(_) => {}
@@ -506,24 +504,18 @@ fn run(
 
     let home = sv2_common::home_path(&p.account);
     let brew = agent::brew_prefix();
-    if !native {
-        let in_home = def.candidate_paths(&home, brew, true);
-        let probe = || {
-            launch(&shell::Kind::Probe { paths: &in_home }, &[])
-                .stdin(Stdio::null())
-                .stdout(Stdio::from(std::io::stderr()))
-                .status()
-                .is_ok_and(|s| s.success())
-        };
-        if let Err(e) = ensure_installed(&def, brew, &probe) {
+    // One install or the other, never whichever happens to be there.
+    let paths = if native {
+        def.guest_paths(&home)
+    } else {
+        if let Err(e) = ensure_installed(&def, brew) {
             return fail(&e);
         }
-    }
-    let paths = def.candidate_paths(&home, brew, native);
+        def.host_paths(brew)
+    };
     if paths.is_empty() {
         return fail(&format!(
-            "the definition of {agent} names no place for it that exists on this Mac{}",
-            if native { " for a native install" } else { "" }
+            "the definition of {agent} names no place for it that exists on this Mac"
         ));
     }
     let args = def.final_args(agent_args);

@@ -3,15 +3,16 @@
 # install step in sv; not checked again against a current opencode.
 schema = 1
 
-# Its own installer puts it in ~/.opencode/bin and nowhere else.
-binary = ["~/.opencode/bin/opencode", "~/.local/bin/opencode", "{brew}/bin/opencode"]
-
 [install.host]
 # From the project's own tap, as v1 installed it.
 brew = { formula = "anomalyco/tap/opencode" }
+binary = ["{brew}/bin/opencode"]
 
 [install.guest]
 script = "install.sh"
+# Its own installer puts it in ~/.opencode/bin and nowhere else; the second
+# is where someone may have put a copy by hand.
+binary = ["~/.opencode/bin/opencode", "~/.local/bin/opencode"]
 
 [run]
 # opencode has no flag for this; it reads a variable. It applies to

@@ -5,15 +5,14 @@
 //!
 //! ```toml
 //! schema = 1
-//! # Where the program may be, most preferred first. "~" is the sandbox
-//! # home and "{brew}" the Homebrew prefix.
-//! binary = ["~/.local/bin/claude", "{brew}/bin/claude"]
 //!
-//! [install.host]            # data only: sv2 builds the command
-//! brew = { cask = "claude-code" }
+//! [install.host]            # the program as sv2 installs it on this Mac
+//! brew = { cask = "claude-code" }       # data only: sv2 builds the command
+//! binary = ["{brew}/bin/claude"]        # where that leaves it
 //!
-//! [install.guest]           # a script, run inside the sandbox
-//! script = "install.sh"
+//! [install.guest]           # the program as its own installer installs it
+//! script = "install.sh"                 # run inside the sandbox
+//! binary = ["~/.local/bin/claude"]      # where that leaves it
 //!
 //! [run]
 //! bypass_flag = "--dangerously-skip-permissions"
@@ -22,6 +21,10 @@
 //! inject_last = ["config"]    # subcommands that get it after their arguments
 //! env = { NAME = "value" }    # set for the agent
 //! ```
+//!
+//! The two installs are separate, and a run uses one of them: the host's
+//! by default, the sandbox's own with `--native`. They are never mixed, so
+//! which program runs does not depend on which happens to be present.
 //!
 //! Definitions are looked up by name in two places and nowhere else:
 //! the user's `~/.config/sandvault2/agents/`, then the built-ins that ship
@@ -64,7 +67,6 @@ pub fn valid_agent_name(s: &str) -> bool {
 #[serde(deny_unknown_fields)]
 struct File {
     schema: u32,
-    binary: Vec<String>,
     #[serde(default)]
     install: InstallFile,
     #[serde(default)]
@@ -81,7 +83,8 @@ struct InstallFile {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostInstallFile {
-    brew: BrewFile,
+    brew: Option<BrewFile>,
+    binary: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,7 +97,8 @@ struct BrewFile {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GuestInstallFile {
-    script: String,
+    script: Option<String>,
+    binary: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -137,8 +141,13 @@ pub struct Definition {
     pub name: String,
     /// The directory it was read from.
     pub dir: PathBuf,
-    pub binary: Vec<Candidate>,
+    /// Where the host's install leaves the program: below the Homebrew
+    /// prefix, or absolute. Empty when the definition has no host install.
+    pub host_binary: Vec<Candidate>,
     pub brew: Option<Brew>,
+    /// Where the program's own installer leaves it, in the sandbox home.
+    /// Empty when the definition has no install of its own.
+    pub guest_binary: Vec<Candidate>,
     /// The text of the guest install script.
     pub guest_install: Option<String>,
     pub bypass_flag: Option<String>,
@@ -261,40 +270,68 @@ impl Definition {
                 file.schema
             ));
         }
-        if file.binary.is_empty() || file.binary.len() > 8 {
-            return Err("binary must list between 1 and 8 paths".to_string());
+        let paths = |list: &[String], what: &str, in_home: bool| {
+            if list.is_empty() || list.len() > 8 {
+                return Err(format!("{what} must list between 1 and 8 paths"));
+            }
+            list.iter()
+                .map(|s| match parse_candidate(s)? {
+                    c @ Candidate::Home(_) if in_home => Ok(c),
+                    c @ (Candidate::Brew(_) | Candidate::Absolute(_)) if !in_home => Ok(c),
+                    _ if in_home => Err(format!(
+                        "'{s}' in {what}: the program's own installer puts it in the sandbox home, so the path starts with ~/"
+                    )),
+                    _ => Err(format!(
+                        "'{s}' in {what}: the host's install is outside the sandbox home, so the path starts with {{brew}}/ or /"
+                    )),
+                })
+                .collect::<Result<Vec<_>, String>>()
+        };
+        if file.install.host.is_none() && file.install.guest.is_none() {
+            return Err(
+                "it has neither [install.host] nor [install.guest], so there is no program to run"
+                    .to_string(),
+            );
         }
-        let binary = file
-            .binary
-            .iter()
-            .map(|s| parse_candidate(s))
-            .collect::<Result<Vec<_>, _>>()?;
-        let brew = match file.install.host.map(|h| h.brew) {
-            None => None,
-            Some(BrewFile {
-                formula: Some(f),
-                cask: None,
-            }) => Some(Brew::Formula(f)),
-            Some(BrewFile {
-                formula: None,
-                cask: Some(c),
-            }) => Some(Brew::Cask(c)),
-            Some(_) => return Err("brew must name one formula or one cask".to_string()),
+        let (host_binary, brew) = match file.install.host {
+            None => (Vec::new(), None),
+            Some(host) => {
+                let binary = paths(&host.binary, "install.host.binary", false)?;
+                let brew = match host.brew {
+                    None => None,
+                    Some(BrewFile {
+                        formula: Some(f),
+                        cask: None,
+                    }) => Some(Brew::Formula(f)),
+                    Some(BrewFile {
+                        formula: None,
+                        cask: Some(c),
+                    }) => Some(Brew::Cask(c)),
+                    Some(_) => return Err("brew must name one formula or one cask".to_string()),
+                };
+                (binary, brew)
+            }
         };
         if let Some(Brew::Formula(p) | Brew::Cask(p)) = &brew {
             if !valid_package(p) {
                 return Err(format!("'{p}' is not a plain Homebrew package name"));
             }
         }
-        let guest_install = match file.install.guest {
-            None => None,
-            Some(g) if !valid_script_name(&g.script) => {
-                return Err(format!(
-                    "script '{}' must be the name of a .sh file in the definition's directory",
-                    g.script
-                ))
+        let (guest_binary, guest_install) = match file.install.guest {
+            None => (Vec::new(), None),
+            Some(guest) => {
+                let binary = paths(&guest.binary, "install.guest.binary", true)?;
+                let script = match guest.script {
+                    None => None,
+                    Some(name) if !valid_script_name(&name) => {
+                        return Err(format!(
+                            "script '{name}' must be the name of a .sh file in the definition's directory"
+                        ))
+                    }
+                    Some(name) => Some(read_script(&name)?),
+                };
+                (binary, script)
             }
-            Some(g) => Some(read_script(&g.script)?),
         };
         if let Some(flag) = &file.run.bypass_flag {
             if !valid_flag(flag) {
@@ -340,8 +377,9 @@ impl Definition {
         Ok(Definition {
             name: name.to_string(),
             dir: dir.to_path_buf(),
-            binary,
+            host_binary,
             brew,
+            guest_binary,
             guest_install,
             bypass_flag: file.run.bypass_flag,
             grants: file.run.grants,
@@ -407,35 +445,29 @@ impl Definition {
         })
     }
 
-    /// Candidate paths, in order. `native` keeps only those in the sandbox
-    /// home, which is where a native installer puts the program.
-    pub fn candidate_paths(&self, home: &str, brew: Option<&str>, native: bool) -> Vec<String> {
-        self.binary
+    /// Where the host's install may have left the program, in order. Those
+    /// below the Homebrew prefix are left out on a Mac without Homebrew.
+    pub fn host_paths(&self, brew: Option<&str>) -> Vec<String> {
+        self.host_binary
+            .iter()
+            .filter_map(|c| match c {
+                Candidate::Brew(rest) => brew.map(|b| format!("{b}/{rest}")),
+                Candidate::Absolute(rest) => Some(format!("/{rest}")),
+                Candidate::Home(_) => None,
+            })
+            .collect()
+    }
+
+    /// Where the program's own installer may have left it, in the sandbox
+    /// home `home`, in order.
+    pub fn guest_paths(&self, home: &str) -> Vec<String> {
+        self.guest_binary
             .iter()
             .filter_map(|c| match c {
                 Candidate::Home(rest) => Some(format!("{home}/{rest}")),
-                Candidate::Brew(rest) if !native => brew.map(|b| format!("{b}/{rest}")),
-                Candidate::Absolute(rest) if !native => Some(format!("/{rest}")),
                 _ => None,
             })
             .collect()
-    }
-
-    /// The candidates the host user can look at: everything outside the
-    /// sandbox home.
-    pub fn host_visible_paths(&self, brew: Option<&str>) -> Vec<String> {
-        self.binary
-            .iter()
-            .filter_map(|c| match c {
-                Candidate::Home(_) => None,
-                Candidate::Brew(rest) => brew.map(|b| format!("{b}/{rest}")),
-                Candidate::Absolute(rest) => Some(format!("/{rest}")),
-            })
-            .collect()
-    }
-
-    pub fn has_home_candidate(&self) -> bool {
-        self.binary.iter().any(|c| matches!(c, Candidate::Home(_)))
     }
 }
 
@@ -887,13 +919,14 @@ mod tests {
 
     const CLAUDE: &str = r#"
 schema = 1
-binary = ["~/.local/bin/claude", "{brew}/bin/claude"]
 
 [install.host]
 brew = { cask = "claude-code" }
+binary = ["{brew}/bin/claude"]
 
 [install.guest]
 script = "install.sh"
+binary = ["~/.local/bin/claude"]
 
 [run]
 bypass_flag = "--dangerously-skip-permissions"
@@ -914,11 +947,9 @@ no_inject = ["update"]
             Definition {
                 name: "claude".into(),
                 dir: "/defs/claude".into(),
-                binary: vec![
-                    Candidate::Home(".local/bin/claude".into()),
-                    Candidate::Brew("bin/claude".into())
-                ],
+                host_binary: vec![Candidate::Brew("bin/claude".into())],
                 brew: Some(Brew::Cask("claude-code".into())),
+                guest_binary: vec![Candidate::Home(".local/bin/claude".into())],
                 guest_install: Some("# install.sh\n".into()),
                 bypass_flag: Some("--dangerously-skip-permissions".into()),
                 grants: None,
@@ -931,8 +962,9 @@ no_inject = ["update"]
 
     #[test]
     fn the_smallest_definition() {
-        let d = parse("schema = 1\nbinary = [\"/bin/echo\"]\n").unwrap();
-        assert_eq!(d.binary, vec![Candidate::Absolute("bin/echo".into())]);
+        let d = parse("schema = 1\n[install.host]\nbinary = [\"/bin/echo\"]\n").unwrap();
+        assert_eq!(d.host_binary, vec![Candidate::Absolute("bin/echo".into())]);
+        assert!(d.guest_binary.is_empty());
         assert_eq!(
             (d.brew, d.guest_install, d.bypass_flag, d.no_inject),
             (None, None, None, vec![])
@@ -957,11 +989,32 @@ no_inject = ["update"]
                 with("no_inject", "extra = 1\nno_inject"),
             ),
             (
-                "no binary",
-                with(
-                    "binary = [\"~/.local/bin/claude\", \"{brew}/bin/claude\"]",
-                    "binary = []",
-                ),
+                "no path for the host's install",
+                with("binary = [\"{brew}/bin/claude\"]", "binary = []"),
+            ),
+            (
+                "an install with no path",
+                with("binary = [\"~/.local/bin/claude\"]\n", ""),
+            ),
+            (
+                "a sandbox path for the host's install",
+                with("{brew}/bin/claude", "~/.local/bin/claude"),
+            ),
+            (
+                "a host path for the sandbox's install",
+                with("~/.local/bin/claude", "/opt/homebrew/bin/claude"),
+            ),
+            (
+                "a Homebrew path for the sandbox's install",
+                with("~/.local/bin/claude", "{brew}/bin/claude"),
+            ),
+            (
+                "no install at all",
+                "schema = 1\n[run]\nbypass_flag = \"--yes\"\n".to_string(),
+            ),
+            (
+                "the old single list",
+                with("schema = 1", "schema = 1\nbinary = [\"/bin/echo\"]"),
             ),
             (
                 "a relative binary",
@@ -1090,7 +1143,7 @@ no_inject = ["update"]
             os(&[flag, "-p", "update"])
         );
         // No flag in the definition: nothing is added.
-        let plain = parse("schema = 1\nbinary = [\"/bin/echo\"]\n").unwrap();
+        let plain = parse("schema = 1\n[install.host]\nbinary = [\"/bin/echo\"]\n").unwrap();
         assert_eq!(plain.final_args(&os(&["a"])), os(&["a"]));
     }
 
@@ -1100,7 +1153,7 @@ no_inject = ["update"]
     #[test]
     fn a_flag_placed_last_and_a_variable() {
         let pi = parse(
-            "schema = 1\nbinary = [\"/bin/echo\"]\n[run]\nbypass_flag = \"--approve\"\n\
+            "schema = 1\n[install.host]\nbinary = [\"/bin/echo\"]\n[run]\nbypass_flag = \"--approve\"\n\
              grants = \"trusts project-local files\"\n\
              no_inject = [\"auth\"]\ninject_last = [\"install\", \"config\"]\n",
         )
@@ -1121,7 +1174,7 @@ no_inject = ["update"]
         assert_eq!(pi.trust_line(&os(&["auth"])), None);
 
         let opencode = parse(
-            "schema = 1\nbinary = [\"/bin/echo\"]\n[run]\n\
+            "schema = 1\n[install.host]\nbinary = [\"/bin/echo\"]\n[run]\n\
              env = { OPENCODE_PERMISSION = '{\"*\":\"allow\"}', A_SECOND = \"2\" }\n",
         )
         .unwrap();
@@ -1138,7 +1191,7 @@ no_inject = ["update"]
         );
         // A tapped package is a package.
         let tapped = parse(
-            "schema = 1\nbinary = [\"/bin/echo\"]\n[install.host]\nbrew = { formula = \"anomalyco/tap/opencode\" }\n",
+            "schema = 1\n[install.host]\nbinary = [\"/bin/echo\"]\nbrew = { formula = \"anomalyco/tap/opencode\" }\n",
         )
         .unwrap();
         assert_eq!(
@@ -1169,7 +1222,11 @@ no_inject = ["update"]
             .unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(d.guest_install.is_some(), "{name} has no installer");
             assert!(d.brew.is_some(), "{name} names no package");
-            assert!(d.has_home_candidate(), "{name}");
+            assert!(!d.host_binary.is_empty(), "{name} has no host install");
+            assert!(
+                !d.guest_binary.is_empty(),
+                "{name} has no install of its own"
+            );
             if d.trust_line(&[]).is_some() {
                 assert!(d.grants.is_some(), "{name} does not say what it grants");
             }
@@ -1179,32 +1236,47 @@ no_inject = ["update"]
         assert_eq!(seen, ["claude", "codex", "gemini", "opencode", "pi"]);
     }
 
+    /// The two installs are separate lists, and a run reads one of them.
     #[test]
-    fn candidate_paths_by_situation() {
+    fn each_install_has_its_own_paths() {
         let d = parse(CLAUDE).unwrap();
-        let home = "/Users/sv2-pat-work";
         assert_eq!(
-            d.candidate_paths(home, Some("/opt/homebrew"), false),
-            [
-                "/Users/sv2-pat-work/.local/bin/claude",
-                "/opt/homebrew/bin/claude"
-            ]
-        );
-        // Without Homebrew its candidates do not exist.
-        assert_eq!(
-            d.candidate_paths(home, None, false),
-            ["/Users/sv2-pat-work/.local/bin/claude"]
-        );
-        // --native: only where a native installer puts things.
-        assert_eq!(
-            d.candidate_paths(home, Some("/opt/homebrew"), true),
-            ["/Users/sv2-pat-work/.local/bin/claude"]
-        );
-        assert_eq!(
-            d.host_visible_paths(Some("/opt/homebrew")),
+            d.host_paths(Some("/opt/homebrew")),
             ["/opt/homebrew/bin/claude"]
         );
-        assert!(d.has_home_candidate());
+        // Without Homebrew, what it would have installed is nowhere.
+        assert_eq!(d.host_paths(None), Vec::<String>::new());
+        assert_eq!(
+            d.guest_paths("/Users/sv2-pat-work"),
+            ["/Users/sv2-pat-work/.local/bin/claude"]
+        );
+        // Neither list ever holds a path of the other kind, so a copy in
+        // the sandbox home cannot be run in place of the host's, or the
+        // other way about.
+        assert!(d
+            .host_paths(Some("/opt/homebrew"))
+            .iter()
+            .all(|p| !p.starts_with("/Users/")));
+        assert!(d
+            .guest_paths("/Users/sv2-pat-work")
+            .iter()
+            .all(|p| p.starts_with("/Users/sv2-pat-work/")));
+
+        // A definition may have only one of the two.
+        let host_only =
+            parse("schema = 1\n[install.host]\nbinary = [\"/bin/echo\", \"{brew}/bin/x\"]\n")
+                .unwrap();
+        assert_eq!(host_only.host_paths(None), ["/bin/echo"]);
+        assert!(host_only.guest_binary.is_empty());
+        let guest_only =
+            parse("schema = 1\n[install.guest]\nbinary = [\"~/.x/bin/x\", \"~/.local/bin/x\"]\n")
+                .unwrap();
+        assert!(guest_only.host_binary.is_empty());
+        assert_eq!(
+            guest_only.guest_paths("/h"),
+            ["/h/.x/bin/x", "/h/.local/bin/x"]
+        );
+        assert_eq!(guest_only.guest_install, None);
     }
 
     #[test]
@@ -1358,8 +1430,14 @@ no_inject = ["update"]
     fn a_users_definition_replaces_the_builtin_whole() {
         let t = Tree::new("precedence");
         t.definition("builtin/claude", CLAUDE);
-        t.definition("builtin/other", "schema = 1\nbinary = [\"/bin/echo\"]\n");
-        let mine = t.definition("user/claude", "schema = 1\nbinary = [\"/bin/cat\"]\n");
+        t.definition(
+            "builtin/other",
+            "schema = 1\n[install.host]\nbinary = [\"/bin/echo\"]\n",
+        );
+        let mine = t.definition(
+            "user/claude",
+            "schema = 1\n[install.host]\nbinary = [\"/bin/cat\"]\n",
+        );
         // Not definitions: no agent.toml, or not a name.
         std::fs::create_dir_all(t.0.join("user/empty")).unwrap();
         t.definition("user/Not_A_Name", CLAUDE);
@@ -1368,7 +1446,7 @@ no_inject = ["update"]
         assert_eq!(s.names(), ["claude", "other"]);
         let d = s.load("claude").unwrap();
         assert_eq!(d.dir, mine);
-        assert_eq!(d.binary, vec![Candidate::Absolute("bin/cat".into())]);
+        assert_eq!(d.host_binary, vec![Candidate::Absolute("bin/cat".into())]);
         // Nothing of the built-in shows through: no installer, no flag.
         assert_eq!((d.guest_install, d.bypass_flag), (None, None));
 
@@ -1388,13 +1466,8 @@ no_inject = ["update"]
             &|_| Err("the template names no script".to_string()),
         )
         .unwrap();
-        assert_eq!(
-            d.binary,
-            vec![
-                Candidate::Home(".local/bin/my-agent".into()),
-                Candidate::Brew("bin/my-agent".into())
-            ]
-        );
+        assert_eq!(d.host_binary, vec![Candidate::Brew("bin/my-agent".into())]);
+        assert!(d.guest_binary.is_empty());
         assert_eq!((d.brew, d.guest_install, d.bypass_flag), (None, None, None));
         // And with every commented-out key switched on. (Comment lines
         // start with "# "; the keys with "#" alone.)
@@ -1418,6 +1491,10 @@ no_inject = ["update"]
             [("EXAMPLE_VARIABLE".to_string(), "value".to_string())]
         );
         assert!(d.guest_install.is_some());
+        assert_eq!(
+            d.guest_binary,
+            vec![Candidate::Home(".local/bin/my-agent".into())]
+        );
     }
 
     #[test]
@@ -1472,7 +1549,7 @@ no_inject = ["update"]
             Some("#!/bin/bash\necho installed\n")
         );
 
-        let dir = t.definition("builtin/broken", "schema = 1\nbinary = 5\n");
+        let dir = t.definition("builtin/broken", "schema = 1\n[install.host]\nbinary = 5\n");
         let err = s.load("broken").unwrap_err();
         assert!(err.contains(dir.to_str().unwrap()), "{err}");
 

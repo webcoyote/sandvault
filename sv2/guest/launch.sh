@@ -16,8 +16,6 @@
 #          agent NAME NATIVE SCRIPT N PATH1..PATHN [ARGS...]: the first of
 #          the N paths that is a program, with ARGS. When none is and NATIVE
 #          is 1, SCRIPT (the text of the agent's installer) is run first.
-#          probe N PATH1..PATHN: exit 0 when one of the paths is a program,
-#          1 when none is. Starts nothing.
 #
 # It must run on /bin/bash 3.2. ARGS are never parsed as shell text.
 set -euo pipefail
@@ -148,14 +146,6 @@ case "$KIND" in
         # and becomes the command.
         # shellcheck disable=SC2016 # expanded by the zsh this starts
         exec /bin/zsh -lc 'exec -- "$@"' sv2 "$@"
-        ;;
-    probe)
-        take_paths "$@"
-        find_program
-        if [[ -z "$PROGRAM" ]]; then
-            exit 1
-        fi
-        exit 0
         ;;
     agent)
         if [[ $# -lt 5 ]]; then

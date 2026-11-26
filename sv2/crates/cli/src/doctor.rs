@@ -233,7 +233,7 @@ pub fn check_agents(sources: &Sources, brew: Option<&str>, report: &mut Report) 
                 "agent '{name}' has the name of a command; run it with: sv2 run {name}"
             ));
         }
-        let visible = def.host_visible_paths(brew);
+        let visible = def.host_paths(brew);
         match visible.iter().find(|p| is_program(p)) {
             Some(program) => match agent::gatekeeper_would_stop(Path::new(program)) {
                 Some(file) => report.problem(format!(
@@ -243,8 +243,11 @@ pub fn check_agents(sources: &Sources, brew: Option<&str>, report: &mut Report) 
                 )),
                 None => report.ok(format!("agent '{name}' ({program})")),
             },
+            None if def.host_binary.is_empty() => report.note(format!(
+                "agent '{name}' is installed only inside a sandbox: sv2 run --native {name}"
+            )),
             None => report.note(format!(
-                "agent '{name}' is not installed on this Mac; sv2 installs it on first use, unless a sandbox already has its own copy"
+                "agent '{name}' is not installed on this Mac; sv2 installs it on first use"
             )),
         }
     }

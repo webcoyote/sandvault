@@ -419,13 +419,14 @@ Example (values are illustrative):
 
 ```toml
 schema = 1
-binary = ["~/.local/bin/claude", "{brew}/bin/claude"]
 
 [install.host]          # data only; sv2 builds the argv
-brew = { formula = "claude-code" }
+brew = { cask = "claude-code" }
+binary = ["{brew}/bin/claude"]      # where that install leaves it
 
 [install.guest]
 script = "install.sh"
+binary = ["~/.local/bin/claude"]    # where that install leaves it
 
 [run]
 bypass_flag = "--dangerously-skip-permissions"
@@ -455,8 +456,13 @@ Why not the alternatives:
   to `--native`.
 - A native install runs the agent's own installer inside the sandbox, into the
   sandbox home.
-- A native binary already present in the sandbox home is preferred, so
-  `--native` is needed only the first time.
+- **Decided (2026-11-26):** the two installs are never mixed. Without
+  `--native` a run uses the host's install and nothing else; with it, the
+  sandbox's own and nothing else. (At first one list named both, and a
+  native copy, once present, was preferred from then on; which program ran
+  then depended on the order of the list and on what happened to be
+  installed.) Each install section of a definition has its own `binary`
+  list.
 
 ## Features removed
 
@@ -717,8 +723,9 @@ Decisions this milestone made:
 - **Agent definitions (2026-11-26).** Built as designed under "Agents",
   in `crates/cli/src/agent.rs`, with one built-in, `sv2/agents/claude`.
   What the build decided or changed:
-  - *Schema 1* has `binary`, `install.host.brew` (one `formula` or one
-    `cask`; Claude Code is a cask), `install.guest.script`, and under `run`:
+  - *Schema 1* has `install.host.brew` (one `formula` or one `cask`; Claude
+    Code is a cask), `install.host.binary`, `install.guest.script`,
+    `install.guest.binary`, and under `run`:
     `bypass_flag`, `no_inject`, `inject_last` (subcommands that take the
     flag after their arguments: pi), `env` (variables set for the agent:
     opencode is told by a variable what others are told by a flag) and
@@ -748,15 +755,16 @@ Decisions this milestone made:
     agents from a copy of the build in host-only scratch, and
     `scripts/sv2-dev-agents` copies the checkout's definitions into
     `~/.config/sandvault2/agents` for a development build to use.
-  - *Where the agent is.* `sv2` cannot look into the sandbox home, so when
-    no candidate outside it exists it asks the sandbox (the launcher's
-    `probe`, one extra launch) before it decides to install. A sandbox that
-    lies gets the package the definition names installed, or a session that
-    finds no program.
-  - *Install.* Without `--native`: `brew install --formula|--cask NAME`, as
-    the host user, from `/`, shown before it runs, when the agent is
-    nowhere. With `--native`: only candidates in the sandbox home count,
-    and the launcher runs the definition's script when none exists.
+  - *Two installs, never mixed (2026-11-26).* `[install.host]` and
+    `[install.guest]` each have a `binary` list: paths under `{brew}/` or
+    `/` for the first, under `~/` for the second, and a path of the wrong
+    kind is refused. A definition needs at least one of the sections.
+    Without `--native`, `sv2` looks only at the host's paths, which it can
+    see, and runs `brew install --formula|--cask NAME` (as the host user,
+    from `/`, shown first) when none is a program. With `--native`, only
+    the sandbox's paths count, and the launcher runs the definition's
+    script when none exists. `sv2` no longer asks the sandbox what it has:
+    the launcher's `probe` and its extra launch are gone.
   - *The flag.* `sv2` puts `bypass_flag` before the user's arguments unless
     the first is listed in `no_inject`; the banner says which happened.
     Claude Code 2.1.326 accepts its flag before every subcommand (checked
@@ -764,8 +772,9 @@ Decisions this milestone made:
   - *The launcher* gets the agent as arguments: name, whether to install,
     the script's text, a counted list of paths, then the agent's arguments.
   - *Measured on 2026-11-26:* Homebrew's `claude` runs in a session;
-    `--native claude` installed and ran 2.1.332 in a throwaway profile, and
-    the next run without the option used it.
+    `--native claude` installed and ran 2.1.332 in a throwaway profile.
+    (The next run without the option used that copy, as the first design
+    had it; it would now use Homebrew's.)
 - **Quarantine (2026-11-26; open item 1).** Homebrew marks what a cask
   downloads with `com.apple.quarantine`, and Gatekeeper judges such a
   program when it starts. v1 ran each freshly installed program once as the
@@ -1023,15 +1032,18 @@ dropped from the document by mistake in commit 9a52da3 and put back.)
    quarantine handling, and `sv2 agent new`.
 3. Done: the safer `uninstall`, default deny, `sv2 doctor`, repository
    credentials, and the verification that needed no push.
-4. Next, in this order: browser support (Playwright's headless Chromium
-   already runs; the full applications do not); the iOS bridge; Homebrew
-   packaging.
-5. Deferred until asked for: the planted `~/Library/LaunchAgents`
-   measurement (open item 7); per-profile capabilities (open item 8); a
-   position on localhost and port 22; CI on a runner.
-6. Last, the daemon: the measurement in open item 3, the move of account
-   changes into it, and with it what `sv2` does about the "administer your
-   computer" permission (open item 10).
+4. Next (order still to be settled, 2026-11-26): repository credentials
+   used for real (a key added to a repository, a real token); copying the
+   user's configuration into a sandbox home; browser support for the full
+   applications (Playwright's headless Chromium already runs); a position
+   on localhost and port 22; per-profile capabilities and a narrower rule
+   for reading files (open item 8); the iOS bridge; the leftover
+   verification that needs root (`use_pty`, the ACL checks); the open
+   `sv2 repair` questions (open item 9).
+5. Put off on 2026-11-26, until asked for: Homebrew packaging; the daemon
+   (open items 3 and 10); the planted `~/Library/LaunchAgents` measurement
+   (open item 7); CI on a runner; checking codex, gemini, opencode and pi
+   against their programs, and definitions for muse and herdr.
 
 ### Not yet verified
 

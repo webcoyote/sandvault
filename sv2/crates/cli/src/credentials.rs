@@ -675,27 +675,29 @@ mod tests {
 
     #[test]
     fn tokens() {
+        // Stand-ins, put together here so that no file holds text a secret
+        // scanner would take for a real token.
+        let body = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let fake = |prefix: &str| format!("{prefix}_{body}");
         let good = format!("github_pat_{}", "A1b2C3d4E5_f6G7h8I9j0K");
         assert_eq!(check_token(&format!("  {good}\n")), Ok(good.as_str()));
-        for (bad, why) in [
-            ("", "no token"),
-            ("ghp_abcdefghijklmnopqrstuvwxyz0123456789", "classic token"),
+        let cases = [
+            (String::new(), "no token"),
+            (fake("ghp"), "classic token"),
+            (fake("gho"), "OAuth or app token"),
+            (fake("ghs"), "OAuth or app token"),
+            ("hunter2".to_string(), "not a fine-grained"),
             (
-                "gho_abcdefghijklmnopqrstuvwxyz0123456789",
-                "OAuth or app token",
-            ),
-            (
-                "ghs_abcdefghijklmnopqrstuvwxyz0123456789",
-                "OAuth or app token",
-            ),
-            ("hunter2", "not a fine-grained"),
-            ("github_pat_short", "characters a token does not have"),
-            (
-                "github_pat_abcdefghijklmnopqrstu; id",
+                "github_pat_short".to_string(),
                 "characters a token does not have",
             ),
-        ] {
-            let err = check_token(bad).unwrap_err();
+            (
+                "github_pat_abcdefghijklmnopqrstu; id".to_string(),
+                "characters a token does not have",
+            ),
+        ];
+        for (bad, why) in cases {
+            let err = check_token(&bad).unwrap_err();
             assert!(err.contains(why), "{bad:?}: {err}");
         }
     }

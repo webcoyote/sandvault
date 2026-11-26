@@ -6,26 +6,32 @@
 # The version of this format. Leave it.
 schema = 1
 
-# Where the program may be, most preferred first. The first that exists is
-# run. Each entry starts with one of:
-#   ~/        the sandbox home (where an installer run inside the sandbox
-#             puts things)
-#   {brew}/   the Homebrew prefix (/opt/homebrew or /usr/local)
-#   /         anywhere else
-binary = ["~/.local/bin/{name}", "{brew}/bin/{name}"]
+# A program can be installed two ways, and each has its own section. A run
+# uses one of them and never the other in its place:
+#   sv2 run {name}            the host's install
+#   sv2 run --native {name}   the program's own install, inside the sandbox
+# Keep the section you have; a definition needs at least one.
 
-# How sv2 installs the program on this Mac, as you, when it is nowhere:
+# The host's install: sv2 installs the program on this Mac, as you, before
+# the sandbox starts, when it is not there yet.
+[install.host]
+# The Homebrew package, one of the two forms, a plain name:
 #   brew install --formula NAME    or    brew install --cask NAME
-# One of the two, a plain package name. Leave the section out if Homebrew
-# does not have the program.
-#[install.host]
+# Leave it out if you install the program yourself.
 #brew = { formula = "{name}" }
+# Where that install leaves the program; the first that exists is run. Each
+# starts with {brew}/ (the Homebrew prefix: /opt/homebrew or /usr/local) or
+# with / (anywhere else outside the sandbox home).
+binary = ["{brew}/bin/{name}"]
 
-# The program's own installer, for "sv2 run --native {name}". It is a shell
-# script beside this file, runs inside the sandbox as the sandbox user, and
-# should leave the program at one of the "~/" paths above.
+# The program's own install, inside the sandbox, as the sandbox user.
 #[install.guest]
+# The installer: a shell script beside this file. It runs when the program
+# is not there yet. Leave it out if you install the program yourself.
 #script = "install.sh"
+# Where that install leaves the program; the first that exists is run. Each
+# starts with ~/ (the sandbox home).
+#binary = ["~/.local/bin/{name}"]
 
 [run]
 # A flag sv2 puts before your arguments, usually the one that turns the

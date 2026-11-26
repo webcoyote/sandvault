@@ -1,16 +1,14 @@
 # Claude Code (https://claude.com/claude-code)
 schema = 1
 
-# The native installer puts it in the sandbox home; Homebrew in its prefix.
-# A native install, once made, is the one that is used.
-binary = ["~/.local/bin/claude", "{brew}/bin/claude"]
-
 [install.host]
 # A cask: Homebrew has no formula for it.
 brew = { cask = "claude-code" }
+binary = ["{brew}/bin/claude"]
 
 [install.guest]
 script = "install.sh"
+binary = ["~/.local/bin/claude"]
 
 [run]
 # Checked against `claude --help` of 2.1.326: the flag is accepted before

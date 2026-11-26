@@ -41,16 +41,15 @@ pub const LAUNCHER: &str = include_str!("../../../guest/launch.sh");
 pub enum Kind<'a> {
     /// A login zsh, or the arguments as a command in its environment.
     Shell,
-    /// The first of `paths` that is a program. When none is and `native` is
-    /// set, `install_script` runs first.
+    /// The first of `paths` that is a program: the places one install of
+    /// the agent leaves it. When none is and `native` is set,
+    /// `install_script` runs first.
     Agent {
         name: &'a str,
         native: bool,
         install_script: &'a str,
         paths: &'a [String],
     },
-    /// Whether one of `paths` is a program. Starts nothing.
-    Probe { paths: &'a [String] },
 }
 
 impl Kind<'_> {
@@ -75,11 +74,6 @@ impl Kind<'_> {
                     if *native { "1" } else { "0" }.into(),
                     (*install_script).into(),
                 ];
-                v.extend(counted(paths));
-                v
-            }
-            Kind::Probe { paths } => {
-                let mut v = vec![OsString::from("probe")];
                 v.extend(counted(paths));
                 v
             }
@@ -428,17 +422,6 @@ mod tests {
             let v = argv(&[], self.dir.as_os_str(), &kind, &os(args));
             self.command(&v).stdin(Stdio::null()).output().unwrap()
         }
-
-        fn probe(&self, paths: &[&str]) -> Option<i32> {
-            let paths: Vec<String> = paths.iter().map(|p| (*p).to_string()).collect();
-            let v = argv(
-                &[],
-                self.dir.as_os_str(),
-                &Kind::Probe { paths: &paths },
-                &[],
-            );
-            self.command(&v).output().unwrap().status.code()
-        }
     }
 
     fn text(bytes: &[u8]) -> String {
@@ -471,9 +454,6 @@ mod tests {
         // The agent's exit status is the session's.
         let out = s.agent(false, "", &["/bin/sh"], &["-c", "exit 9"]);
         assert_eq!(out.status.code(), Some(9));
-
-        assert_eq!(s.probe(&[&missing, "/bin/echo"]), Some(0));
-        assert_eq!(s.probe(&[&missing, &adir, &plain, "echo"]), Some(1));
     }
 
     /// What a definition sets with `env` reaches the agent as written,
@@ -556,11 +536,11 @@ echo "installer says hello" >&2
                 .code()
         };
         // A count that is not a number, is zero, or exceeds what follows.
-        assert_eq!(bash(&["probe"]), Some(2));
-        assert_eq!(bash(&["probe", "x", "/bin/echo"]), Some(2));
-        assert_eq!(bash(&["probe", "0"]), Some(2));
-        assert_eq!(bash(&["probe", "2", "/bin/echo"]), Some(2));
         assert_eq!(bash(&["agent", "tool", "0", ""]), Some(2));
+        assert_eq!(bash(&["agent", "tool", "0", "", "x", "/bin/echo"]), Some(2));
+        assert_eq!(bash(&["agent", "tool", "0", "", "0"]), Some(2));
+        // "probe" is no longer a kind: sv2 does not ask a sandbox what it has.
+        assert_eq!(bash(&["probe", "1", "/bin/echo"]), Some(2));
         assert_eq!(
             bash(&["agent", "tool", "0", "", "3", "/bin/echo", "x"]),
             Some(2)

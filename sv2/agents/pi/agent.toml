@@ -3,14 +3,14 @@
 # install step in sv; not checked again against a current pi.
 schema = 1
 
-# The native install, a Bun global install, then Homebrew.
-binary = ["~/.local/bin/pi", "~/.bun/bin/pi", "{brew}/bin/pi"]
-
 [install.host]
 brew = { formula = "pi-coding-agent" }
+binary = ["{brew}/bin/pi"]
 
 [install.guest]
 script = "install.sh"
+# Where install.sh puts it, then where a Bun global install would.
+binary = ["~/.local/bin/pi", "~/.bun/bin/pi"]
 
 [run]
 # pi runs its tools without asking as it is. --approve answers a different
