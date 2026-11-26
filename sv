@@ -2542,10 +2542,6 @@ if [[ "$MODE" == "ssh" ]]; then
         SSH_TTY_OPT="-T"
     fi
 
-    # Escape single quotes for a remote shell context.
-    ZSH_COMMAND_SSH=$(printf '%s' "$ZSH_COMMAND" | sed "s/'/'\"'\"'/g")
-    ZSH_COMMAND_SSH="'$ZSH_COMMAND_SSH'"
-
     trace "Checking SSH connectivity"
     if ! ssh_check_output=$(ssh \
         -o BatchMode=yes \
@@ -2574,11 +2570,6 @@ if [[ "$MODE" == "ssh" ]]; then
 
     debug "SSH $SANDVAULT_USER@$SSH_HOST"
 
-    # SSH requires TWO layers of shell parsing: local shell → SSH → remote shell → /bin/zsh
-    # The extra single quotes protect the command through SSH's remote shell parsing.
-    # Without them, the remote shell would word-split the command, causing incorrect execution.
-    # Example: "'export TMPDIR=...'" becomes a single arg after local expansion, then the remote
-    # shell strips the outer quotes, passing 'export TMPDIR=...' correctly to /bin/zsh -c
     # Nested sessions install no EXIT trap, so there is nothing to preserve:
     # exec directly and avoid keeping a supervisor process around.
     sv_session_rc=0
@@ -2587,7 +2578,9 @@ if [[ "$MODE" == "ssh" ]]; then
     # Build the remote command as a single quoted string. SSH joins all
     # trailing arguments with spaces and passes them through the remote
     # login shell, so every element must be individually quoted to survive
-    # spaces, metacharacters, and sandbox-chosen directory names.
+    # spaces, metacharacters, and sandbox-chosen directory names. Pass
+    # ZSH_COMMAND unquoted here: quoting it again would hand zsh -c a
+    # literal quoted string, which it runs as a single command name.
     SSH_REMOTE_CMD="$(quote_zsh_args \
         /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
@@ -2602,7 +2595,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
-            /bin/zsh -c "$ZSH_COMMAND_SSH")"
+            /bin/zsh -c "$ZSH_COMMAND")"
     "${sv_session_runner[@]}" ssh \
         -q \
         "$SSH_TTY_OPT" \
