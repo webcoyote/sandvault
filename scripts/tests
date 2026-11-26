@@ -2654,8 +2654,11 @@ STUB_EOF
         log_file="$(mktemp)"
         cp "$SV_CLONE_BASE" "$install_dir/sv-clone"
         cp -R "$SCRIPT_DIR/../helpers" "$install_dir/helpers"
+        # The stub logs every call. sv-clone installs a fresh clone by piping a
+        # script to `sv ... shell <workspace>` (no `-- cmd`), so run that one,
+        # or the clone never lands and the re-run never takes the fetch path.
         # shellcheck disable=SC2016 # expanded by the stub, not here
-        printf '#!/bin/bash\necho "sv $*" >> "$SV_STUB_LOG"\n' > "$install_dir/sv"
+        printf '#!/bin/bash\necho "sv $*" >> "$SV_STUB_LOG"\ncase " $* " in *" -- "*) ;; *" shell "*) [ -t 0 ] || bash ;; esac\n' > "$install_dir/sv"
         # shellcheck disable=SC2016 # expanded by the stub, not here
         printf '#!/bin/bash\necho "chgrp $*" >> "$SV_STUB_LOG"\n' > "$install_dir/chgrp"
         chmod +x "$install_dir/sv" "$install_dir/chgrp"
@@ -2670,7 +2673,7 @@ STUB_EOF
         done 2>&1)
         status=$?
         set -e
-        fetch_line="$(grep -F 'git fetch' "$log_file" | tail -1)"
+        fetch_line="$(grep -F 'git fetch' "$log_file" | tail -1 || true)"
         if [[ "$status" -ne 0 || "$fetch_line" != "sv --profile $profile --no-build shell "*" -- git fetch "* ]]; then
             fail "sv-clone re-run fetches as the --profile sandbox user" \
                 "sv --profile $profile --no-build shell ... -- git fetch ..." \
