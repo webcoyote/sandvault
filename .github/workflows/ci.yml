@@ -48,6 +48,9 @@ jobs:
         run: |
           ./scripts/build
           sv2/target/release/sv2 install
+          # The suite has a sandbox account try to log in over SSH; with
+          # Remote Login off that check cannot run.
+          sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist
 
       - name: SandVault2 Tests
         env:

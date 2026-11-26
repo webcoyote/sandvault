@@ -10,7 +10,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "sv2"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "sv2-common",
@@ -18,11 +18,11 @@ dependencies = [
 
 [[package]]
 name = "sv2-common"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "sv2-helper"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "sv2-common",

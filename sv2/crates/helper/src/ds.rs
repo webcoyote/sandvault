@@ -112,36 +112,40 @@ fn has_token(list: &Option<String>, token: &str) -> bool {
         .is_some_and(|l| l.split_whitespace().any(|t| t == token))
 }
 
-/// The sandbox account must not be in `staff`, which can read most of the
-/// host user's files. Ported from v1: remove both the name and the
-/// GeneratedUID form, then verify.
-pub fn remove_from_staff(name: &str) -> Res<()> {
+/// Remove `name` from `group` in both forms a membership is stored in (the
+/// name and the GeneratedUID), then verify. Works when the account or the
+/// group no longer exists. Ported from v1.
+pub fn purge_member(name: &str, group: &str) -> Res<()> {
+    let record = format!("/Groups/{group}");
     let uuid = read_attr(&format!("/Users/{name}"), "GeneratedUID")?.unwrap_or_default();
+    let listed_by_name = has_token(&read_attr(&record, "GroupMembership")?, name);
+    let listed_by_uuid = !uuid.is_empty() && has_token(&read_attr(&record, "GroupMembers")?, &uuid);
+    // Nothing to do, so nothing is written: see the note on writes above.
+    if !listed_by_name && !listed_by_uuid {
+        return Ok(());
+    }
     // Each of these fails when there is nothing to remove; the check below is
     // what decides.
-    let _ = run(
-        DSEDITGROUP,
-        ["-o", "edit", "-d", name, "-t", "user", "staff"],
-    );
-    let _ = run(
-        DSCL,
-        [".", "-delete", "/Groups/staff", "GroupMembership", name],
-    );
+    let _ = run(DSEDITGROUP, ["-o", "edit", "-d", name, "-t", "user", group]);
+    let _ = run(DSCL, [".", "-delete", &record, "GroupMembership", name]);
     if !uuid.is_empty() {
-        let _ = run(
-            DSCL,
-            [".", "-delete", "/Groups/staff", "GroupMembers", &uuid],
-        );
+        let _ = run(DSCL, [".", "-delete", &record, "GroupMembers", &uuid]);
     }
-    if has_token(&read_attr("/Groups/staff", "GroupMembership")?, name) {
-        return Err(format!("could not remove {name} from the staff group"));
+    if has_token(&read_attr(&record, "GroupMembership")?, name) {
+        return Err(format!("could not remove {name} from the {group} group"));
     }
-    if !uuid.is_empty() && has_token(&read_attr("/Groups/staff", "GroupMembers")?, &uuid) {
+    if !uuid.is_empty() && has_token(&read_attr(&record, "GroupMembers")?, &uuid) {
         return Err(format!(
-            "could not remove {name} (by UUID) from the staff group"
+            "could not remove {name} (by UUID) from the {group} group"
         ));
     }
     Ok(())
+}
+
+/// The sandbox account must not be in `staff`, which can read most of the
+/// host user's files.
+pub fn remove_from_staff(name: &str) -> Res<()> {
+    purge_member(name, "staff")
 }
 
 fn is_listed_member(user: &str, group: &str) -> Res<bool> {
@@ -169,6 +173,22 @@ pub fn remove_member(user: &str, group: &str) -> Res<()> {
 
 pub fn create_group_auto_id(name: &str, real_name: &str) -> Res<()> {
     run_ok(DSEDITGROUP, ["-o", "create", "-r", real_name, name])
+}
+
+/// One command, so a killed run leaves either no group or a complete one.
+pub fn create_group_with_id(name: &str, gid: u32, real_name: &str) -> Res<()> {
+    run_ok(
+        DSEDITGROUP,
+        [
+            "-o",
+            "create",
+            "-i",
+            &gid.to_string(),
+            "-r",
+            real_name,
+            name,
+        ],
+    )
 }
 
 fn delete_record(record: &str) -> Res<()> {

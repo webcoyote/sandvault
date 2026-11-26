@@ -81,6 +81,14 @@ pub fn stage1(caller: &Caller, args: &[OsString]) -> Res<()> {
     if !sys::exists(&sb) {
         return Err(format!("{sb} is missing; run: sv2 profile add {profile}"));
     }
+    // The same for the file that keeps the account from logging in over SSH
+    // and so running outside that profile.
+    let dropin = ops::sshd_dropin_path();
+    if !sys::exists(&dropin) {
+        return Err(format!(
+            "{dropin} is missing; an admin must run: sv2 install"
+        ));
+    }
     lock.keep_across_exec()?;
 
     let err = Command::new("/bin/launchctl")

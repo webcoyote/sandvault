@@ -47,6 +47,7 @@ P="svt$((RANDOM % 90000 + 10000))"
 ACCOUNT="sv2-$HOST_USER-$P"
 WS="/Users/Shared/sv2/$HOST_USER/$P"
 SB="/Library/Application Support/sandvault2/profiles/$HOST_USER/$P.sb"
+SSHD_DROPIN="/etc/ssh/sshd_config.d/000-sandvault2.conf"
 
 PASSED=0
 FAILED=0
@@ -98,6 +99,31 @@ else
 fi
 check "account: no usable password" "*" \
     "$(/usr/bin/dscl . -read "/Users/$ACCOUNT" Password | /usr/bin/awk '{print $2}')"
+
+# SSH: with Remote Login on, an account that sshd accepts could connect to
+# itself and get a shell outside its sandbox profile. Every sandbox account is
+# in sv2-sandboxes, and the drop-in refuses that group.
+if /usr/bin/id -Gn "$ACCOUNT" | /usr/bin/tr ' ' '\n' | /usr/bin/grep -qx sv2-sandboxes; then
+    pass "account: in the sv2-sandboxes group"
+else
+    fail "account: in the sv2-sandboxes group" "$(/usr/bin/id -Gn "$ACCOUNT")"
+fi
+check "sshd drop-in: root-owned, not writable by others" "0 644" "$($STAT -f '%u %Lp' "$SSHD_DROPIN")"
+# What sshd itself would apply to a login as USER, read from the system's
+# configuration as a whole (so a drop-in that is not included, or is
+# overridden, shows). -T needs a host key; a throwaway one will do.
+/usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$SCRATCH/hostkey"
+sshd_applies() { # USER
+    /usr/sbin/sshd -T -h "$SCRATCH/hostkey" -C "user=$1" 2>&1 | /usr/bin/tr '[:upper:]' '[:lower:]' \
+        | /usr/bin/grep -xE "$SSHD_REFUSALS" | /usr/bin/sort | /usr/bin/tr '\n' '|'
+}
+SSHD_REFUSALS='(denygroups sv2-sandboxes|pubkeyauthentication no|authorizedkeysfile none|forcecommand /usr/bin/false)'
+check "sshd: refuses a login as the sandbox account" \
+    "authorizedkeysfile none|denygroups sv2-sandboxes|forcecommand /usr/bin/false|pubkeyauthentication no|" \
+    "$(sshd_applies "$ACCOUNT")"
+# Control: the Match block must not reach anyone else. (DenyGroups is a list
+# sshd prints for everyone; it only bites members.)
+check "sshd: the refusal does not apply to the host user" "denygroups sv2-sandboxes|" "$(sshd_applies "$HOST_USER")"
 
 check "home: owner and mode" "$SB_UID 700" "$($STAT -f '%u %Lp' "/Users/$ACCOUNT")"
 check "workspace: owner and mode" "$HOST_UID 700" "$($STAT -f '%u %Lp' "$WS")"
@@ -232,6 +258,39 @@ if [[ -d "$WS" && ! -e "/private/tmp/$MARK" ]]; then
     pass "sandbox: cannot move the workspace away"
 else
     fail "sandbox: cannot move the workspace away"
+fi
+
+# The attack the sshd drop-in exists for: the sandbox authorizes a key of its
+# own for its own account and logs in to this Mac, which would give it a
+# process outside the sandbox profile. Judged by whether the command ran.
+# Needs Remote Login to be on; what sshd would decide is checked above either
+# way. Where Remote Login is limited to certain users, sshd refuses the
+# account for that reason too, and this check cannot tell the two apart.
+if /usr/bin/nc -z -G 2 127.0.0.1 22 >/dev/null 2>&1; then
+    OUT="$(sb /bin/sh -c '
+        mkdir -p ~/.ssh && chmod 700 ~/.ssh && rm -f ~/.ssh/sv2test ~/.ssh/sv2test.pub
+        /usr/bin/ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/sv2test
+        cat ~/.ssh/sv2test.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+        /usr/bin/ssh -F /dev/null -i ~/.ssh/sv2test -o IdentitiesOnly=yes -o IdentityAgent=none \
+            -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=10 "$USER@127.0.0.1" /usr/bin/touch "/private/tmp/$1"
+    ' sv2 "$MARK-ssh" 2>&1 || true)"
+    if [[ "$OUT" == *"Permission denied"* ]]; then
+        pass "ssh: precondition, the sandbox's login attempt reached sshd"
+    else
+        fail "ssh: precondition, the sandbox's login attempt reached sshd" "$OUT"
+    fi
+    if [[ -e "/private/tmp/$MARK-ssh" ]]; then
+        fail "ssh: sandbox cannot log in to its own account" "/private/tmp/$MARK-ssh was created"
+        /usr/bin/sudo -n -- "$HELPER" call "$VERSION" launch "$P" -- /bin/rm -f "/private/tmp/$MARK-ssh" || true
+    else
+        pass "ssh: sandbox cannot log in to its own account"
+    fi
+else
+    echo -e "${ORANGE}     Remote Login is off: the SSH login attempt was NOT RUN${NC}"
+    if [[ "${SV_TESTS_FAIL_ON_SKIP:-0}" == "1" ]]; then
+        fail "ssh: login attempt ran" "nothing listens on 127.0.0.1 port 22"
+    fi
 fi
 
 # The sandbox can use the workspace but not re-permission, re-own, delete or
@@ -421,6 +480,10 @@ if /usr/bin/pgrep -u "$SB_UID" >/dev/null; then fail "remove: kills the account'
 if account_exists; then fail "remove: account deleted"; else pass "remove: account deleted"; fi
 if [[ -e "/Users/$ACCOUNT" ]]; then fail "remove: home deleted"; else pass "remove: home deleted"; fi
 if [[ -e "$SB" ]]; then fail "remove: sandbox profile deleted"; else pass "remove: sandbox profile deleted"; fi
+# The shared group lists members by name; a stale entry would outlive the
+# account.
+check "remove: account is no longer listed in sv2-sandboxes" "" \
+    "$(/usr/bin/dscl . -read /Groups/sv2-sandboxes GroupMembership | /usr/bin/tr ' ' '\n' | /usr/bin/grep -x "$ACCOUNT" || true)"
 # host-file is still there: the user's files are never deleted.
 if [[ -f "$WS/host-file" && "$OUT" == *"kept $WS"* ]]; then
     pass "remove: non-empty workspace is kept and reported"
@@ -442,6 +505,9 @@ if [[ "$NEW_UID" =~ ^[0-9]+$ && "$NEW_UID" -gt "$SB_UID" ]]; then
 else
     fail "re-add: UID is not reused" "old $SB_UID new $NEW_UID"
 fi
+check "re-add: the new account is refused by sshd as well" \
+    "authorizedkeysfile none|denygroups sv2-sandboxes|forcecommand /usr/bin/false|pubkeyauthentication no|" \
+    "$(sshd_applies "$ACCOUNT")"
 # The directory is reused, and 'profile add' rewrites the ACLs of the files
 # in it for the new account: no separate repair.
 check "re-add: kept workspace directory is reused" "host-file sandbox-kept" \

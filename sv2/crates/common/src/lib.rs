@@ -14,6 +14,13 @@ pub const HELPER_PATH: &str = "/Library/PrivilegedHelperTools/sv2-helper";
 /// Members of this group may run the helper's `call` verbs without a password.
 pub const ALLOWED_GROUP: &str = "sandvault-users";
 
+/// Every sandbox account is a member of this group, and of nothing else that
+/// sandvault creates besides its own primary group. The sshd drop-in refuses
+/// the group, so a sandbox account cannot log in to this Mac over SSH and get
+/// a shell outside its sandbox profile. No account is ever named this:
+/// `account_name` always produces a second dash.
+pub const SANDBOX_GROUP: &str = "sv2-sandboxes";
+
 /// Root-owned parent of every workspace: `<root>/<user>/<profile>`.
 pub const WORKSPACE_ROOT: &str = "/Users/Shared/sv2";
 
@@ -126,6 +133,9 @@ mod tests {
             account_name("pat", "work"),
             account_name("pat-work", "default")
         );
+        // The shared group of all sandbox accounts is not an account name.
+        assert!(SANDBOX_GROUP.matches('-').count() < 2);
+        assert!(account_name("a", "b").matches('-').count() >= 2);
         assert_ne!(
             workspace_path("pat", "work"),
             workspace_path("pat-work", "default")

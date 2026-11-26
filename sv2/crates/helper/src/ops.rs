@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use sv2_common::{
     home_path, valid_host_user, valid_profile, workspace_path, workspace_user_dir, ALLOWED_GROUP,
-    HELPER_PATH, MODE_CALL, VERSION, WORKSPACE_ROOT,
+    HELPER_PATH, MODE_CALL, SANDBOX_GROUP, VERSION, WORKSPACE_ROOT,
 };
 
 use crate::registry::{Entry, Registry, State, MAX_PROFILES_PER_USER};
@@ -35,6 +35,13 @@ const SUDOERS_NAME: &str = "sandvault2";
 /// group of that name with any other RealName: v1 would name the sandbox
 /// group of a host user called `users` exactly `sandvault-users`.
 const ALLOWED_GROUP_REAL_NAME: &str = "sandvault2 allowed users";
+/// Marks the group of all sandbox accounts as ours, in the same way.
+const SANDBOX_GROUP_REAL_NAME: &str = "sandvault2 sandbox accounts";
+const SSHD: &str = "/usr/sbin/sshd";
+const SSHD_DROPIN_DIR: &str = "/etc/ssh/sshd_config.d";
+/// Sorts before every other drop-in (macOS ships `100-macos.conf`): among
+/// `Match` blocks the first one to set a keyword wins.
+const SSHD_DROPIN_NAME: &str = "000-sandvault2.conf";
 
 /// The host user the helper is acting for: taken from `SUDO_UID` and nothing
 /// else.
@@ -58,6 +65,10 @@ fn profiles_user_dir(host_user: &str) -> String {
 
 pub fn profile_file(host_user: &str, profile: &str) -> String {
     format!("{}/{profile}.sb", profiles_user_dir(host_user))
+}
+
+pub fn sshd_dropin_path() -> String {
+    format!("{SSHD_DROPIN_DIR}/{SSHD_DROPIN_NAME}")
 }
 
 pub fn lock(exclusive: bool) -> Res<Lock> {
@@ -162,12 +173,26 @@ fn build_profile(entry: &Entry, host_gid: u32) -> Res<()> {
 
     ds::ensure_group(&account, entry.id)?;
     ds::ensure_user(&account, entry.id, entry.id, &home)?;
+    // Before the account has a home it could put an authorized_keys file in.
+    join_sandbox_group(&account)?;
     ds::remove_from_staff(&account)?;
     ds::add_member(&account, &account)?;
 
     ensure_home(entry, &account)?;
     ensure_workspace(entry, &account, host_gid)?;
     write_profile_file(entry)
+}
+
+/// Put a sandbox account in the group the sshd drop-in refuses. Only a group
+/// `install` created is used: a profile is not built on a machine where the
+/// SSH route out of the sandbox cannot be closed.
+fn join_sandbox_group(account: &str) -> Res<()> {
+    match ds::group_real_name(SANDBOX_GROUP)? {
+        Some(real) if real == SANDBOX_GROUP_REAL_NAME => ds::add_member(account, SANDBOX_GROUP),
+        _ => Err(format!(
+            "the {SANDBOX_GROUP} group is missing or was not created by sv2; an admin must run: sv2 install"
+        )),
+    }
 }
 
 /// The sandbox home: `/Users` is root-owned, so nobody can swap the entry.
@@ -393,6 +418,9 @@ fn remove_entry(reg: &mut Registry, host_uid: u32, profile: &str) -> Res<()> {
     // to remove the home directory of an account that still exists (EPERM).
     // v1 used the same order. Everything after this works from the numeric
     // ID, which the registry entry keeps until the end.
+    // The shared group lists members by name, and a later profile of the
+    // same name gets the same account name: leave no entry behind.
+    ds::purge_member(&account, SANDBOX_GROUP)?;
     ds::delete_user(&account)?;
     ds::delete_group(&account)?;
     remove_home(&entry, &account)?;
@@ -480,6 +508,128 @@ fn validate_sudoers(path: &str) -> Res<()> {
     ))
 }
 
+/// The file that keeps sandbox accounts from logging in over SSH.
+///
+/// A sandbox account's `authorized_keys` is in its own writable home, so with
+/// Remote Login on it could connect to itself and get a shell that is not
+/// under its sandbox profile. Two independent refusals, each measured alone
+/// against a real login (OpenSSH 10.5, macOS 26.7):
+///
+/// - `DenyGroups`: sshd treats a member as an invalid user, whatever it
+///   offers. Several `DenyGroups` lines add up, so this does not replace an
+///   admin's own.
+/// - the `Match` block: no way to authenticate, and `/usr/bin/false` in place
+///   of any command. It ends where this file ends, so it does not swallow the
+///   drop-ins read after it.
+///
+/// Only keywords every OpenSSH that macOS ships accepts: a file sshd rejects
+/// would stop `install`.
+fn sshd_dropin_content() -> String {
+    format!(
+        "# sandvault2 {VERSION}: written by 'sv2 install', removed by 'sv2 uninstall'.\n\
+         # Sandbox accounts may not log in over SSH: a login would run outside the\n\
+         # sandbox profile. Every sandbox account is a member of {SANDBOX_GROUP}.\n\
+         DenyGroups {SANDBOX_GROUP}\n\
+         Match Group {SANDBOX_GROUP}\n\
+         \x20   PubkeyAuthentication no\n\
+         \x20   PasswordAuthentication no\n\
+         \x20   KbdInteractiveAuthentication no\n\
+         \x20   HostbasedAuthentication no\n\
+         \x20   AuthorizedKeysFile none\n\
+         \x20   AllowAgentForwarding no\n\
+         \x20   AllowTcpForwarding no\n\
+         \x20   AllowStreamLocalForwarding no\n\
+         \x20   X11Forwarding no\n\
+         \x20   PermitTunnel no\n\
+         \x20   PermitTTY no\n\
+         \x20   ForceCommand /usr/bin/false\n"
+    )
+}
+
+/// `sshd -G` parses a configuration and prints it. Unlike `-t` it needs no
+/// host keys, which a Mac that never had Remote Login on does not have.
+/// `config` None means sshd's own `/etc/ssh/sshd_config`.
+fn sshd_parse(config: Option<&str>) -> Res<String> {
+    let mut args = vec!["-G"];
+    if let Some(path) = config {
+        args.extend(["-f", path]);
+    }
+    let out = sys::run(SSHD, args)?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+}
+
+fn validate_sshd_dropin(path: &str) -> Res<()> {
+    sshd_parse(Some(path))
+        .map(|_| ())
+        .map_err(|e| format!("generated sshd drop-in is not valid: {e}"))
+}
+
+/// Whether a configuration printed by `sshd -G` denies the sandbox group.
+/// sshd prints one `DenyGroups` line per group; the keyword's case has
+/// changed between versions.
+fn denies_sandbox_group(printed: &str) -> bool {
+    printed.lines().any(|line| {
+        let mut words = line.split_whitespace();
+        words
+            .next()
+            .is_some_and(|k| k.eq_ignore_ascii_case("DenyGroups"))
+            && words.any(|g| g == SANDBOX_GROUP)
+    })
+}
+
+/// The drop-in only counts if sshd reads it: `config` must parse as a whole
+/// and must include the drop-in directory.
+fn check_sshd_reads_dropin(config: Option<&str>) -> Res<()> {
+    let shown = config.unwrap_or("/etc/ssh/sshd_config");
+    let printed = sshd_parse(config).map_err(|e| {
+        format!("sshd rejects its configuration ({shown}), so SSH logins of sandbox accounts cannot be ruled out; fix it and run the install again: {e}")
+    })?;
+    if denies_sandbox_group(&printed) {
+        return Ok(());
+    }
+    Err(format!(
+        "sshd does not read {}: {shown} needs the line 'Include {SSHD_DROPIN_DIR}/*' before any other setting; add it and run the install again",
+        sshd_dropin_path()
+    ))
+}
+
+fn install_sshd_dropin() -> Res<()> {
+    let dir = sys::open_dir(SSHD_DROPIN_DIR)
+        .map_err(|e| format!("{e}: this sshd has no drop-in directory, so SSH logins of sandbox accounts cannot be refused"))?;
+    let st = sys::fstat(&dir)?;
+    if st.uid != 0 || st.mode & 0o022 != 0 {
+        return Err(format!("{SSHD_DROPIN_DIR} is not a root-only directory"));
+    }
+    sys::write_atomic(
+        SSHD_DROPIN_DIR,
+        SSHD_DROPIN_NAME,
+        sshd_dropin_content().as_bytes(),
+        0o644,
+        validate_sshd_dropin,
+    )?;
+    check_sshd_reads_dropin(None)
+}
+
+/// The group's ID comes from the registry's allocator, not from
+/// `dseditgroup`: an ID that a removed sandbox once had would hand every
+/// sandbox the files that one left in `/tmp` with group access.
+fn ensure_sandbox_group(reg: &mut Registry) -> Res<()> {
+    match ds::group_real_name(SANDBOX_GROUP)? {
+        None => {
+            let gid = reg.allocate_id(sys::id_in_use)?;
+            save_registry(reg)?;
+            ds::create_group_with_id(SANDBOX_GROUP, gid, SANDBOX_GROUP_REAL_NAME)
+        }
+        Some(real) if real == SANDBOX_GROUP_REAL_NAME => Ok(()),
+        Some(real) => Err(format!(
+            "a group named {SANDBOX_GROUP} already exists ('{real}') and was not created by sv2; refusing to use it"
+        )),
+    }
+}
+
 fn ensure_allowed_group() -> Res<()> {
     match ds::group_real_name(ALLOWED_GROUP)? {
         None => ds::create_group_auto_id(ALLOWED_GROUP, ALLOWED_GROUP_REAL_NAME),
@@ -527,7 +677,7 @@ pub fn install(caller: &Caller) -> Res<()> {
         .map_err(|e| format!("create {}: {e}", lock_path()))?;
     let _lock = lock(true)?;
 
-    let reg = if sys::exists(&registry_path()) {
+    let mut reg = if sys::exists(&registry_path()) {
         load_registry()?
     } else {
         let reg = Registry::default();
@@ -541,6 +691,15 @@ pub fn install(caller: &Caller) -> Res<()> {
 
     ensure_allowed_group()?;
     ds::add_member(&caller.name, ALLOWED_GROUP)?;
+
+    // The SSH route out of the sandbox. Upgrade path: accounts created by a
+    // version without the group join it here. (An `adding` profile joins when
+    // its `profile add` is run again; it has no session until then.)
+    ensure_sandbox_group(&mut reg)?;
+    for e in reg.entries.iter().filter(|e| e.state == State::Active) {
+        ds::add_member(&e.account(), SANDBOX_GROUP)?;
+    }
+    install_sshd_dropin()?;
 
     // Upgrade path for the base sandbox profile: re-render every profile the
     // registry lists.
@@ -600,6 +759,13 @@ pub fn uninstall() -> Res<()> {
         sys::remove_file(&lock_path())?;
     }
     sys::remove_file(&format!("{SUDOERS_DIR}/{SUDOERS_NAME}"))?;
+    // Every sandbox account is gone, so there is nobody left to refuse.
+    sys::remove_file(&sshd_dropin_path())?;
+    match ds::group_real_name(SANDBOX_GROUP)? {
+        Some(real) if real == SANDBOX_GROUP_REAL_NAME => ds::delete_group(SANDBOX_GROUP)?,
+        Some(_) => println!("kept group {SANDBOX_GROUP}: it was not created by sv2"),
+        None => {}
+    }
     if let Ok(parent) = sys::open_dir("/Library/Application Support") {
         if !sys::rmdir_at(&parent, "sandvault2")? {
             println!("kept {STATE_DIR}: it is not empty");
@@ -691,6 +857,162 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(ok, Ok(()));
         assert!(bad.is_err(), "visudo accepted a broken file");
+    }
+
+    fn sshd_rules(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(str::trim)
+            .collect()
+    }
+
+    #[test]
+    fn sshd_dropin_refuses_the_sandbox_group() {
+        let text = sshd_dropin_content();
+        assert_eq!(
+            sshd_rules(&text),
+            [
+                "DenyGroups sv2-sandboxes",
+                "Match Group sv2-sandboxes",
+                "PubkeyAuthentication no",
+                "PasswordAuthentication no",
+                "KbdInteractiveAuthentication no",
+                "HostbasedAuthentication no",
+                "AuthorizedKeysFile none",
+                "AllowAgentForwarding no",
+                "AllowTcpForwarding no",
+                "AllowStreamLocalForwarding no",
+                "X11Forwarding no",
+                "PermitTunnel no",
+                "PermitTTY no",
+                "ForceCommand /usr/bin/false",
+            ]
+        );
+        assert!(text.ends_with('\n'));
+        // Nothing may follow the Match block: it would apply to the group
+        // only, and nothing global may come after the first Match line.
+        let first_match = text.lines().position(|l| l.starts_with("Match")).unwrap();
+        assert!(text
+            .lines()
+            .skip(first_match + 1)
+            .all(|l| l.starts_with("    ")));
+    }
+
+    #[test]
+    fn finds_the_deny_line_sshd_prints() {
+        // OpenSSH 10 prints keywords as written in the manual, older ones in
+        // lower case; one line per group.
+        assert!(denies_sandbox_group(
+            "UsePAM yes\nDenyGroups other\nDenyGroups sv2-sandboxes\n"
+        ));
+        assert!(denies_sandbox_group("denygroups sv2-sandboxes\n"));
+        assert!(denies_sandbox_group("denygroups other sv2-sandboxes\n"));
+        assert!(!denies_sandbox_group("DenyGroups sv2-sandboxes-not\n"));
+        assert!(!denies_sandbox_group("DenyUsers sv2-sandboxes\n"));
+        assert!(!denies_sandbox_group("AllowGroups sv2-sandboxes\n"));
+        assert!(!denies_sandbox_group(""));
+    }
+
+    /// A scratch directory for the sshd tests. sshd -G only parses, so this
+    /// needs no privileges and no host keys.
+    struct SshdFixture(std::path::PathBuf);
+
+    impl SshdFixture {
+        fn new(tag: &str) -> SshdFixture {
+            let dir = std::env::temp_dir().join(format!("sv2-sshd-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("d")).unwrap();
+            SshdFixture(dir)
+        }
+
+        fn write(&self, name: &str, text: &str) -> String {
+            let path = self.0.join(name);
+            std::fs::write(&path, text).unwrap();
+            path.to_str().unwrap().to_string()
+        }
+
+        /// A main configuration shaped like the one macOS ships.
+        fn main_config(&self) -> String {
+            let include = format!("Include {}/d/*\n", self.0.display());
+            self.write(
+                "sshd_config",
+                &(include + "AuthorizedKeysFile .ssh/authorized_keys\n"),
+            )
+        }
+    }
+
+    impl Drop for SshdFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn sshd_dropin_passes_sshd() {
+        let fx = SshdFixture::new("valid");
+        let good = fx.write("good", &sshd_dropin_content());
+        let bad = fx.write("bad", "Match Group x\n    NoSuchKeyword yes\n");
+        assert_eq!(validate_sshd_dropin(&good), Ok(()));
+        assert!(
+            validate_sshd_dropin(&bad).is_err(),
+            "sshd accepted a broken file"
+        );
+    }
+
+    /// The drop-in is read first, and macOS's own drop-in after it sets
+    /// keywords that are errors inside a Match block. The configuration
+    /// parses only if our Match block ends with our file.
+    #[test]
+    fn sshd_dropin_does_not_swallow_later_dropins() {
+        let fx = SshdFixture::new("order");
+        fx.write(&format!("d/{SSHD_DROPIN_NAME}"), &sshd_dropin_content());
+        fx.write(
+            "d/100-macos.conf",
+            "UsePAM yes\nAcceptEnv LANG LC_*\nDenyGroups other\n",
+        );
+        let main = fx.main_config();
+        assert_eq!(check_sshd_reads_dropin(Some(&main)), Ok(()));
+        let printed = sshd_parse(Some(&main)).unwrap().to_lowercase();
+        // Global settings stay global: only the Match block changes these.
+        assert!(printed.contains("usepam yes"), "{printed}");
+        assert!(printed.contains("pubkeyauthentication yes"), "{printed}");
+        assert!(printed.contains("forcecommand none"), "{printed}");
+        assert!(printed.contains("denygroups other"), "{printed}");
+    }
+
+    #[test]
+    fn a_dropin_sshd_does_not_read_is_an_error() {
+        // No drop-in in the included directory.
+        let fx = SshdFixture::new("absent");
+        fx.write("d/100-macos.conf", "UsePAM yes\n");
+        let main = fx.main_config();
+        let err = check_sshd_reads_dropin(Some(&main)).unwrap_err();
+        assert!(err.contains("does not read"), "{err}");
+
+        // A main configuration without the Include line.
+        fx.write(&format!("d/{SSHD_DROPIN_NAME}"), &sshd_dropin_content());
+        let no_include = fx.write("no-include", "AuthorizedKeysFile .ssh/authorized_keys\n");
+        let err = check_sshd_reads_dropin(Some(&no_include)).unwrap_err();
+        assert!(err.contains("does not read"), "{err}");
+
+        // A configuration that does not parse at all.
+        let broken = fx.write("broken", "NoSuchKeyword yes\n");
+        let err = check_sshd_reads_dropin(Some(&broken)).unwrap_err();
+        assert!(err.contains("rejects its configuration"), "{err}");
+    }
+
+    /// The temp file `write_atomic` validates sits in the drop-in directory.
+    /// Its name starts with a dot, so the Include glob must not pick it up:
+    /// a half-written or invalid candidate would otherwise be live.
+    #[test]
+    fn sshd_ignores_the_temp_file_being_validated() {
+        let fx = SshdFixture::new("temp");
+        fx.write(
+            &format!("d/.{SSHD_DROPIN_NAME}.tmp.123"),
+            "NoSuchKeyword yes\n",
+        );
+        let main = fx.main_config();
+        assert!(sshd_parse(Some(&main)).is_ok());
     }
 
     #[test]

@@ -274,6 +274,8 @@ on for all users, the sandbox user can connect to its own account, because
 - gives sandbox accounts no usable password;
 - never adds them to `com.apple.access_ssh`.
 
+This is built; see "SSH lockdown" under "Milestone 1".
+
 Other routes to audit before release: cron, `at`, launchd agents, Screen
 Sharing.
 
@@ -513,8 +515,9 @@ checkout the sandbox cannot write, before `sv2 install`.
 ## Milestone 1
 
 Implemented in `sv2/` (a Cargo workspace): `sv2 install`, `uninstall`,
-`user allow|deny`, `profile add|remove|list`, `sv2 run shell`, and
-`sv2 repair`, with v1's sandbox profile ported unchanged.
+`user allow|deny`, `profile add|remove|list`, `sv2 run shell`,
+`sv2 repair`, and the SSH lockdown, with v1's sandbox profile ported
+unchanged.
 
 | Crate | Binary | Runs as | Dependencies |
 |---|---|---|---|
@@ -598,8 +601,50 @@ Decisions this milestone made:
   - *Limits.* An entry whose ACL the sandbox removed cannot be taken over or
     repaired from the host (it can be deleted); it is reported. The
     automatic pass visits every entry, so `profile add` on a very large kept
-    workspace takes as long as that walk; this has not been measured. The
-    helper's `profile-remove` message still says "until 'sv2 repair' exists".
+    workspace takes as long as that walk; this has not been measured.
+- **SSH lockdown (implemented after the rest of the milestone).**
+  - *Group.* `install` creates `sv2-sandboxes` (RealName
+    `sandvault2 sandbox accounts`; a group of that name it did not create is
+    refused). Its ID comes from the registry's allocator, so it is never an
+    ID a removed sandbox had. `profile-add` puts the account in the group
+    right after creating it and fails if the group is missing;
+    `profile-remove` takes the account out before deleting it, because the
+    group lists members by name and a later profile gets the same name.
+    Sessions carry the group. It owns no file and appears in no ACL.
+  - *Drop-in.* `/etc/ssh/sshd_config.d/000-sandvault2.conf`, root-owned,
+    mode 0644. It holds a global `DenyGroups sv2-sandboxes` and a
+    `Match Group sv2-sandboxes` block that turns off public-key, password,
+    keyboard-interactive and host-based authentication, sets
+    `AuthorizedKeysFile none`, turns off forwarding and the terminal, and
+    forces `/usr/bin/false`. Measured against real logins with a private
+    sshd (OpenSSH 10.5, macOS 26.7): a key that is accepted without the file
+    is refused with it, refused with `DenyGroups` alone, and runs no command
+    with `ForceCommand` alone. The name sorts first because the first `Match`
+    block to set a keyword wins. The block ends where the file ends
+    (measured, and a unit test), so macOS's `100-macos.conf` after it is
+    still global.
+  - *Validation.* The file is checked with `sshd -G -f` before it is renamed
+    into place. `-G` needs no host keys; `sshd -t` fails on a Mac that never
+    had Remote Login on, because it has none. `-G` is a recent option
+    (measured on OpenSSH 10.5 only); on an sshd without it `install` fails
+    with sshd's usage message. The
+    temp file's name starts with a dot, which the `Include` glob skips. After
+    the rename `install` runs `sshd -G` on the system configuration and fails
+    unless it parses and lists the group under `DenyGroups`: a main
+    configuration without the `Include` line, or one that was already
+    broken, stops the install. The drop-in is left in place in that case.
+  - *Launch.* `launch` refuses to start a session when the drop-in is
+    missing, as it does for the sandbox profile file.
+  - *Upgrade.* The version is 0.1.1, so `sv2` refuses a helper installed
+    before this until `sv2 install` is run. `install` adds every `active`
+    account in the registry to the group.
+  - *Uninstall* removes the drop-in and the group after the accounts.
+  - *Limits.* The helper does not check that sshd sees an account as a
+    member (the integration suite does, from the host side, with
+    `sshd -T -C user=ACCOUNT`); nothing re-checks the drop-in after install
+    except its existence at launch; and an admin's own `Match` block that
+    sets `DenyGroups` replaces the global list for the logins it matches.
+    These belong in `sv2 doctor`.
 - **Allowed-users group.** v1 would name the sandbox group of a host user
   called `users` exactly `sandvault-users`. `install` therefore refuses a
   group of that name it did not create (it checks the group's RealName).
@@ -615,7 +660,20 @@ items" below.
 Do these before building anything else on milestone 1.
 
 - [ ] **CI steps are unverified.** `.github/workflows/ci.yml` gained "Install
-  sandvault2" and "SandVault2 Tests"; neither has run on a runner.
+  sandvault2" and "SandVault2 Tests"; neither has run on a runner. The first
+  also turns Remote Login on (`launchctl load -w .../ssh.plist`) so that the
+  suite's SSH login attempt runs; whether that works on a runner is unknown.
+- [ ] **The SSH lockdown has not run as root.** It was written without sudo:
+  the unit tests and the measurements with a private sshd passed, but
+  `sv2 install` with this build, the integration suite's SSH checks, and
+  `sv2 uninstall` have not been run. To check on the first run: that sshd
+  sees a new account's membership at once (the suite asks right after
+  `profile add`, and again after a remove and add of the same name); whether
+  adding to or removing from the group raises the "administer your computer"
+  prompt (open item 10); and, on a Mac where Remote Login is open to all
+  users, that the suite's login attempt succeeds against a build without the
+  drop-in. On the development Mac Remote Login is limited to listed users,
+  so that attempt is refused either way.
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -642,10 +700,6 @@ Do these before building anything else on milestone 1.
 
 ### Security gaps
 
-- [ ] **SSH to self leaves the sandbox.** With Remote Login enabled for all
-  users, a sandbox account can `ssh localhost` and get a shell without the
-  `sandbox-exec` profile. Fix: the sshd drop-in and shared sandbox group
-  ("Closing other routes out of the sandbox").
 - [ ] **launchd as a route around the profile** (open item 7). The direct
   routes are refused (measured, not yet a test). Still open: a plist the
   sandbox plants in `~/Library/LaunchAgents` may load when the account's
@@ -694,7 +748,20 @@ In rough dependency order.
 - [ ] `sv2 doctor`. The name is reserved and reports "not implemented yet".
   It is also the place to report profiles left in `adding` or `removing`;
   those are finished by running `profile add` or `profile remove` again.
-- [ ] sshd drop-in and the shared sandbox group (closes the SSH gap above).
+  And the place to ask sshd what it would do with each sandbox account (see
+  "SSH lockdown" under "Milestone 1").
+- [ ] Versions for installed artifacts, separate from the application
+  version. Each file `sv2` installs and manages (the helper's sudoers file,
+  the sshd drop-in, the rendered sandbox profiles, the registry format,
+  later the guest payload) carries its own version number, as v1 does with
+  `SV_SANDBOX_PROFILE_VERSION` and its siblings. Bumping one makes `sv2`
+  tell the user to run `sv2 install` again, without a new application
+  version. Today the only lever is the application version, which `sv2` and
+  the helper compare: the SSH lockdown had to go to 0.1.1 to make an old
+  install notice. To decide: where the installed numbers are recorded (in
+  each file's header, or in one root-owned stamp file), who compares them
+  (`sv2`, or the helper on every call), and which artifacts `profile add`
+  can rewrite by itself instead of asking for a reinstall.
 - [ ] Embedded guest payload and the guest-side launcher (open item 5).
 - [ ] Agent definitions: format, `install.sh`, Homebrew and native install,
   `--native`.
