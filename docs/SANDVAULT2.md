@@ -716,14 +716,22 @@ Decisions this milestone made:
   in `crates/cli/src/agent.rs`, with one built-in, `sv2/agents/claude`.
   What the build decided or changed:
   - *Schema 1* has `binary`, `install.host.brew` (one `formula` or one
-    `cask`; Claude Code is a cask), `install.guest.script`, `run.bypass_flag`
-    and `run.no_inject`. `system_prompt` and `wrapper` from the design's
+    `cask`; Claude Code is a cask), `install.guest.script`, and under `run`:
+    `bypass_flag`, `no_inject`, `inject_last` (subcommands that take the
+    flag after their arguments: pi), `env` (variables set for the agent:
+    opencode is told by a variable what others are told by a flag) and
+    `grants` (a few words on what the flag and variables allow, which the
+    banner repeats; a unit test requires it of every built-in that has
+    either). The last three came with the definitions that needed them,
+    before any release, so the schema number did not change. `system_prompt` and `wrapper` from the design's
     example are not in it: nothing uses them until browser and iOS support
     exist. A key sv2 does not know is an error, so adding them is a schema
     change and not a silent difference between versions.
   - *What a definition may say* is checked when it is read: binaries start
     with `~/`, `{brew}/` or `/` and are plain paths; a package is a plain
-    name with no tap; the flag is one long option; the script is a `.sh`
+    name, or `user/repository/name` from a tap (opencode); a variable is
+    upper case and none of those sv2 sets or forwards; the flag is one long
+    option; the script is a `.sh`
     file in the definition's directory, at most 64 KB.
   - *Who can write it.* Before a definition is read its resolved directory
     is refused if it is in a workspace or a sandbox home, or if any
@@ -951,6 +959,15 @@ order to do them in.
 - [ ] **The uninstall refusal has not run installed.** Unit tests cover the
   list and the arguments. Not yet run on a machine: `sv2 uninstall` with a
   profile present (refused, nothing removed), and `--all-profiles`.
+- [ ] **Four built-in agents have not been run.** `codex`, `gemini`,
+  `opencode` and `pi` were written from v1's working wrappers
+  (`guest/home/bin`) and its install step: flags, the subcommands that
+  must not get them, package names (formula or cask checked with
+  `brew info`), native installers. None was installed, so none has been
+  started by sv2, and none was checked against a current version of its
+  program, as §7 asks. v1 also made sure Node.js was installed on the host
+  for the npm-based ones; sv2 does not, and their native installer says so
+  when `npm` is missing.
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -1000,10 +1017,9 @@ See "Priority order" above for the order.
 - [x] The guest-side launcher (open item 5); see "Guest launcher" under
   "Milestone 1". There is no unpacked payload.
 - [x] Agent definitions: format, `install.sh`, Homebrew and native install,
-  `--native`; see "Agent definitions" under "Milestone 1". One built-in so
-  far (`claude`). Not yet: definitions for the other agents v1 has (codex,
-  gemini, opencode, pi, muse, herdr), each to be checked against its real
-  program; `system_prompt` and `wrapper`.
+  `--native`; see "Agent definitions" under "Milestone 1". Built-ins:
+  `claude`, `codex`, `gemini`, `opencode`, `pi`. Not yet: `muse` and
+  `herdr` from v1; `system_prompt` and `wrapper`.
 - [x] `sv2 agent new NAME [--from AGENT]` creates a definition in
   `~/.config/sandvault2/agents`: from a template that shows every key, the
   optional ones commented out, or as a copy of an existing definition (a

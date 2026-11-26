@@ -518,13 +518,16 @@ script = "install.sh"
 
 [run]
 bypass_flag = "--sv2-test-flag"
+grants = "nothing; it is a test"
 no_inject = ["plain"]
+inject_last = ["after"]
+env = { TEST_VARIABLE_FOR_SV2 = 'a "quoted" value' }
 TOML
 /bin/cat > "$PREFIX/share/sandvault2/agents/sv2test/install.sh" <<'INSTALL'
 #!/bin/bash
 set -euo pipefail
 mkdir -p "$HOME/.local/bin"
-printf '#!/bin/sh\nprintf "%%s|" "$(id -un)" "$@"\n' > "$HOME/.local/bin/sv2test"
+printf '#!/bin/sh\nprintf "%%s|" "$(id -un)" "$@"\ncase " $* " in *" showenv "*) printf "%%s|" "$TEST_VARIABLE_FOR_SV2";; esac\n' > "$HOME/.local/bin/sv2test"
 chmod +x "$HOME/.local/bin/sv2test"
 INSTALL
 agent() { "$PREFIX/bin/sv2" --profile "$P" "$@"; }
@@ -542,8 +545,13 @@ check "agent: once installed it needs no --native" "$ACCOUNT|--sv2-test-flag|aga
     "$(agent sv2test again 2>/dev/null)"
 check "agent: a listed subcommand does not get the flag" "$ACCOUNT|plain|x|" \
     "$(agent sv2test plain x 2>/dev/null)"
+check "agent: a subcommand listed for it gets the flag after its arguments" \
+    "$ACCOUNT|after|x|--sv2-test-flag|" "$(agent sv2test after x 2>/dev/null)"
+check "agent: the definition's variable reaches the agent as written" \
+    "$ACCOUNT|--sv2-test-flag|showenv|a \"quoted\" value|" "$(agent sv2test showenv 2>/dev/null)"
 OUT="$(agent sv2test x 2>&1 >/dev/null)"
-if [[ "$OUT" == *"runs with --sv2-test-flag"* && "$OUT" == *"$PREFIX/share/sandvault2/agents/sv2test"* ]]; then
+if [[ "$OUT" == *"runs with --sv2-test-flag"* && "$OUT" == *"nothing; it is a test"* \
+    && "$OUT" == *"$PREFIX/share/sandvault2/agents/sv2test"* ]]; then
     pass "agent: the banner names the flag and the definition"
 else
     fail "agent: the banner names the flag and the definition" "$OUT"

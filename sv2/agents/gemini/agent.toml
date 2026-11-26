@@ -1,0 +1,20 @@
+# Google Gemini CLI
+# Taken from sandvault v1's working wrapper (guest/home/bin/gemini) and its
+# install step in sv; not checked again against a current gemini.
+schema = 1
+
+binary = ["~/.local/bin/gemini", "{brew}/bin/gemini"]
+
+[install.host]
+brew = { formula = "gemini-cli" }
+
+[install.guest]
+script = "install.sh"
+
+[run]
+bypass_flag = "--yolo"
+grants = "it acts without asking"
+# gemini knows a subcommand only when no option comes before it:
+# "gemini --yolo mcp list" starts a chat with "mcp list" as its first
+# message. And the subcommands reject --yolo. So they run without it.
+no_inject = ["mcp", "extensions", "extension", "skills", "skill", "hooks", "hook", "gemma", "models"]

@@ -1,0 +1,18 @@
+# OpenAI Codex CLI
+# Taken from sandvault v1's working wrapper (guest/home/bin/codex) and its
+# install step in sv; not checked again against a current codex.
+schema = 1
+
+binary = ["~/.local/bin/codex", "{brew}/bin/codex"]
+
+[install.host]
+# A cask: Homebrew has no formula of this name.
+brew = { cask = "codex" }
+
+[install.guest]
+script = "install.sh"
+
+[run]
+# v1 gave the flag on every command line, subcommands included.
+bypass_flag = "--dangerously-bypass-approvals-and-sandbox"
+grants = "it acts without asking, and without its own sandbox"

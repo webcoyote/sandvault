@@ -454,7 +454,11 @@ fn run(
     let cwd = std::env::current_dir().ok();
     let dir = shell::initial_dir(cwd.as_deref(), &p.workspace);
     let home = std::env::var_os("HOME");
-    let env = shell::forwarded_env(&|name| std::env::var_os(name), home.as_deref());
+    let mut env = shell::forwarded_env(&|name| std::env::var_os(name), home.as_deref());
+    // What the definition sets for its agent, beside the terminal's.
+    if let Some(def) = &def {
+        env.extend(def.env_pairs());
+    }
     let launch = |kind: &shell::Kind, args: &[OsString]| {
         let mut cmd = call_command("launch");
         cmd.arg(profile)
@@ -491,10 +495,10 @@ fn run(
     }
     let args = def.final_args(agent_args);
     // What the session is trusted with, as it is on this code path.
-    match def.injected_flag(agent_args) {
-        Some(flag) => eprintln!(
-            "sv2: {agent} runs with {flag}: it acts without asking, inside the sandbox of profile '{profile}'"
-        ),
+    match def.trust_line(agent_args) {
+        Some(with) => {
+            eprintln!("sv2: {agent} runs with {with}, inside the sandbox of profile '{profile}'")
+        }
         None => eprintln!("sv2: {agent} runs inside the sandbox of profile '{profile}'"),
     }
     eprintln!("sv2: definition: {}", def.dir.display());

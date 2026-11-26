@@ -17,7 +17,10 @@
 //!
 //! [run]
 //! bypass_flag = "--dangerously-skip-permissions"
-//! no_inject = ["update"]    # subcommands that do not get the flag
+//! grants = "it acts without asking"   # said in the banner with the flag
+//! no_inject = ["update"]      # subcommands that do not get the flag
+//! inject_last = ["config"]    # subcommands that get it after their arguments
+//! env = { NAME = "value" }    # set for the agent
 //! ```
 //!
 //! Definitions are looked up by name in two places and nowhere else:
@@ -98,8 +101,13 @@ struct GuestInstallFile {
 #[serde(deny_unknown_fields)]
 struct RunFile {
     bypass_flag: Option<String>,
+    grants: Option<String>,
     #[serde(default)]
     no_inject: Vec<String>,
+    #[serde(default)]
+    inject_last: Vec<String>,
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +142,24 @@ pub struct Definition {
     /// The text of the guest install script.
     pub guest_install: Option<String>,
     pub bypass_flag: Option<String>,
+    /// What the flag and the environment below let the agent do, in the
+    /// definition's own words, for the banner.
+    pub grants: Option<String>,
     pub no_inject: Vec<String>,
+    pub inject_last: Vec<String>,
+    /// Set for the agent, in name order.
+    pub env: Vec<(String, String)>,
+}
+
+/// Where the flag goes on one command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flag<'a> {
+    /// Before the user's arguments.
+    First(&'a str),
+    /// After them: some programs know a subcommand only as the first word.
+    Last(&'a str),
+    /// Not at all.
+    None,
 }
 
 /// A path with no `.` or `..` in it, no empty component, and nothing a
@@ -168,14 +193,40 @@ fn parse_candidate(s: &str) -> Result<Candidate, String> {
     Ok(make(rest.to_string()))
 }
 
-/// Homebrew package names as Homebrew writes them, without a tap: a name
-/// with a slash would install from a repository the definition chooses.
+/// Homebrew package names as Homebrew writes them: `name`, or
+/// `user/repository/name` for a package from a tap.
 fn valid_package(s: &str) -> bool {
+    let part = |p: &str| {
+        let b = p.as_bytes();
+        (1..=64).contains(&b.len())
+            && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+            && b.iter()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"+._@-".contains(c))
+    };
+    let parts: Vec<&str> = s.split('/').collect();
+    matches!(parts.len(), 1 | 3) && parts.iter().all(|p| part(p))
+}
+
+/// What the helper sets for every session, and what sv2 forwards from the
+/// terminal. A definition does not get to change these.
+const RESERVED_ENV: [&str; 7] = [
+    "HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "TERMINFO",
+];
+
+fn valid_env_name(s: &str) -> bool {
     let b = s.as_bytes();
     (1..=64).contains(&b.len())
-        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b[0].is_ascii_uppercase()
         && b.iter()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"+._@-".contains(c))
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+        && !RESERVED_ENV.contains(&s)
+        && !s.starts_with("SV2_")
+        && !crate::shell::FORWARDED.contains(&s)
+}
+
+/// Printable ASCII: it is put on a command line or printed to a terminal.
+fn plain_text(s: &str, max: usize) -> bool {
+    s.len() <= max && s.bytes().all(|b| (0x20..0x7f).contains(&b))
 }
 
 /// A long option and nothing else: it is put on the agent's command line.
@@ -250,9 +301,41 @@ impl Definition {
                 return Err(format!("bypass_flag '{flag}' is not a long option"));
             }
         }
-        if file.run.no_inject.len() > 64 || !file.run.no_inject.iter().all(|s| valid_agent_name(s))
+        for list in [&file.run.no_inject, &file.run.inject_last] {
+            if list.len() > 64 || !list.iter().all(|s| valid_agent_name(s)) {
+                return Err(
+                    "no_inject and inject_last must list plain subcommand names".to_string()
+                );
+            }
+        }
+        if let Some(both) = file
+            .run
+            .no_inject
+            .iter()
+            .find(|s| file.run.inject_last.contains(s))
         {
-            return Err("no_inject must list plain subcommand names".to_string());
+            return Err(format!("'{both}' is in both no_inject and inject_last"));
+        }
+        if !file.run.inject_last.is_empty() && file.run.bypass_flag.is_none() {
+            return Err("inject_last needs a bypass_flag to place".to_string());
+        }
+        if let Some(text) = &file.run.grants {
+            if text.is_empty() || !plain_text(text, 200) {
+                return Err("grants must be a short line of plain text".to_string());
+            }
+        }
+        if file.run.env.len() > 16 {
+            return Err("env may set at most 16 variables".to_string());
+        }
+        for (name, value) in &file.run.env {
+            if !valid_env_name(name) {
+                return Err(format!(
+                    "env may not set '{name}': names are upper case, and those sv2 sets itself are taken"
+                ));
+            }
+            if !plain_text(value, 1024) {
+                return Err(format!("the value of {name} must be plain text"));
+            }
         }
         Ok(Definition {
             name: name.to_string(),
@@ -261,30 +344,67 @@ impl Definition {
             brew,
             guest_install,
             bypass_flag: file.run.bypass_flag,
+            grants: file.run.grants,
             no_inject: file.run.no_inject,
+            inject_last: file.run.inject_last,
+            env: file.run.env.into_iter().collect(),
         })
     }
 
-    /// The flag sv2 puts in front of `args`, if it does: not when the first
-    /// argument is a subcommand the definition lists in `no_inject`.
-    pub fn injected_flag(&self, args: &[OsString]) -> Option<&str> {
-        let flag = self.bypass_flag.as_deref()?;
+    /// Where the flag goes for `args`: nowhere when the first argument is a
+    /// subcommand listed in `no_inject`, after the arguments when it is in
+    /// `inject_last`, otherwise in front.
+    pub fn flag_for(&self, args: &[OsString]) -> Flag<'_> {
+        let Some(flag) = self.bypass_flag.as_deref() else {
+            return Flag::None;
+        };
         let first = args.first().and_then(|a| a.to_str());
-        if first.is_some_and(|f| self.no_inject.iter().any(|n| n == f)) {
-            return None;
+        let listed = |list: &[String]| first.is_some_and(|f| list.iter().any(|n| n == f));
+        if listed(&self.no_inject) {
+            Flag::None
+        } else if listed(&self.inject_last) {
+            Flag::Last(flag)
+        } else {
+            Flag::First(flag)
         }
-        Some(flag)
     }
 
     /// The agent's arguments as they are run.
     pub fn final_args(&self, args: &[OsString]) -> Vec<OsString> {
-        let mut v: Vec<OsString> = self
-            .injected_flag(args)
-            .map(Into::into)
-            .into_iter()
-            .collect();
-        v.extend(args.iter().cloned());
+        let mut v = args.to_vec();
+        match self.flag_for(args) {
+            Flag::First(flag) => v.insert(0, flag.into()),
+            Flag::Last(flag) => v.push(flag.into()),
+            Flag::None => {}
+        }
         v
+    }
+
+    /// `NAME=value` for each variable the definition sets.
+    pub fn env_pairs(&self) -> Vec<OsString> {
+        self.env
+            .iter()
+            .map(|(name, value)| format!("{name}={value}").into())
+            .collect()
+    }
+
+    /// What this run is trusted with, for the banner: the flag (when this
+    /// command line gets it) and the variables, then the definition's own
+    /// description of what they allow. None when the agent runs plain.
+    pub fn trust_line(&self, args: &[OsString]) -> Option<String> {
+        let mut with: Vec<String> = Vec::new();
+        if let Flag::First(flag) | Flag::Last(flag) = self.flag_for(args) {
+            with.push(flag.to_string());
+        }
+        with.extend(self.env.iter().map(|(n, v)| format!("{n}={v}")));
+        if with.is_empty() {
+            return None;
+        }
+        let what = with.join(" and ");
+        Some(match &self.grants {
+            Some(grants) => format!("{what} ({grants})"),
+            None => what,
+        })
     }
 
     /// Candidate paths, in order. `native` keeps only those in the sandbox
@@ -801,7 +921,10 @@ no_inject = ["update"]
                 brew: Some(Brew::Cask("claude-code".into())),
                 guest_install: Some("# install.sh\n".into()),
                 bypass_flag: Some("--dangerously-skip-permissions".into()),
+                grants: None,
                 no_inject: vec!["update".into()],
+                inject_last: vec![],
+                env: vec![],
             }
         );
     }
@@ -856,9 +979,11 @@ no_inject = ["update"]
                 "a binary under another user's home",
                 with("~/.local/bin/claude", "~pat/bin/claude"),
             ),
+            ("half a tap", with("claude-code", "tap/claude-code")),
+            ("a package with a path", with("claude-code", "a/b/c/d")),
             (
-                "a tapped package",
-                with("claude-code", "evil/tap/claude-code"),
+                "a package that climbs",
+                with("claude-code", "../tap/claude-code"),
             ),
             ("a package that is an option", with("claude-code", "--HEAD")),
             (
@@ -892,6 +1017,45 @@ no_inject = ["update"]
                 with("--dangerously-skip-permissions", "--mode=x"),
             ),
             ("a subcommand with a slash", with("\"update\"", "\"a/b\"")),
+            (
+                "a subcommand in both lists",
+                with(
+                    "no_inject = [\"update\"]",
+                    "no_inject = [\"update\"]\ninject_last = [\"update\"]",
+                ),
+            ),
+            (
+                "PATH in env",
+                with("no_inject", "env = { PATH = \"/evil\" }\nno_inject"),
+            ),
+            (
+                "HOME in env",
+                with("no_inject", "env = { HOME = \"/evil\" }\nno_inject"),
+            ),
+            (
+                "a forwarded variable in env",
+                with("no_inject", "env = { TERM = \"x\" }\nno_inject"),
+            ),
+            (
+                "an SV2_ variable in env",
+                with("no_inject", "env = { SV2_PROFILE = \"x\" }\nno_inject"),
+            ),
+            (
+                "a lower-case variable",
+                with("no_inject", "env = { path = \"x\" }\nno_inject"),
+            ),
+            (
+                "a variable name with =",
+                with("no_inject", "env = { \"A=B\" = \"x\" }\nno_inject"),
+            ),
+            (
+                "a value with a newline",
+                with("no_inject", "env = { A = \"x\\ny\" }\nno_inject"),
+            ),
+            (
+                "grants with an escape",
+                with("no_inject", "grants = \"\\u001b[31m\"\nno_inject"),
+            ),
         ];
         for (why, text) in cases {
             assert!(parse(&text).is_err(), "accepted: {why}");
@@ -917,7 +1081,9 @@ no_inject = ["update"]
         // Listed: passed through untouched, and the banner must not claim
         // the flag.
         assert_eq!(d.final_args(&os(&["update"])), os(&["update"]));
-        assert_eq!(d.injected_flag(&os(&["update"])), None);
+        assert_eq!(d.flag_for(&os(&["update"])), Flag::None);
+        assert_eq!(d.trust_line(&os(&["update"])), None);
+        assert_eq!(d.trust_line(&[]).as_deref(), Some(flag));
         // Only the first argument is a subcommand.
         assert_eq!(
             d.final_args(&os(&["-p", "update"])),
@@ -926,6 +1092,91 @@ no_inject = ["update"]
         // No flag in the definition: nothing is added.
         let plain = parse("schema = 1\nbinary = [\"/bin/echo\"]\n").unwrap();
         assert_eq!(plain.final_args(&os(&["a"])), os(&["a"]));
+    }
+
+    /// pi's shape: a flag that some subcommands take only after their
+    /// arguments and others not at all. And opencode's: a variable in
+    /// place of a flag.
+    #[test]
+    fn a_flag_placed_last_and_a_variable() {
+        let pi = parse(
+            "schema = 1\nbinary = [\"/bin/echo\"]\n[run]\nbypass_flag = \"--approve\"\n\
+             grants = \"trusts project-local files\"\n\
+             no_inject = [\"auth\"]\ninject_last = [\"install\", \"config\"]\n",
+        )
+        .unwrap();
+        assert_eq!(pi.final_args(&os(&["hi"])), os(&["--approve", "hi"]));
+        assert_eq!(
+            pi.final_args(&os(&["install", "-l", "x"])),
+            os(&["install", "-l", "x", "--approve"])
+        );
+        assert_eq!(
+            pi.final_args(&os(&["auth", "login"])),
+            os(&["auth", "login"])
+        );
+        assert_eq!(
+            pi.trust_line(&os(&["config"])).as_deref(),
+            Some("--approve (trusts project-local files)")
+        );
+        assert_eq!(pi.trust_line(&os(&["auth"])), None);
+
+        let opencode = parse(
+            "schema = 1\nbinary = [\"/bin/echo\"]\n[run]\n\
+             env = { OPENCODE_PERMISSION = '{\"*\":\"allow\"}', A_SECOND = \"2\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            opencode.env_pairs(),
+            os(&["A_SECOND=2", "OPENCODE_PERMISSION={\"*\":\"allow\"}"])
+        );
+        // No flag: the arguments are untouched, and the banner still says
+        // what the agent runs with, whatever the subcommand.
+        assert_eq!(opencode.final_args(&os(&["mcp"])), os(&["mcp"]));
+        assert_eq!(
+            opencode.trust_line(&os(&["mcp"])).as_deref(),
+            Some("A_SECOND=2 and OPENCODE_PERMISSION={\"*\":\"allow\"}")
+        );
+        // A tapped package is a package.
+        let tapped = parse(
+            "schema = 1\nbinary = [\"/bin/echo\"]\n[install.host]\nbrew = { formula = \"anomalyco/tap/opencode\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            brew_install_argv("/opt/homebrew", tapped.brew.as_ref().unwrap()),
+            [
+                "/opt/homebrew/bin/brew",
+                "install",
+                "--formula",
+                "anomalyco/tap/opencode"
+            ]
+        );
+    }
+
+    /// Every definition that ships parses, has its script, and says what
+    /// its flag or variables grant.
+    #[test]
+    fn the_builtin_definitions() {
+        let agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../agents");
+        let mut seen = Vec::new();
+        for entry in std::fs::read_dir(&agents).unwrap() {
+            let dir = entry.unwrap().path();
+            let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+            assert!(valid_agent_name(&name), "{name}");
+            let text = std::fs::read_to_string(dir.join("agent.toml")).unwrap();
+            let d = Definition::parse(&name, &dir, &text, &|file| {
+                std::fs::read_to_string(dir.join(file)).map_err(|e| format!("{file}: {e}"))
+            })
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(d.guest_install.is_some(), "{name} has no installer");
+            assert!(d.brew.is_some(), "{name} names no package");
+            assert!(d.has_home_candidate(), "{name}");
+            if d.trust_line(&[]).is_some() {
+                assert!(d.grants.is_some(), "{name} does not say what it grants");
+            }
+            seen.push(name);
+        }
+        seen.sort();
+        assert_eq!(seen, ["claude", "codex", "gemini", "opencode", "pi"]);
     }
 
     #[test]
@@ -1160,6 +1411,12 @@ no_inject = ["update"]
         assert_eq!(d.brew, Some(Brew::Formula("my-agent".into())));
         assert_eq!(d.bypass_flag.as_deref(), Some("--yes"));
         assert_eq!(d.no_inject, ["update"]);
+        assert_eq!(d.inject_last, ["config"]);
+        assert_eq!(d.grants.as_deref(), Some("it acts without asking"));
+        assert_eq!(
+            d.env,
+            [("EXAMPLE_VARIABLE".to_string(), "value".to_string())]
+        );
         assert!(d.guest_install.is_some());
     }
 

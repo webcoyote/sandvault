@@ -1,0 +1,20 @@
+# opencode
+# Taken from sandvault v1's working wrapper (guest/home/bin/opencode) and its
+# install step in sv; not checked again against a current opencode.
+schema = 1
+
+# Its own installer puts it in ~/.opencode/bin and nowhere else.
+binary = ["~/.opencode/bin/opencode", "~/.local/bin/opencode", "{brew}/bin/opencode"]
+
+[install.host]
+# From the project's own tap, as v1 installed it.
+brew = { formula = "anomalyco/tap/opencode" }
+
+[install.guest]
+script = "install.sh"
+
+[run]
+# opencode has no flag for this; it reads a variable. It applies to
+# subcommands as well, as it did in v1.
+env = { OPENCODE_PERMISSION = '{"*":"allow"}' }
+grants = "it acts without asking"

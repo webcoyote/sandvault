@@ -1,0 +1,27 @@
+# pi coding agent
+# Taken from sandvault v1's working wrapper (guest/home/bin/pi) and its
+# install step in sv; not checked again against a current pi.
+schema = 1
+
+# The native install, a Bun global install, then Homebrew.
+binary = ["~/.local/bin/pi", "~/.bun/bin/pi", "{brew}/bin/pi"]
+
+[install.host]
+brew = { formula = "pi-coding-agent" }
+
+[install.guest]
+script = "install.sh"
+
+[run]
+# pi runs its tools without asking as it is. --approve answers a different
+# question, its project-trust prompt: with it, extensions, skills, prompt
+# templates and themes that a project brings along are loaded.
+bypass_flag = "--approve"
+grants = "it trusts files a project brings along: extensions, skills, prompts, themes"
+# pi knows a subcommand only as its first argument: with the flag in front,
+# "pi --approve update --extensions" dies on "Unknown option". The package
+# commands and config take the flag themselves, after their arguments
+# ("install -l" and "config -l" need it to write project settings).
+inject_last = ["install", "remove", "uninstall", "update", "list", "config"]
+# These reject it outright ("Unknown option --approve.").
+no_inject = ["auth", "mcp"]

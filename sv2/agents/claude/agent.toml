@@ -17,3 +17,4 @@ script = "install.sh"
 # every subcommand (mcp, auth, plugin, doctor, install, update, agents), so
 # no subcommand needs to be listed in no_inject.
 bypass_flag = "--dangerously-skip-permissions"
+grants = "it acts without asking"

@@ -33,6 +33,17 @@ binary = ["~/.local/bin/{name}", "{brew}/bin/{name}"]
 # nothing. Check it against the program's --help. Leave it out for none.
 #bypass_flag = "--yes"
 
+# What the flag (and env, below) lets the agent do, in a few words. sv2 says
+# it each time the agent starts, so that nobody is surprised by it.
+#grants = "it acts without asking"
+
 # Subcommands that must not get the flag (for example ones that only manage
 # the program). Only the first argument is compared.
 #no_inject = ["update"]
+
+# Subcommands that get the flag after their arguments instead of before.
+#inject_last = ["config"]
+
+# Variables set for the agent, for a program that is told by a variable
+# what others are told by a flag.
+#env = { EXAMPLE_VARIABLE = "value" }

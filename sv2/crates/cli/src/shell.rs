@@ -476,6 +476,29 @@ mod tests {
         assert_eq!(s.probe(&[&missing, &adir, &plain, "echo"]), Some(1));
     }
 
+    /// What a definition sets with `env` reaches the agent as written,
+    /// through the launcher and the login shell.
+    #[test]
+    fn a_definitions_variables_reach_the_agent() {
+        let s = Scratch::new("env");
+        let paths = vec!["/bin/sh".to_string()];
+        let kind = Kind::Agent {
+            name: "tool",
+            native: false,
+            install_script: "",
+            paths: &paths,
+        };
+        let env = os(&[r#"OPENCODE_PERMISSION={"*":"allow"}"#, "A_SECOND=two words"]);
+        let v = argv(
+            &env,
+            s.dir.as_os_str(),
+            &kind,
+            &os(&["-c", r#"printf '%s|%s' "$OPENCODE_PERMISSION" "$A_SECOND""#]),
+        );
+        let out = s.command(&v).stdin(Stdio::null()).output().unwrap();
+        assert_eq!(text(&out.stdout), r#"{"*":"allow"}|two words"#);
+    }
+
     #[test]
     fn a_missing_agent_is_installed_only_when_asked() {
         let s = Scratch::new("native");
