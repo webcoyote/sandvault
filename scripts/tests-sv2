@@ -24,7 +24,7 @@ cd "$SV2_DIR"
 # The guest launcher is compiled into sv2 and run inside every session; the
 # agents' scripts run inside the sandbox too.
 if command -v shellcheck >/dev/null; then
-    shellcheck guest/launch.sh agents/*/*.sh
+    shellcheck guest/launch.sh agents/*/*.sh tests/profile-probes.sh tests/integration tests/root-checks
 else
     echo >&2 "sv2 tests: shellcheck not found; the guest scripts were NOT LINTED"
     [[ "${SV_TESTS_FAIL_ON_SKIP:-0}" != "1" ]] || exit 1
@@ -32,6 +32,8 @@ fi
 cargo fmt --all --check
 cargo clippy --locked --all-targets "${QUIET[@]+"${QUIET[@]}"}" -- -D warnings
 cargo test --locked "${QUIET[@]+"${QUIET[@]}"}"
+# The sandbox profile, probed as the current user (no root). Uses the network.
+cargo test --locked "${QUIET[@]+"${QUIET[@]}"}" -p sv2-helper -- --ignored profile_probes
 VERBOSE="$VERBOSE" "$SCRIPT_DIR/build"
 
 "$SV2_DIR/tests/integration" "$SV2_DIR/target/release"

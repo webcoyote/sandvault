@@ -1,8 +1,9 @@
 //! Renders a profile's `sandbox-exec` file from the embedded base profile.
 //!
-//! Milestone 1 ports v1's profile unchanged (allow-default with its deny
-//! list). Default deny is required before release (docs/SANDVAULT2.md,
-//! "Sandbox profile").
+//! The base profile is default deny; every allow in it names the probe in
+//! `tests/profile-probes.sh` that fails without it. The `profile_probes`
+//! test below runs those probes under the rendered profile as the current
+//! user, with no root: `cargo test -p sv2-helper -- --ignored profile_probes`.
 
 use sv2_common::{
     account_name, home_path, valid_host_user, valid_profile, workspace_path, workspace_user_dir,
@@ -25,12 +26,27 @@ pub fn render(host_user: &str, profile: &str) -> Result<String, String> {
         return Err("cannot render a sandbox profile for an invalid name".to_string());
     }
     let account = account_name(host_user, profile);
+    render_paths(
+        WORKSPACE_ROOT,
+        &workspace_user_dir(host_user),
+        &workspace_path(host_user, profile),
+        &home_path(&account),
+    )
+}
+
+/// The base profile with these paths filled in.
+fn render_paths(
+    workspace_root: &str,
+    workspace_user_dir: &str,
+    workspace: &str,
+    home: &str,
+) -> Result<String, String> {
     let subs = [
         ("__PROFILE_VERSION__", SANDBOX_PROFILE_VERSION.to_string()),
-        ("__WORKSPACE_ROOT__", WORKSPACE_ROOT.to_string()),
-        ("__WORKSPACE_USER_DIR__", workspace_user_dir(host_user)),
-        ("__WORKSPACE__", workspace_path(host_user, profile)),
-        ("__HOME__", home_path(&account)),
+        ("__WORKSPACE_ROOT__", workspace_root.to_string()),
+        ("__WORKSPACE_USER_DIR__", workspace_user_dir.to_string()),
+        ("__WORKSPACE__", workspace.to_string()),
+        ("__HOME__", home.to_string()),
     ];
     let mut out = BASE.to_string();
     for (key, value) in &subs {
@@ -92,6 +108,98 @@ mod tests {
         ] {
             assert!(render(user, profile).is_err(), "{user:?} {profile:?}");
         }
+    }
+
+    /// The profile is default deny, and says so once.
+    #[test]
+    fn the_profile_denies_by_default() {
+        let text = render("pat", "work").unwrap();
+        let rules: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with(";;"))
+            .collect();
+        assert!(rules.contains(&"(deny default)"));
+        assert!(!rules.iter().any(|l| l.contains("(allow default)")));
+        // The Mach services a session may reach, and no others.
+        let names: Vec<&str> = rules
+            .iter()
+            .filter(|l| l.starts_with("(global-name"))
+            .map(|l| l.trim_end_matches(')'))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "(global-name-prefix \"com.apple.system.\"",
+                "(global-name \"com.apple.TrustEvaluationAgent\"",
+                "(global-name \"com.apple.trustd.agent\"",
+                "(global-name \"com.apple.SecurityServer\"",
+                "(global-name \"com.apple.FSEvents\"",
+                // The explicit denies that follow the allow.
+                "(global-name \"com.apple.DiskArbitration.diskarbitrationd\"",
+                "(global-name \"com.apple.NetAuthAgent\"",
+                "(global-name \"com.apple.NetAuthSysAgent\"",
+                "(global-name \"com.apple.appleeventsd\"",
+            ]
+        );
+    }
+
+    /// Runs tests/profile-probes.sh under the rendered profile, as the
+    /// current user, with a scratch home and workspace. This is how the
+    /// profile is worked on: change base.sb, run this, read what failed.
+    ///
+    /// Ignored by default because it uses the network and takes a while;
+    /// scripts/tests-sv2 runs it. The same probes run in a real session, as
+    /// the sandbox user in its own launchd domain, in tests/integration.
+    #[test]
+    #[ignore = "uses the network; run by scripts/tests-sv2"]
+    fn profile_probes() {
+        let probes = include_str!("../../../tests/profile-probes.sh");
+        let root = std::env::temp_dir().join(format!("sv2-probes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // Resolved: the profile names paths as the kernel sees them.
+        let root = root.canonicalize().unwrap();
+        let at = |rest: &str| root.join(rest).to_str().unwrap().to_string();
+        for dir in ["home", "tmp", "ws/user/work"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let text = render_paths(&at("ws"), &at("ws/user"), &at("ws/user/work"), &at("home"))
+            .expect("the scratch paths do not fit in a profile");
+        std::fs::write(root.join("profile.sb"), text).unwrap();
+        let user = std::env::var("USER").unwrap_or_else(|_| "nobody".into());
+        let out = Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(root.join("profile.sb"))
+            .args(["/bin/bash", "-c", probes])
+            .env_clear()
+            .env("HOME", at("home"))
+            .env("USER", &user)
+            .env("LOGNAME", &user)
+            .env("SHELL", "/bin/zsh")
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("TMPDIR", at("tmp"))
+            .env("SV2_WORKSPACE", at("ws/user/work"))
+            // Outside a session there is no account behind HOME.
+            .env("SV2_PROBE_NO_ACCOUNT", "1")
+            .current_dir(root.join("ws/user/work"))
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let report = String::from_utf8_lossy(&out.stdout);
+        let failed: Vec<&str> = report.lines().filter(|l| l.starts_with("FAIL")).collect();
+        let passed = report.lines().filter(|l| l.starts_with("ok ")).count();
+        for line in report.lines().filter(|l| l.starts_with("skip")) {
+            eprintln!("{line}");
+        }
+        assert!(
+            failed.is_empty(),
+            "probes failed under the profile:\n{}\n{}",
+            failed.join("\n"),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Not vacuous: the script ran to its end.
+        assert!(passed >= 35, "only {passed} probes passed:\n{report}");
     }
 
     /// The same check the helper makes before renaming a profile into place:

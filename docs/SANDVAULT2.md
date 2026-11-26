@@ -251,9 +251,9 @@ separates user from profile unambiguously.
   capability choices to the helper on stdin. The helper validates them and
   renders the file from the embedded base profile. The input format is an open
   item.
-- **Decided:** the first milestone ports v1's profile unchanged
-  (allow-default with its deny list). The default-deny work below follows
-  once sessions run, and is required before release.
+- **Decided:** the first milestone ported v1's profile unchanged
+  (allow-default with its deny list). It is default deny since 2026-11-26;
+  see "Default deny" under "Milestone 1".
 - Default deny (finding 11). Each allow rule is written in the source next to
   the tool that needs it and the symptom without it, measured as the sandbox
   user under the rendered profile (§3). The probes are kept as tests.
@@ -691,7 +691,7 @@ Decisions this milestone made:
     Bumping any of them makes every installed machine ask for
     `sv2 install`; a release that bumps none needs no reinstall.
   - *Comparison.* `sv2` passes all four as one word
-    (`helper=5,sudoers=2,sshd=1,profile=1`) where it used to pass the
+    (`helper=5,sudoers=2,sshd=1,profile=2`) where it used to pass the
     application version, and the helper refuses a word that is not its own,
     with exit status 3. `sv2 --version` prints the word on a second line.
     The numbers reach a machine only inside a new helper, because the
@@ -856,6 +856,46 @@ Decisions this milestone made:
   away. It never opens or follows what it finds. A user who keeps putting a
   directory with a file in it there can still block `install`; the message
   names them.
+- **Default deny (2026-11-26; finding 11).** The base profile starts with
+  `(deny default)`. Profile version 2; `sv2 install` re-renders every
+  profile.
+  - *Probes.* `sv2/tests/profile-probes.sh` is what a session must be able
+    to do (about 40 things: files, processes, terminals, the network, git,
+    a C compile, python, node, keychains, a file watcher, tmux, claude) and
+    must not (other homes, keychains, raw disks, the pasteboard,
+    AppleScript, opening an application, DiskArbitration, launchd jobs,
+    the screen). Each allow in `base.sb` names the probe that fails
+    without it. The probes run in a real session in the integration suite,
+    and under `sandbox-exec` as the current user in a unit test of the
+    helper (`profile_probes`), which needs no root and is how the profile
+    is worked on.
+  - *What is allowed*, each measured by taking it out: reading files,
+    the network, signals, pseudo-terminals, ioctl on `/dev`, POSIX shared
+    memory and semaphores, `sysctl` reads, starting programs, `/bin/ps`
+    outside the sandbox, the writable places as before, and five Mach
+    names: `com.apple.system.` (user and group names),
+    `TrustEvaluationAgent` (TLS for curl, git, python), `trustd.agent`
+    (TLS for Go programs), `SecurityServer` (keychains), `FSEvents` (file
+    watchers).
+  - *Removed*, because no probe failed without them: the two Mach names
+    the review called unmeasured, `com.apple.cfprefsd` (`defaults` works
+    from the file) and `com.apple.ocspd`; `com.apple.dnssd`,
+    `com.apple.mDNSResponder`, `com.apple.networkd` and
+    `com.apple.SystemConfiguration` (names resolve and connections are
+    made without them); `process-info*`; the denies that default deny
+    made redundant (all writes, mounting); and what only a browser needs
+    (`com.apple.coreservices.launchservicesd`, the Chrome and Crashpad
+    prefixes), which come back with browser support and a probe of their
+    own.
+  - *Not narrowed, by decision:* file reads are still everything but
+    `/Users`, `/Volumes`, `/Library/Keychains` and raw disks, and the
+    network is still everything, localhost and port 22 included. Both
+    were deferred, with per-profile capabilities (open item 8).
+  - *How it was measured.* As the current user under `sandbox-exec`, in
+    the host user's launchd domain, with a scratch home. The probes
+    themselves were run in a real session under the old profile and all
+    passed there. The new profile in a real session waits for
+    `sv2 install`.
 - **Uninstall and profiles (2026-11-26).** `sv2 uninstall` used to remove
   every profile of every user, with the sandbox homes and what the agents
   kept in them (logins, native installs), behind nothing but the sudo
@@ -954,6 +994,12 @@ is run by hand: `sv2/tests/root-checks sv2/target/release
   list and the arguments. Not yet run on a machine: `sv2 uninstall` with a
   profile present (refused, nothing removed), and `--all-profiles`
   (root-checks).
+- [ ] **The default-deny profile has not run in a session.** All probes
+  pass under it as the current user (unit test). Not yet run: the same
+  probes as a sandbox account in its own launchd domain, which the
+  integration suite does once this build is installed; and real work in a
+  session, above all a logged-in agent. What was removed is listed under
+  "Default deny"; a tool that stops working points there first.
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -1013,7 +1059,10 @@ None recorded.
   built-in, to change it). It never replaces a definition that is there.
 - [x] Quarantine handling for installed agent binaries (open item 1); see
   "Quarantine" under "Milestone 1".
-- [ ] Default deny, and per-profile capabilities (open item 8).
+- [x] Default deny; see "Default deny" under "Milestone 1".
+- [ ] Per-profile capabilities (open item 8), a position on localhost and
+  port 22, and a narrower rule for reading files. All deferred on
+  2026-11-26.
 - [ ] Repository credentials.
 - [ ] Browser support.
 - [ ] iOS bridge, and the simulator trust question (open item 2).

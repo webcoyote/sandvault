@@ -158,6 +158,19 @@ check "session: no staff, no host groups" "" \
 # launchd domain, not the host user's.
 check "session: own launchd domain (manageruid == uid)" "$SB_UID" "$(sb /bin/launchctl manageruid)"
 check "session: starts in the workspace" "$WS" "$(cd / && sb /bin/pwd)"
+# The sandbox profile, probed from inside a session: what must work works,
+# and what must not does not. These are the probes each rule of the profile
+# is justified by; the helper's unit test runs the same ones without root.
+PROBES="$(sb /bin/bash -c "$(/bin/cat "$(dirname "${BASH_SOURCE[0]}")/profile-probes.sh")" 2>&1 || true)"
+PROBES_OK="$(printf '%s\n' "$PROBES" | /usr/bin/grep -c '^ok ' || true)"
+PROBES_FAILED="$(printf '%s\n' "$PROBES" | /usr/bin/grep '^FAIL' || true)"
+if [[ -z "$PROBES_FAILED" && "$PROBES_OK" -ge 35 ]]; then
+    pass "profile: $PROBES_OK probes as wanted in a session"
+else
+    fail "profile: probes as wanted in a session" "$PROBES_OK ok; $PROBES_FAILED"
+fi
+printf '%s\n' "$PROBES" | /usr/bin/grep '^skip' | /usr/bin/sed 's/^/     /' || true
+
 # The guest launcher: the session's own bin directories lead PATH, Homebrew
 # comes before the system (a login zsh would otherwise put the system first),
 # and the startup file that arranges it was written into the sandbox home.
