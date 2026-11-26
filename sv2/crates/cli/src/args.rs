@@ -7,6 +7,7 @@
 //! sv2 run [OPTIONS] NAME [ARGS...]   OPTIONS: --profile NAME, --native
 //! sv2 [OPTIONS] NAME [ARGS...]        shorthand for sv2 run
 //! sv2 repair PATH | doctor
+//! sv2 agent new NAME [--from AGENT]
 //! ```
 //!
 //! Options come before NAME. Everything after NAME goes to the agent
@@ -31,6 +32,7 @@ pub const SUBCOMMANDS: &[&str] = &[
     "run",
     "repair",
     "doctor",
+    "agent",
     "help",
 ];
 
@@ -56,6 +58,12 @@ pub enum Cmd {
         args: Vec<OsString>,
     },
     Repair(OsString),
+    /// Create the user's definition of an agent.
+    AgentNew {
+        name: String,
+        /// The definition to copy; the template when None.
+        from: Option<String>,
+    },
     /// Parsed so the name is reserved; not implemented in this milestone.
     NotYet(&'static str),
 }
@@ -82,6 +90,7 @@ fn none(rest: &[OsString], usage: &str) -> Result<(), String> {
 }
 
 const USER_VERBS: &[&str] = &["allow", "deny"];
+const AGENT_VERBS: &[&str] = &["new"];
 const PROFILE_VERBS: &[&str] = &["add", "remove", "list"];
 
 /// Commands that delete things and ask nothing first. A slip of one letter
@@ -234,6 +243,22 @@ pub fn parse(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
             _ => Err("usage: sv2 repair PATH".to_string()),
         },
         "doctor" => Ok(Cmd::NotYet("doctor")),
+        "agent" => {
+            const USAGE: &str = "sv2 agent new NAME [--from AGENT]";
+            let words: Option<Vec<&str>> = rest.iter().map(|a| a.to_str()).collect();
+            let words = words.ok_or("an argument is not valid UTF-8")?;
+            match (verb(AGENT_VERBS)?, words.get(1..).unwrap_or(&[])) {
+                (Some("new"), [name]) => Ok(Cmd::AgentNew {
+                    name: (*name).into(),
+                    from: None,
+                }),
+                (Some("new"), [name, "--from", other]) => Ok(Cmd::AgentNew {
+                    name: (*name).into(),
+                    from: Some((*other).into()),
+                }),
+                _ => Err(format!("usage: {USAGE}")),
+            }
+        }
         // Shorthand: `sv2 shell`. `parse_run` reads the same word again and,
         // among agents alone, finds the same one.
         _ => parse_run(args, agents),
@@ -319,6 +344,36 @@ mod tests {
             &["uninstall", "-a"][..],
             &["uninstall", "--all-profiles", "--all-profiles"][..],
             &["uninstall", "--all-profiles", "x"][..],
+        ] {
+            assert!(p(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn agent_new() {
+        let new = |name: &str, from: Option<&str>| {
+            Ok(Cmd::AgentNew {
+                name: name.into(),
+                from: from.map(Into::into),
+            })
+        };
+        assert_eq!(p(&["agent", "new", "codex"]), new("codex", None));
+        assert_eq!(
+            p(&["agent", "new", "mine", "--from", "claude"]),
+            new("mine", Some("claude"))
+        );
+        assert_eq!(p(&["a", "n", "codex"]), new("codex", None));
+        // The names are checked where the definition is made, not here: the
+        // name of a new agent matches no existing one.
+        assert_eq!(p(&["agent", "new", "Bad Name"]), new("Bad Name", None));
+        for bad in [
+            &["agent"][..],
+            &["agent", "new"][..],
+            &["agent", "list"][..],
+            &["agent", "new", "a", "b"][..],
+            &["agent", "new", "a", "--from"][..],
+            &["agent", "new", "a", "--from", "b", "c"][..],
+            &["agent", "new", "--from", "b", "a"][..],
         ] {
             assert!(p(bad).is_err(), "{bad:?}");
         }

@@ -543,6 +543,89 @@ impl Sources {
 }
 
 // ---------------------------------------------------------------------------
+// New definitions
+// ---------------------------------------------------------------------------
+
+/// What `sv2 agent new NAME` writes: every key, explained, with the
+/// optional ones commented out. `{name}` stands for the agent's name.
+const TEMPLATE: &str = include_str!("agent-template.toml");
+
+fn template_for(name: &str) -> String {
+    TEMPLATE.replace("{name}", name)
+}
+
+fn make_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o755).create(path)
+}
+
+impl Sources {
+    /// Create the user's definition of `name`: from the template, or as a
+    /// copy of the definition `from` (a built-in, to change it, or another
+    /// of the user's). Returns the new directory. An existing definition
+    /// is never replaced.
+    pub fn create(&self, name: &str, from: Option<&str>) -> Result<PathBuf, String> {
+        if !valid_agent_name(name) {
+            return Err(format!(
+                "'{name}' cannot be an agent's name: use a-z, 0-9 and '-', starting with a letter or digit"
+            ));
+        }
+        let user = self
+            .user
+            .as_ref()
+            .ok_or("cannot find your home directory")?;
+        // What goes into the new directory, read before anything is made.
+        let files: Vec<(String, Vec<u8>)> = match from {
+            None => vec![("agent.toml".to_string(), template_for(name).into_bytes())],
+            Some(other) => {
+                // Checked and parsed like any definition that is used.
+                let source = self.load(other)?.dir;
+                let mut files = Vec::new();
+                let entries =
+                    std::fs::read_dir(&source).map_err(|e| format!("{}: {e}", source.display()))?;
+                for entry in entries {
+                    let entry = entry.map_err(|e| format!("{}: {e}", source.display()))?;
+                    let Ok(file) = entry.file_name().into_string() else {
+                        continue;
+                    };
+                    // The definition and its scripts; nothing hidden.
+                    if file.starts_with('.') || !entry.path().is_file() {
+                        continue;
+                    }
+                    let bytes = std::fs::read(entry.path())
+                        .map_err(|e| format!("{}: {e}", entry.path().display()))?;
+                    files.push((file, bytes));
+                }
+                files
+            }
+        };
+        std::fs::create_dir_all(user).map_err(|e| format!("{}: {e}", user.display()))?;
+        let dir = user.join(name);
+        match make_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(format!(
+                    "{} already exists; edit it, or remove it first",
+                    dir.display()
+                ))
+            }
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+        for (file, bytes) in files {
+            std::fs::write(dir.join(&file), bytes)
+                .map_err(|e| format!("{}: {e}", dir.join(&file).display()))?;
+        }
+        // Say so now if sv2 would refuse to read what it has just written
+        // (a config directory that others can write, for one).
+        let resolved = dir
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+        refuse_if_sandbox_writable(&resolved)?;
+        Ok(dir)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Who can write a definition
 // ---------------------------------------------------------------------------
 
@@ -1043,6 +1126,83 @@ no_inject = ["update"]
             let err = s.load(missing).unwrap_err();
             assert!(err.contains("unknown agent"), "{missing}: {err}");
         }
+    }
+
+    #[test]
+    fn the_template_is_a_definition_as_written() {
+        let d = Definition::parse(
+            "my-agent",
+            Path::new("/d"),
+            &template_for("my-agent"),
+            &|_| Err("the template names no script".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            d.binary,
+            vec![
+                Candidate::Home(".local/bin/my-agent".into()),
+                Candidate::Brew("bin/my-agent".into())
+            ]
+        );
+        assert_eq!((d.brew, d.guest_install, d.bypass_flag), (None, None, None));
+        // And with every commented-out key switched on. (Comment lines
+        // start with "# "; the keys with "#" alone.)
+        let full: String = template_for("my-agent")
+            .lines()
+            .map(|l| match l.strip_prefix('#') {
+                Some(rest) if !rest.starts_with(' ') && !rest.is_empty() => rest,
+                _ => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let d =
+            Definition::parse("my-agent", Path::new("/d"), &full, &|_| Ok(String::new())).unwrap();
+        assert_eq!(d.brew, Some(Brew::Formula("my-agent".into())));
+        assert_eq!(d.bypass_flag.as_deref(), Some("--yes"));
+        assert_eq!(d.no_inject, ["update"]);
+        assert!(d.guest_install.is_some());
+    }
+
+    #[test]
+    fn a_new_definition_from_the_template_or_from_another() {
+        let t = Tree::new("create");
+        t.definition("builtin/claude", CLAUDE);
+        let s = t.sources();
+
+        // From the template: one file, and it loads.
+        let dir = s.create("mine", None).unwrap();
+        assert_eq!(dir, t.0.join("user/mine"));
+        let text = std::fs::read_to_string(dir.join("agent.toml")).unwrap();
+        assert!(text.contains("\"~/.local/bin/mine\""), "{text}");
+        assert!(!text.contains("{name}"), "{text}");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert_eq!(s.load("mine").unwrap().dir, dir);
+        assert!(s.names().contains(&"mine".to_string()));
+
+        // From a built-in, under its own name: a copy that now wins.
+        let dir = s.create("claude", Some("claude")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("agent.toml")).unwrap(),
+            CLAUDE
+        );
+        assert!(dir.join("install.sh").is_file());
+        assert_eq!(s.load("claude").unwrap().dir, dir);
+
+        // Never over something that is there, even an empty directory.
+        for (name, from) in [("mine", None), ("claude", Some("claude"))] {
+            let err = s.create(name, from).unwrap_err();
+            assert!(err.contains("already exists"), "{err}");
+        }
+        std::fs::create_dir(t.0.join("user/taken")).unwrap();
+        assert!(s.create("taken", None).is_err());
+
+        // Bad names and unknown sources make nothing.
+        for bad in ["", "Bad", "a/b", "../x", "-x"] {
+            assert!(s.create(bad, None).is_err(), "{bad:?}");
+        }
+        let err = s.create("other", Some("nothere")).unwrap_err();
+        assert!(err.contains("unknown agent"), "{err}");
+        assert!(!t.0.join("user/other").exists());
     }
 
     #[test]

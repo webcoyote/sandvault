@@ -295,6 +295,7 @@ sv2 run [OPTIONS] NAME [ARGS...]
 sv2 [OPTIONS] NAME [ARGS...]      # shorthand for sv2 run
 sv2 repair PATH
 sv2 doctor
+sv2 agent new NAME [--from AGENT]
 ```
 
 - `sv2 user allow USER` and `sv2 user deny USER` add a user to, or remove one
@@ -1003,9 +1004,10 @@ See "Priority order" above for the order.
   far (`claude`). Not yet: definitions for the other agents v1 has (codex,
   gemini, opencode, pi, muse, herdr), each to be checked against its real
   program; `system_prompt` and `wrapper`.
-- [ ] A command that creates an agent definition from a template, in
-  `~/.config/sandvault2/agents`, so that adding an agent does not start
-  from an empty file.
+- [x] `sv2 agent new NAME [--from AGENT]` creates a definition in
+  `~/.config/sandvault2/agents`: from a template that shows every key, the
+  optional ones commented out, or as a copy of an existing definition (a
+  built-in, to change it). It never replaces a definition that is there.
 - [x] Quarantine handling for installed agent binaries (open item 1); see
   "Quarantine" under "Milestone 1".
 - [ ] Default deny, and per-profile capabilities (open item 8).

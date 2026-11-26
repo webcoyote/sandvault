@@ -42,6 +42,8 @@ Usage:
                                     file or directory in one of your workspaces
                                     (for files moved in; profile add and remove
                                     do this for kept files themselves)
+  sv2 agent new NAME [--from AGENT] write your own definition of an agent,
+                                    from a template or as a copy of AGENT
   sv2 run [OPTIONS] NAME [ARGS...]  run agent NAME in a sandbox
   sv2 [OPTIONS] NAME [ARGS...]      shorthand for sv2 run
 
@@ -351,6 +353,28 @@ fn ensure_installed(
     Ok(())
 }
 
+fn agent_new(sources: &agent::Sources, name: &str, from: Option<&str>) -> ExitCode {
+    if name == SHELL {
+        return fail("shell is part of sv2 and has no definition");
+    }
+    let dir = match sources.create(name, from) {
+        Ok(dir) => dir,
+        Err(e) => return fail(&e),
+    };
+    println!("{}", dir.join("agent.toml").display());
+    match from {
+        None => eprintln!("sv2: edit it, then run: sv2 run {name}"),
+        Some(other) => {
+            eprintln!("sv2: a copy of {other}; it is used in place of any built-in {name}")
+        }
+    }
+    // Subcommands win over agents of the same name.
+    if args::SUBCOMMANDS.contains(&name) {
+        eprintln!("sv2: '{name}' is also a command, so run this agent with: sv2 run {name}");
+    }
+    ExitCode::SUCCESS
+}
+
 fn run(
     sources: &agent::Sources,
     profile: &str,
@@ -550,6 +574,7 @@ fn main() -> ExitCode {
             Ok(false) => ExitCode::FAILURE,
             Err(e) => fail(&e),
         },
+        Cmd::AgentNew { name, from } => agent_new(&sources, &name, from.as_deref()),
         Cmd::NotYet(name) => fail(&format!("'sv2 {name}' is not implemented yet")),
     }
 }

@@ -1,0 +1,38 @@
+# Definition of the agent "{name}" for sandvault2.
+#
+# Run it with:   sv2 {name}        (or: sv2 run {name})
+# Every key sv2 knows is shown here; a key it does not know is an error.
+
+# The version of this format. Leave it.
+schema = 1
+
+# Where the program may be, most preferred first. The first that exists is
+# run. Each entry starts with one of:
+#   ~/        the sandbox home (where an installer run inside the sandbox
+#             puts things)
+#   {brew}/   the Homebrew prefix (/opt/homebrew or /usr/local)
+#   /         anywhere else
+binary = ["~/.local/bin/{name}", "{brew}/bin/{name}"]
+
+# How sv2 installs the program on this Mac, as you, when it is nowhere:
+#   brew install --formula NAME    or    brew install --cask NAME
+# One of the two, a plain package name. Leave the section out if Homebrew
+# does not have the program.
+#[install.host]
+#brew = { formula = "{name}" }
+
+# The program's own installer, for "sv2 run --native {name}". It is a shell
+# script beside this file, runs inside the sandbox as the sandbox user, and
+# should leave the program at one of the "~/" paths above.
+#[install.guest]
+#script = "install.sh"
+
+[run]
+# A flag sv2 puts before your arguments, usually the one that turns the
+# agent's own permission questions off: inside the sandbox they protect
+# nothing. Check it against the program's --help. Leave it out for none.
+#bypass_flag = "--yes"
+
+# Subcommands that must not get the flag (for example ones that only manage
+# the program). Only the first argument is compared.
+#no_inject = ["update"]
