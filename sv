@@ -139,6 +139,10 @@ readonly VERSION="1.41.0"
 
 # Bump when the sandbox policy changes: the profile is root owned, so the
 # version line it carries is how an installed machine learns it is stale.
+# The ocspd removal takes effect on the next --rebuild. Bumping the version
+# would force an immediate rebuild on every existing install, which requires
+# sudo and would break non-interactive setups. The version stays at 5 until
+# the next breaking change that justifies the forced rewrite.
 readonly SV_SANDBOX_PROFILE_VERSION="5"
 
 # Bump when the session launcher (SANDVAULT_LAUNCHER) changes, for the same
@@ -682,10 +686,14 @@ start_ios_simulator() {
     mkdir -p "$SV_PRIVATE_DIR/tmp"
     IOS_BRIDGE_SCRATCH_DIR="$(mktemp -d "$SV_PRIVATE_DIR/tmp/sv-ios-bridge.XXXXXX")"
     rm -f "$IOS_BRIDGE_LOG_FILE"
+    # Per-session token so only this sandbox can reach the bridge.
+    IOS_BRIDGE_TOKEN="$(openssl rand -hex 16)"
     debug "Starting iOS bridge..."
     "$WORKSPACE/helpers/sv-ios-bridge" --udid "$IOS_SIM_UDID" \
         --host 127.0.0.1 --port 0 \
         --scratch-dir "$IOS_BRIDGE_SCRATCH_DIR" \
+        --token "$IOS_BRIDGE_TOKEN" \
+        --allowed-prefix "$SHARED_WORKSPACE/" \
         > "$IOS_BRIDGE_LOG_FILE" 2>&1 &
     IOS_BRIDGE_PID=$!
 
@@ -777,11 +785,15 @@ configure_shared_folder_permssions() {
     # latter errors: "chmod: the -R and -h options may not be specified
     # together".
     if [[ "$enable" == "true" ]]; then
-        # Make workspace accessible to $HOST_USER and $SANDVAULT_GROUP only
+        # Make workspace accessible to $HOST_USER and $SANDVAULT_GROUP only.
+        # Use find -exec -h instead of chown -R: -R follows symlinks and
+        # applies to hard-linked inodes outside the tree. Skip inodes with
+        # nlink > 1 (hard links) so ownership changes don't escape.
         trace "Configuring $SHARED_WORKSPACE: set owner to $HOST_USER:$SANDVAULT_GROUP"
-        sudo /usr/sbin/chown -f -R "$HOST_USER:$SANDVAULT_GROUP" "$SHARED_WORKSPACE"
+        sudo find "$SHARED_WORKSPACE" ! -type l -links 1 \
+            -exec /usr/sbin/chown -h "$HOST_USER:$SANDVAULT_GROUP" {} + 2>/dev/null || true
         trace "Configuring $SHARED_WORKSPACE permissions..."
-        sudo /bin/chmod 0770 "$SHARED_WORKSPACE"
+        sudo /bin/chmod -h 0770 "$SHARED_WORKSPACE"
 
         # One-shot legacy ACE cleanup. Several historical sv releases
         # applied ACE shapes that propagated execute (or search, which
@@ -812,9 +824,10 @@ configure_shared_folder_permssions() {
     else
         # Make workspace accessible to $HOST_USER only
         trace "Configuring $SHARED_WORKSPACE: restoring owner to $HOST_USER:$(id -gn)"
-        sudo /usr/sbin/chown -f -R "$HOST_USER:$(id -gn)" "$SHARED_WORKSPACE"
+        sudo find "$SHARED_WORKSPACE" ! -type l -links 1 \
+            -exec /usr/sbin/chown -h "$HOST_USER:$(id -gn)" {} + 2>/dev/null || true
         trace "Configuring $SHARED_WORKSPACE permissions..."
-        sudo /bin/chmod 0700 "$SHARED_WORKSPACE"
+        sudo /bin/chmod -h 0700 "$SHARED_WORKSPACE"
         trace "Configuring $SHARED_WORKSPACE: stripping all ACLs"
         sudo find "$SHARED_WORKSPACE" -exec /bin/chmod -h -N {} + \
             2>/dev/null || true
@@ -975,11 +988,14 @@ uninstall_all() {
         sudo rm -rf "$p_sudoers" "$p_sudoers_legacy"
         sudo rm -rf "$p_build_home" "$p_launcher" "$p_sandbox"
 
-        # Remove ACLs on workspace
+        # Remove ACLs on workspace. Use find -exec -h instead of -R to
+        # avoid following symlinks and to skip hard links (nlink > 1) that
+        # could carry the ownership/ACL change to an inode outside the tree.
         if [[ -d "$p_workspace" ]]; then
-            sudo chmod -RN "$p_workspace" 2>/dev/null || true
-            sudo chown -R "$HOST_USER:$(id -gn)" "$p_workspace" 2>/dev/null || true
-            sudo chmod -R u=rwX,go= "$p_workspace" 2>/dev/null || true
+            sudo find "$p_workspace" -exec /bin/chmod -h -N {} + 2>/dev/null || true
+            sudo find "$p_workspace" ! -type l -links 1 -exec /usr/sbin/chown -h "$HOST_USER:$(id -gn)" {} + 2>/dev/null || true
+            sudo find "$p_workspace" ! -type l -links 1 \( -type d -exec /bin/chmod -h u=rwx,go= {} + \) \
+                -o \( ! -type d -exec /bin/chmod -h u=rw,go= {} + \) 2>/dev/null || true
         fi
 
         # Remove group membership and user/group
@@ -1037,15 +1053,10 @@ uninstall_all() {
         rm -f "$orphan"
         trace "Swept orphan install marker: $orphan"
     done
-    # Session dirs (profile subdirs of ~/.local/state/sandvault/)
-    for orphan in "$HOME/.local/state/sandvault"/*/; do
-        [[ -d "$orphan" ]] || continue
-        rm -rf "$orphan"
-        trace "Swept orphan session dir: $orphan"
-    done
+    # Session dirs are only removed if they were already cleaned in pass 1.
+    # Do not sweep unknown subdirs — they may be user-created.
 
-    # Clean up parent dirs if now empty
-    sudo rmdir "$(dirname "$INSTALL_PRODUCT/x")" 2>/dev/null || true
+    # Clean up parent dirs if now empty (no sudo — these are user dirs)
     rmdir "$INSTALL_PRODUCT" &>/dev/null || true
     rmdir "$INSTALL_ORG" &>/dev/null || true
     sudo rmdir /var/sandvault 2>/dev/null || true
@@ -1053,6 +1064,45 @@ uninstall_all() {
     info "All profiles removed"
 }
 
+
+###############################################################################
+# Refuse to run from inside a sandbox-writable directory
+###############################################################################
+# If this script lives under any sandbox's shared workspace, the sandbox user
+# can edit it between invocations. The host then executes sandbox-controlled
+# code, including the steps that call sudo. Warn and refuse unless nested (the
+# sandbox is already the sandbox) or the user explicitly overrides.
+if [[ "$NESTED" == "false" && "${SV_ALLOW_WORKSPACE_INSTALL:-}" != "1" ]]; then
+    _ws_unsafe=false
+    # Check 1: $WORKSPACE under any sandvault shared workspace
+    case "$WORKSPACE" in
+        /Users/Shared/sv-*) _ws_unsafe=true ;;
+        *) ;;
+    esac
+    # Check 2: $WORKSPACE under any sandvault user home
+    case "$WORKSPACE" in
+        /Users/sandvault-*) _ws_unsafe=true ;;
+        *) ;;
+    esac
+    # Check 3: $WORKSPACE writable by any sandvault group
+    if [[ "$_ws_unsafe" == "false" ]]; then
+        _ws_group="$(/usr/bin/stat -f '%Sg' "$WORKSPACE" 2>/dev/null || true)"
+        case "$_ws_group" in
+            sandvault-*) _ws_unsafe=true ;;
+            *) ;;
+        esac
+    fi
+    if [[ "$_ws_unsafe" == "true" ]]; then
+        error "Refusing to run: this script lives inside a sandbox-writable directory."
+        error "  $WORKSPACE"
+        error "The sandbox user can edit this script and its helpers, which the host"
+        error "then executes, including steps that call sudo."
+        error ""
+        error "Use an installed copy (Homebrew, or a checkout in your home directory)."
+        error "To override this check: SV_ALLOW_WORKSPACE_INSTALL=1 sv ..."
+        exit 1
+    fi
+fi
 
 ###############################################################################
 # Parse command line
@@ -1471,15 +1521,20 @@ next_free_id() {
 # Mac do not race on ID allocation. mkdir is atomic on POSIX, so the
 # first creator wins. The lock holder writes its PID; if a stale lock
 # is found (PID no longer running) we steal it.
-SV_ID_LOCK_DIR="/tmp/sandvault-id-alloc.lock"
+# Lock in /var/sandvault/ (root-owned) so a sandbox user cannot pre-create
+# the lock directory and block builds. /tmp is world-writable.
+SV_ID_LOCK_DIR="/var/sandvault/id-alloc.lock"
 acquire_id_alloc_lock() {
     local waited=0
-    while ! mkdir "$SV_ID_LOCK_DIR" 2>/dev/null; do
+    sudo mkdir -p "$(dirname "$SV_ID_LOCK_DIR")" 2>/dev/null || true
+    while ! sudo mkdir "$SV_ID_LOCK_DIR" 2>/dev/null; do
         local holder=""
         [[ -r "$SV_ID_LOCK_DIR/pid" ]] && holder=$(cat "$SV_ID_LOCK_DIR/pid" 2>/dev/null || true)
         if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
             warn "Removing stale ID-allocation lock from PID $holder"
-            rm -rf "$SV_ID_LOCK_DIR"
+            sudo rm -rf "$SV_ID_LOCK_DIR" 2>/dev/null || true
+            sleep 1
+            waited=$((waited + 1))
             continue
         fi
         if (( waited >= 30 )); then
@@ -1488,11 +1543,11 @@ acquire_id_alloc_lock() {
         sleep 1
         waited=$((waited + 1))
     done
-    echo "$$" > "$SV_ID_LOCK_DIR/pid"
-    trap 'rm -rf "$SV_ID_LOCK_DIR"' EXIT
+    echo "$$" | sudo tee "$SV_ID_LOCK_DIR/pid" > /dev/null
+    trap 'sudo rm -rf "$SV_ID_LOCK_DIR" 2>/dev/null || true' EXIT
 }
 release_id_alloc_lock() {
-    rm -rf "$SV_ID_LOCK_DIR"
+    sudo rm -rf "$SV_ID_LOCK_DIR" 2>/dev/null || true
     trap - EXIT
 }
 
@@ -1597,20 +1652,29 @@ if [[ "$MODE" == "ssh" && "$NESTED" == "true" ]]; then
     MODE="default"
 fi
 
-# REBUILD mode: always configure SSH
-# SSH mode: check configuration available
+# SSH group membership: only add when --ssh is used. On rebuild without
+# --ssh, remove the sandbox user from the SSH access group so the
+# sandbox-exec layer cannot be bypassed via direct SSH login.
 if [[ "$REBUILD" == "true" || "$MODE" == "ssh" ]]; then
     if dscl . -read /Groups/com.apple.access_ssh &>/dev/null; then
-        # Remote Login is enabled with specific users/groups; ensure sandvault user can SSH
-        if ! dseditgroup -o checkmember -m "$SANDVAULT_USER" com.apple.access_ssh &>/dev/null; then
-            if [[ "$NO_BUILD" == "true" ]]; then
-                abort "cannot add $SANDVAULT_USER to remote access because --no-build flag set"
+        if [[ "$MODE" == "ssh" ]]; then
+            # SSH mode requested; ensure sandbox user can connect
+            if ! dseditgroup -o checkmember -m "$SANDVAULT_USER" com.apple.access_ssh &>/dev/null; then
+                if [[ "$NO_BUILD" == "true" ]]; then
+                    abort "cannot add $SANDVAULT_USER to remote access because --no-build flag set"
+                fi
+                trace "Adding $SANDVAULT_USER to com.apple.access_ssh group"
+                # do not use sudo dscl; it creates duplicate entries
+                sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
+            else
+                trace "SSH access: $SANDVAULT_USER is already in com.apple.access_ssh group"
             fi
-            trace "Adding $SANDVAULT_USER to com.apple.access_ssh group"
-            # do not use sudo dscl; it creates duplicate entries
-            sudo dseditgroup -o edit -a "$SANDVAULT_USER" -t user com.apple.access_ssh
-        else
-            trace "SSH access: $SANDVAULT_USER is already in com.apple.access_ssh group"
+        elif [[ "$REBUILD" == "true" ]]; then
+            # Rebuild without --ssh: remove SSH access if previously granted
+            if dseditgroup -o checkmember -m "$SANDVAULT_USER" com.apple.access_ssh &>/dev/null; then
+                trace "Removing $SANDVAULT_USER from com.apple.access_ssh group (not in SSH mode)"
+                sudo dseditgroup -o edit -d "$SANDVAULT_USER" -t user com.apple.access_ssh 2>/dev/null || true
+            fi
         fi
     elif pgrep -x sshd &>/dev/null; then
         # Remote Login is enabled for "All users" — sshd is running but
@@ -1640,7 +1704,23 @@ fi
 ###############################################################################
 if [[ "$REBUILD" == "true" ]]; then
     debug "Creating shared workspace at $SHARED_WORKSPACE..."
-    mkdir -p "$SHARED_WORKSPACE"
+    if [[ -e "$SHARED_WORKSPACE" ]]; then
+        # Validate: must be a real directory, not a symlink. /Users/Shared
+        # is sticky so another sandbox can't replace a claimed name, but it
+        # can pre-create the name of a profile that doesn't exist yet.
+        if [[ -L "$SHARED_WORKSPACE" ]]; then
+            abort "Refusing to use $SHARED_WORKSPACE: it is a symlink (expected a directory)"
+        fi
+        if [[ ! -d "$SHARED_WORKSPACE" ]]; then
+            abort "Refusing to use $SHARED_WORKSPACE: it exists but is not a directory"
+        fi
+    else
+        # Create without -p: the parent (/Users/Shared) must already exist.
+        # -p would silently succeed on a symlink to an existing directory.
+        mkdir "$SHARED_WORKSPACE"
+    fi
+    # Use chmod -h on the workspace root to avoid following a replaced symlink.
+    sudo /bin/chmod -h 0770 "$SHARED_WORKSPACE"
     configure_shared_folder_permssions true
 fi
 
@@ -1784,9 +1864,18 @@ EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     trace "Setting $(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME") to 0755 (world-traversable)"
     sudo /bin/chmod 0755 "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
+    # Atomic write: temp file, validate, rename. A concurrent `sv` could
+    # exec a partial file if we wrote in place, and the script runs as root
+    # through a NOPASSWD sudoers rule.
+    BUILDHOME_TMP="$(sudo /usr/bin/mktemp "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")/.buildhome-$SANDVAULT_USER.XXXXXXXX")"
     # shellcheck disable=SC2154 # SUDOERS_BUILD_HOME_SCRIPT_CONTENTS is referenced but not assigned (yes it is)
-    echo "$SUDOERS_BUILD_HOME_SCRIPT_CONTENTS" | sudo tee "$SUDOERS_BUILD_HOME_SCRIPT_NAME" > /dev/null
-    sudo /bin/chmod 0554 "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
+    echo "$SUDOERS_BUILD_HOME_SCRIPT_CONTENTS" | sudo tee "$BUILDHOME_TMP" > /dev/null
+    sudo /bin/chmod 0554 "$BUILDHOME_TMP"
+    if ! sudo /bin/bash -n "$BUILDHOME_TMP" 2>/dev/null; then
+        sudo rm -f "$BUILDHOME_TMP"
+        abort "Build-home script has syntax errors"
+    fi
+    sudo /bin/mv -f "$BUILDHOME_TMP" "$SUDOERS_BUILD_HOME_SCRIPT_NAME"
 
     # Get the sandvault user's UID
     SANDVAULT_UID=$(dscl . -read "/Users/$SANDVAULT_USER" UniqueID 2>/dev/null | awk '{print $2}')
@@ -1928,10 +2017,11 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
 (allow mach-lookup
   ;; CFPreferences: defaults, plutil, curl and the other CoreFoundation
   ;; clients look up com.apple.cfprefsd.agent and com.apple.cfprefsd.daemon.
-  ;; Kept as insurance, not as a fix: defaults write, read and delete pass
-  ;; with only com.apple.system. allowed, and a denied preferences lookup
-  ;; falls back to reading the plist, so a client that needs this one fails
-  ;; silently rather than loudly.
+  ;; No probe fails without it (defaults read/write/delete pass via
+  ;; com.apple.system alone, and a denied lookup falls back to reading the
+  ;; plist). Retained because the fallback is silent failure, not a crash,
+  ;; and removing it may surface latent issues. TODO: measure and remove if
+  ;; no probe requires it.
   (global-name-prefix "com.apple.cfprefsd")
   ;; opendirectoryd's libinfo, which carries the prefs path and user and group
   ;; names: without it id -un and whoami print a uid, id loses group names,
@@ -1967,8 +2057,9 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
   ;; which in user/<uid> is the sandvault user's own. Without it security
   ;; reports "One or more parameters passed to a function were not valid".
   (global-name "com.apple.SecurityServer")
-  ;; OCSP revocation checks. not measured: no probe failed without it.
-  (global-name "com.apple.ocspd")
+  ;; OCSP revocation checks: removed. No probe failed without it (security
+  ;; review 2026-11-24, item 11). Re-add only if a specific tool failure is
+  ;; traced to its absence.
   ;; File system change notifications, used by watchexec, fswatch, and other
   ;; file watchers. fseventsd is a root system daemon, not a per-user host
   ;; service. Without this name, FSEventStreamCreate never delivers events,
@@ -2113,12 +2204,22 @@ elif [[ "$REBUILD" == "true" ]]; then
     GIT_USER_NAME=$(git config --global --get user.name 2>/dev/null || echo "")
     GIT_USER_EMAIL=$(git config --global --get user.email 2>/dev/null || echo "")
 
-    mkdir -p "$SV_PRIVATE_DIR/setup"
+    # Security: $SV_PRIVATE_DIR is sandbox-writable. The host must not write
+    # there by path (a planted symlink redirects the write). Pipe the scripts
+    # through a shell running as the sandbox user, with rm -f first so a
+    # symlink at the destination is replaced, not followed.
+    printf -v _setup_dir_q '%q' "$SV_PRIVATE_DIR/setup"
+    printf -v _gitconfig_q '%q' "$SV_PRIVATE_DIR/setup/gitconfig"
+    printf -v _claudejson_q '%q' "$SV_PRIVATE_DIR/setup/claude-json"
 
     # .gitconfig: seed identity if missing, preserving user overrides
     # Uses a retry loop because concurrent sandbox sessions may race on the
     # git config lock file (~/.gitconfig.lock).
-    cat > "$SV_PRIVATE_DIR/setup/gitconfig" << SETUP_EOF
+    {
+        printf 'set -e\numask 022\nmkdir -p %s\nrm -f %s\n' \
+            "$_setup_dir_q" "$_gitconfig_q"
+        printf 'cat > %s <<'"'"'SV_SETUP_EOF'"'"'\n' "$_gitconfig_q"
+        cat << SETUP_EOF
 #!/bin/bash
 set -Eeuo pipefail
 _git_config_retry() {
@@ -2139,10 +2240,16 @@ if ! git config -f "\$HOME/.gitconfig" --get-all safe.directory 2>/dev/null | /u
     _git_config_retry git config -f "\$HOME/.gitconfig" --add safe.directory "$SHARED_WORKSPACE/*"
 fi
 SETUP_EOF
-    chmod +x "$SV_PRIVATE_DIR/setup/gitconfig"
+        printf 'SV_SETUP_EOF\nchmod +x %s\n' "$_gitconfig_q"
+    } | sudo -u "$SANDVAULT_USER" /bin/sh \
+        || abort "Failed to install setup/gitconfig as $SANDVAULT_USER"
 
     # .claude.json: seed if missing (onboarding flags only matter on first run)
-    cat > "$SV_PRIVATE_DIR/setup/claude-json" << 'SETUP_EOF'
+    {
+        printf 'set -e\numask 022\nmkdir -p %s\nrm -f %s\n' \
+            "$_setup_dir_q" "$_claudejson_q"
+        printf 'cat > %s <<'"'"'SV_SETUP_EOF'"'"'\n' "$_claudejson_q"
+        cat << 'SETUP_EOF'
 #!/bin/bash
 set -Eeuo pipefail
 if [[ ! -f "$HOME/.claude.json" ]]; then
@@ -2157,7 +2264,9 @@ if [[ ! -f "$HOME/.claude.json" ]]; then
 JSON_EOF
 fi
 SETUP_EOF
-    chmod +x "$SV_PRIVATE_DIR/setup/claude-json"
+        printf 'SV_SETUP_EOF\nchmod +x %s\n' "$_claudejson_q"
+    } | sudo -u "$SANDVAULT_USER" /bin/sh \
+        || abort "Failed to install setup/claude-json as $SANDVAULT_USER"
 fi
 
 
@@ -2370,11 +2479,8 @@ fi
 EXTRA_ENV=()
 EXTRA_ENV+=("GIT_CONFIG_COUNT=1")
 EXTRA_ENV+=("GIT_CONFIG_KEY_0=safe.directory")
-if [[ "$MODE" == "ssh" ]]; then
-    EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/\\*")
-else
-    EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/*")
-fi
+# Same literal value in SSH mode: quote_zsh_args protects the glob there.
+EXTRA_ENV+=("GIT_CONFIG_VALUE_0=$SHARED_WORKSPACE/*")
 
 # Pass identity so sandbox-side scripts can resolve the host user and profile
 # without ambiguous prefix-stripping.  See design spec section 3.
@@ -2397,8 +2503,12 @@ fi
 if [[ "$USE_IOS_SIMULATOR" == "true" ]]; then
     if [[ -n "${SV_IOS_SIMULATOR_ENDPOINT:-}" ]]; then
         EXTRA_ENV+=("SV_IOS_SIMULATOR_ENDPOINT=$SV_IOS_SIMULATOR_ENDPOINT")
+        if [[ -n "${SV_IOS_BRIDGE_TOKEN:-}" ]]; then
+            EXTRA_ENV+=("SV_IOS_BRIDGE_TOKEN=$SV_IOS_BRIDGE_TOKEN")
+        fi
     elif [[ -n "$IOS_BRIDGE_PORT" ]]; then
         EXTRA_ENV+=("SV_IOS_SIMULATOR_ENDPOINT=http://127.0.0.1:$IOS_BRIDGE_PORT")
+        EXTRA_ENV+=("SV_IOS_BRIDGE_TOKEN=$IOS_BRIDGE_TOKEN")
     else
         abort "iOS bridge port not available. Bridge may have failed to start."
     fi
@@ -2429,10 +2539,6 @@ if [[ "$MODE" == "ssh" ]]; then
         SSH_TTY_OPT="-T"
     fi
 
-    # Escape single quotes for a remote shell context.
-    ZSH_COMMAND_SSH=$(printf '%s' "$ZSH_COMMAND" | sed "s/'/'\"'\"'/g")
-    ZSH_COMMAND_SSH="'$ZSH_COMMAND_SSH'"
-
     trace "Checking SSH connectivity"
     if ! ssh_check_output=$(ssh \
         -o BatchMode=yes \
@@ -2461,23 +2567,18 @@ if [[ "$MODE" == "ssh" ]]; then
 
     debug "SSH $SANDVAULT_USER@$SSH_HOST"
 
-    # SSH requires TWO layers of shell parsing: local shell → SSH → remote shell → /bin/zsh
-    # The extra single quotes protect the command through SSH's remote shell parsing.
-    # Without them, the remote shell would word-split the command, causing incorrect execution.
-    # Example: "'export TMPDIR=...'" becomes a single arg after local expansion, then the remote
-    # shell strips the outer quotes, passing 'export TMPDIR=...' correctly to /bin/zsh -c
     # Nested sessions install no EXIT trap, so there is nothing to preserve:
     # exec directly and avoid keeping a supervisor process around.
     sv_session_rc=0
     sv_session_runner=(run_session)
     [[ "$NESTED" == "true" ]] && sv_session_runner=(exec)
-    "${sv_session_runner[@]}" ssh \
-        -q \
-        "$SSH_TTY_OPT" \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -i "$SSH_KEYFILE_PRIV" \
-        "$SANDVAULT_USER@$SSH_HOST" \
+    # Build the remote command as a single quoted string. SSH joins all
+    # trailing arguments with spaces and passes them through the remote
+    # login shell, so every element must be individually quoted to survive
+    # spaces, metacharacters, and sandbox-chosen directory names. Pass
+    # ZSH_COMMAND unquoted here: quoting it again would hand zsh -c a
+    # literal quoted string, which it runs as a single command name.
+    SSH_REMOTE_CMD="$(quote_zsh_args \
         /usr/bin/env -i \
             "HOME=/Users/$SANDVAULT_USER" \
             "USER=$SANDVAULT_USER" \
@@ -2491,7 +2592,15 @@ if [[ "$MODE" == "ssh" ]]; then
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
             "${SANDBOX_EXEC[@]+"${SANDBOX_EXEC[@]}"}" \
-            /bin/zsh -c "$ZSH_COMMAND_SSH" || sv_session_rc=$?
+            /bin/zsh -c "$ZSH_COMMAND")"
+    "${sv_session_runner[@]}" ssh \
+        -q \
+        "$SSH_TTY_OPT" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -i "$SSH_KEYFILE_PRIV" \
+        "$SANDVAULT_USER@$SSH_HOST" \
+        "$SSH_REMOTE_CMD" || sv_session_rc=$?
     exit "$sv_session_rc"
 else
 

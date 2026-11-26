@@ -30,6 +30,11 @@ cd "$SCRIPT_DIR/.."
 [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
 
 EP="$SV_IOS_SIMULATOR_ENDPOINT"
+# Include auth token in all requests if set.
+AUTH_HEADER=()
+if [[ -n "${SV_IOS_BRIDGE_TOKEN:-}" ]]; then
+    AUTH_HEADER=(-H "Authorization: Bearer $SV_IOS_BRIDGE_TOKEN")
+fi
 FAILED=0
 
 log() { if [[ "$VERBOSE" -ne 0 ]]; then echo "   $*"; fi; }
@@ -53,7 +58,7 @@ phase() {
 # shellcheck disable=SC2329  # invoked indirectly via `phase`
 phase_ready_probe() {
     log "Test 1: /ready"
-    if curl -s "$EP/ready" >/dev/null 2>&1; then
+    if curl -s "${AUTH_HEADER[@]}" "$EP/ready" >/dev/null 2>&1; then
         log "  PASS (already ready)"
     else
         log "  PASS (responded, not ready yet)"
@@ -67,7 +72,7 @@ phase_wait_for_boot() {
     log "Waiting for simulator to finish booting..."
     local i
     for i in $(seq 1 90); do
-        if curl -sf "$EP/ready" >/dev/null 2>&1; then
+        if curl -sf "${AUTH_HEADER[@]}" "$EP/ready" >/dev/null 2>&1; then
             log "  ready after ${i} polls"
             return
         fi
@@ -93,6 +98,7 @@ phase_launch_preferences() {
     local i
     for i in $(seq 1 "$launch_attempts"); do
         launch_response=$(curl -s -o /dev/stdout -w '\n%{http_code}' \
+            "${AUTH_HEADER[@]}" \
             -X POST -H 'Content-Type: application/json' \
             -d '{"bundle_id":"com.apple.Preferences"}' "$EP/launch?format=json") || launch_response=""
         launch_status="${launch_response##*$'\n'}"
@@ -125,7 +131,7 @@ phase_describe() {
         # bridge's error body (e.g. iosef's "timeout after Ns"). The length
         # check below still rejects error responses, so keeping the body only
         # affects what a failure reports, not whether it passes.
-        response=$(curl -s "$EP/describe") || response=""
+        response=$(curl -s "${AUTH_HEADER[@]}" "$EP/describe") || response=""
         if [[ ${#response} -gt 100 ]]; then
             log "  PASS (${#response} bytes, after ${i} polls)"
             return
@@ -142,7 +148,7 @@ phase_describe() {
 phase_view_pixels() {
     log "Test 4: view_pixels"
     local png_path
-    png_path=$(curl -sf "$EP/view_pixels") || { fail "view_pixels HTTP error"; png_path=""; }
+    png_path=$(curl -sf "${AUTH_HEADER[@]}" "$EP/view_pixels") || { fail "view_pixels HTTP error"; png_path=""; }
     if [[ -n "$png_path" && -s "$png_path" ]] && \
        [[ "$(head -c 8 "$png_path" | xxd -p)" == "89504e470d0a1a0a" ]]; then
         log "  PASS ($(wc -c < "$png_path") bytes)"
@@ -156,6 +162,7 @@ phase_bad_input() {
     log "Test 5: bad input rejection"
     local http_status
     http_status=$(curl -s -o /dev/null -w '%{http_code}' \
+        "${AUTH_HEADER[@]}" \
         -X POST -H 'Content-Type: application/json' \
         -d '{"url":"not a url"}' "$EP/openurl" || echo "000")
     if [[ "$http_status" == "400" ]]; then
@@ -169,7 +176,7 @@ phase_bad_input() {
 phase_ready_json() {
     log "Test 6: ?format=json"
     local response
-    response=$(curl -sf "$EP/ready?format=json") || { fail "/ready?format=json HTTP error"; response=""; }
+    response=$(curl -sf "${AUTH_HEADER[@]}" "$EP/ready?format=json") || { fail "/ready?format=json HTTP error"; response=""; }
     if [[ "$response" == *'"ok"'* ]]; then
         log "  PASS"
     else

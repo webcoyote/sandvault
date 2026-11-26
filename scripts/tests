@@ -10,6 +10,36 @@ SV_BASE="$SCRIPT_DIR/../sv"
 # Prevent user's SANDVAULT_ARGS from interfering with test expectations.
 unset SANDVAULT_ARGS
 
+# The test suite runs sv from a checkout that may live inside a sandbox
+# workspace. The workspace-safety check (item 7) would refuse to run,
+# so allow it here — the tests are trusted host-side code.
+export SV_ALLOW_WORKSPACE_INSTALL=1
+
+# The tests build throwaway repos with `git -C <tmpdir> init/config ...`, but
+# git honors GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, etc. over -C. Git exports
+# these when it runs hooks, `rebase --exec`, `bisect run`, ..., so launching
+# the suite from any of those would aim every fixture command at the real
+# checkout (e.g. setting core.bare or core.fsmonitor in its .git/config).
+# Clear them so each git call resolves the repo from its own directory.
+# shellcheck disable=SC2046 # word-split the list of variable names
+unset $(git rev-parse --local-env-vars)
+
+# Belt and braces: fingerprint this checkout's git config so the suite fails
+# loudly if a test ever writes to it anyway.
+REAL_GIT_CONFIG=""
+REAL_GIT_CONFIG_SUM=""
+if REAL_GIT_DIR="$(git -C "$SCRIPT_DIR/.." rev-parse --absolute-git-dir 2>/dev/null)"; then
+    REAL_GIT_CONFIG="$REAL_GIT_DIR/config"
+    REAL_GIT_CONFIG_SUM="$(shasum "$REAL_GIT_CONFIG" 2>/dev/null || true)"
+fi
+check_real_git_config() {
+    [[ -n "$REAL_GIT_CONFIG" ]] || return 0
+    if [[ "$(shasum "$REAL_GIT_CONFIG" 2>/dev/null || true)" != "$REAL_GIT_CONFIG_SUM" ]]; then
+        echo >&2 -e "${RED}ERROR: tests modified the real repository config: $REAL_GIT_CONFIG${NC}"
+        return 1
+    fi
+}
+
 # shellcheck source=../helpers/sv-identity.sh
 source "$SCRIPT_DIR/../helpers/sv-identity.sh"
 HOST_HOME="$(dscl . -read "/Users/$HOST_USER" NFSHomeDirectory | cut -d' ' -f2)"
@@ -2172,11 +2202,15 @@ PY
     # The repo gets one empty commit so git clone / bundle work.
     # Tests should use this instead of pointing sv-clone at the real
     # sandvault checkout, which must never have its config mutated.
+    # Place source repos in /tmp (host-only) rather than inside the clone
+    # workspace, which lives under the shared workspace. The deploy-key
+    # refusal check (security review item 4) blocks -k/-w when the source
+    # is inside the sandbox workspace.
     make_test_repo() {
         local _var="$1"
         local github_path="${2:-sv-test-org/test-repo}"
         local dir
-        dir="$(mktemp -d "$CLONE_WORKSPACE/src.XXXXXX")"
+        dir="$(mktemp -d /tmp/sv-clone-test-src.XXXXXX)"
         GIT_CONFIG_GLOBAL=/dev/null git -C "$dir" init -q
         GIT_CONFIG_GLOBAL=/dev/null git -C "$dir" -c user.email=t@t -c user.name=t \
             commit -q --allow-empty -m "init"
@@ -2328,6 +2362,37 @@ STUB_EOF
         sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
     }
     queue_test test_sv_clone_local
+
+    # Git exports GIT_DIR (and friends) to hooks, `rebase --exec`, etc., and
+    # those override -C. sv-clone must clear them, or launching it from such a
+    # context rewrites the caller's repository instead of the clone.
+    test_sv_clone_ignores_inherited_git_dir() {
+        local src_repository decoy clone_path before after output status
+
+        make_test_repo src_repository "sv-test-org/inherited-git-dir"
+        make_test_repo decoy "sv-test-org/decoy"
+        clone_path="$CLONE_WORKSPACE/repos/$(basename "$src_repository")"
+        before="$(cat "$decoy/.git/config")"
+
+        set +e
+        output=$(GIT_DIR="$decoy/.git" GIT_WORK_TREE="$decoy" \
+            sv_clone_cmd "$src_repository" -- --no-build shell -- true 2>&1)
+        status=$?
+        set -e
+        after="$(cat "$decoy/.git/config")"
+
+        if [[ "$before" != "$after" ]]; then
+            fail "sv-clone ignores an inherited GIT_DIR" \
+                "decoy .git/config unchanged" "$after"
+        elif [[ "$status" -ne 0 || ! -d "$clone_path/.git" ]]; then
+            fail "sv-clone ignores an inherited GIT_DIR" \
+                "exit 0 and $clone_path/.git exists" "$status | $output"
+        else
+            pass "sv-clone ignores an inherited GIT_DIR"
+        fi
+        sv_cmd s -- rm -rf "$clone_path" >/dev/null 2>&1
+    }
+    queue_test test_sv_clone_ignores_inherited_git_dir
 
     # Clone tests share the same destination repo name (`sandvault`) and race if parallelized.
     wait_for_all_running_tests
@@ -2645,8 +2710,11 @@ STUB_EOF
         log_file="$(mktemp)"
         cp "$SV_CLONE_BASE" "$install_dir/sv-clone"
         cp -R "$SCRIPT_DIR/../helpers" "$install_dir/helpers"
+        # The stub logs every call. sv-clone installs a fresh clone by piping a
+        # script to `sv ... shell <workspace>` (no `-- cmd`), so run that one,
+        # or the clone never lands and the re-run never takes the fetch path.
         # shellcheck disable=SC2016 # expanded by the stub, not here
-        printf '#!/bin/bash\necho "sv $*" >> "$SV_STUB_LOG"\n' > "$install_dir/sv"
+        printf '#!/bin/bash\necho "sv $*" >> "$SV_STUB_LOG"\ncase " $* " in *" -- "*) ;; *" shell "*) [ -t 0 ] || bash ;; esac\n' > "$install_dir/sv"
         # shellcheck disable=SC2016 # expanded by the stub, not here
         printf '#!/bin/bash\necho "chgrp $*" >> "$SV_STUB_LOG"\n' > "$install_dir/chgrp"
         chmod +x "$install_dir/sv" "$install_dir/chgrp"
@@ -2661,7 +2729,7 @@ STUB_EOF
         done 2>&1)
         status=$?
         set -e
-        fetch_line="$(grep -F 'git fetch' "$log_file" | tail -1)"
+        fetch_line="$(grep -F 'git fetch' "$log_file" | tail -1 || true)"
         if [[ "$status" -ne 0 || "$fetch_line" != "sv --profile $profile --no-build shell "*" -- git fetch "* ]]; then
             fail "sv-clone re-run fetches as the --profile sandbox user" \
                 "sv --profile $profile --no-build shell ... -- git fetch ..." \
@@ -2909,16 +2977,15 @@ STUB_EOF
             return
         fi
 
-        git init -q --bare "$alt_repo"
-        echo "$alt_repo/objects" > "$clone_path/.git/objects/info/alternates"
-        # The marker is named after SV_CLONE_TEST_CONTEXT, which is set only
-        # in sv-clone's own (host) environment: sv starts sandboxed commands
-        # with `env -i`, so a sandboxed run sees it unset. This tells host
-        # from sandbox even when the suite runs nested, where both are the
-        # same account.
-        git -C "$clone_path" config core.alternateRefsCommand \
-            "sh -c 'touch \"$marker_dir/\${SV_CLONE_TEST_CONTEXT:-sandbox}\"' x"
-        git -C "$clone_path" config remote.origin.url "git@github.com:sv-test-attacker/evil.git"
+        # Poison the clone as the sandbox user (since the clone is now
+        # sandbox-owned after the security fix to sv-clone).
+        {
+            echo "set -e"
+            echo "git init -q --bare '$alt_repo'"
+            echo "echo '$alt_repo/objects' > '$clone_path/.git/objects/info/alternates'"
+            echo "git -C '$clone_path' config core.alternateRefsCommand \"sh -c 'touch \\\"$marker_dir/\\\${SV_CLONE_TEST_CONTEXT:-sandbox}\\\"' x\""
+            echo "git -C '$clone_path' config remote.origin.url 'git@github.com:sv-test-attacker/evil.git'"
+        } | sv_cmd s
 
         make_gh_stub "$stub_dir"
         export GH_STUB_LOG="$log_file"
@@ -3465,6 +3532,11 @@ print(mod["DEFAULT_SUBPATHS"].get(sys.argv[2], "<missing>"))
 
     collect_results
 
+    # Checked after every pass (not just at the end) so a failing pass still
+    # reports the damage before exiting.
+    # shellcheck disable=SC2310 # failure is handled by the explicit exit
+    check_real_git_config || exit 1
+
     if [[ "$VERBOSE" -ne 0 ]]; then
         echo -e "Passed: ${GREEN}$TESTS_PASSED${NC}"
         echo -e "Failed: ${RED}$TESTS_FAILED${NC}"
@@ -3482,7 +3554,10 @@ print(mod["DEFAULT_SUBPATHS"].get(sys.argv[2], "<missing>"))
 ###############################################################################
 # Cannot build sandvault if already running inside sandvault
 if [[ -z "${SV_SESSION_ID:-}" ]]; then
-    "$SV_BASE" build
+    # --ssh: a plain build does not add the sandbox user to
+    # com.apple.access_ssh, and the --ssh test pass runs with --no-build,
+    # which refuses to add it.
+    "$SV_BASE" --ssh build
 
     # Ensure that the shell doesn't have sudo permissions for tests
     sudo --reset-timestamp
@@ -3517,6 +3592,8 @@ start_guard() {
 # run this before tearing the guard down.  The host-side rm is a fallback for
 # when the session is already gone -- it clears at least the directory we own.
 cleanup_clone_workspace() {
+    # Clean up source repos created in /tmp by make_test_repo.
+    rm -rf /tmp/sv-clone-test-src.* 2>/dev/null || true
     [[ -n "$CLONE_WORKSPACE" ]] || return 0
     # shellcheck disable=SC2310 # best-effort; the host-side rm below is the fallback
     sv_cmd s -- rm -rf "$CLONE_WORKSPACE" >/dev/null 2>&1 || true

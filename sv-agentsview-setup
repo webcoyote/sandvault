@@ -40,13 +40,31 @@ readonly SANDVAULT_USER="sandvault-$HOST_USER$SV_SUFFIX"
 readonly SANDVAULT_GROUP="sandvault-$HOST_USER$SV_SUFFIX"
 readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER$SV_SUFFIX"
 readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
-readonly AGENTSVIEW_STATE_FILE="$SV_PRIVATE_DIR/setup/agentsview-export.state"
+# Consent state lives in host-only config so the sandbox cannot edit the
+# opt-in record or the decline list. Prior installs stored these under
+# $SV_PRIVATE_DIR/setup/ (sandbox-writable); migrate on first access.
+readonly AGENTSVIEW_HOST_CONFIG_DIR="$HOME/.config/codeofhonor/sandvault"
+readonly AGENTSVIEW_STATE_FILE="$AGENTSVIEW_HOST_CONFIG_DIR/agentsview-export.state"
 readonly AGENTSVIEW_HOST_CONFIG="$HOME/.agentsview/config.toml"
 # Per-key permanent decline list (one agentsview TOML key per line). An agent
 # whose key is listed here is never re-prompted for a config scan path; the
 # symlink and ACL are still installed, since they're harmless without the scan
 # path. Remove the line to re-enable an agent. Written on first decline.
-readonly AGENTSVIEW_DECLINED_FILE="$SV_PRIVATE_DIR/setup/agentsview-declined.keys"
+readonly AGENTSVIEW_DECLINED_FILE="$AGENTSVIEW_HOST_CONFIG_DIR/agentsview-declined.keys"
+
+# Migrate consent state from sandbox-writable location to host-only config.
+_agentsview_migrate_state() {
+    local old_state="$SV_PRIVATE_DIR/setup/agentsview-export.state"
+    local old_declined="$SV_PRIVATE_DIR/setup/agentsview-declined.keys"
+    mkdir -p "$AGENTSVIEW_HOST_CONFIG_DIR"
+    if [[ -f "$old_state" && ! -f "$AGENTSVIEW_STATE_FILE" ]]; then
+        mv "$old_state" "$AGENTSVIEW_STATE_FILE"
+    fi
+    if [[ -f "$old_declined" && ! -f "$AGENTSVIEW_DECLINED_FILE" ]]; then
+        mv "$old_declined" "$AGENTSVIEW_DECLINED_FILE"
+    fi
+}
+_agentsview_migrate_state
 
 ###############################################################################
 # Detection / pre-flight
@@ -125,7 +143,7 @@ agentsview_declined_keys() {
 # (a belt-and-braces guard so a stray stderr line captured into the
 # missing-keys stream can never be written to this user-facing file).
 agentsview_record_decline() {
-    mkdir -p "$SV_PRIVATE_DIR/setup"
+    mkdir -p "$AGENTSVIEW_HOST_CONFIG_DIR"
     local existing key known agent
     existing="$(agentsview_declined_keys)"
     for key in "$@"; do
@@ -323,10 +341,17 @@ agentsview_resync_config() {
 # Write the sandbox-side setup-merge script that runs as the sandvault user
 # during session startup. Each session it ensures each agent's session
 # subdirs exist with an inheriting read ACL for the sandvault group, so JSONL
-# files are readable by the host user through the mirror symlinks. No-op
-# unless the host has opted in (state file == enabled).
+# files are readable by the host user through the mirror symlinks.
+#
+# The script is written as the sandbox user (not the host) so a symlink
+# planted at the destination cannot redirect a host write. rm -f first
+# so a planted symlink is replaced, not followed.
+#
+# The opt-in state file now lives in host-only config, so the generated
+# script does not check it; the host only writes the full ACL script when
+# the user has opted in. When not opted in, a no-op script is written.
 write_setup_merge_script() {
-    mkdir -p "$SV_PRIVATE_DIR/setup"
+    local enabled="${1:-false}"
     # Build the subdir list from AGENTSVIEW_AGENTS (the single source of truth
     # in helpers/agentsview-paths.sh) so this generated script picks up new
     # agents automatically instead of drifting like a hardcoded list would.
@@ -354,13 +379,19 @@ write_setup_merge_script() {
             _private="$(dirname "$_private")"
         done
     done
-    cat > "$SV_PRIVATE_DIR/setup/agentsview-export" << SETUP_EOF
+
+    # Write as the sandbox user: rm -f first so a planted symlink is replaced.
+    local _setup_dir_q _script_q
+    printf -v _setup_dir_q '%q' "$SV_PRIVATE_DIR/setup"
+    printf -v _script_q '%q' "$SV_PRIVATE_DIR/setup/agentsview-export"
+    {
+        printf 'set -e\numask 022\nmkdir -p %s\nrm -f %s\n' \
+            "$_setup_dir_q" "$_script_q"
+        printf 'cat > %s <<'"'"'SV_SETUP_EOF'"'"'\n' "$_script_q"
+        if [[ "$enabled" == "true" ]]; then
+            cat << SETUP_EOF
 #!/bin/bash
 set -Eeuo pipefail
-STATE_FILE="$AGENTSVIEW_STATE_FILE"
-if [[ ! -f "\$STATE_FILE" ]] || [[ "\$(cat "\$STATE_FILE")" != "enabled" ]]; then
-    exit 0
-fi
 # Two ACEs per directory so new files don't inherit search/list (which on
 # a file means execute). Dir ACE propagates only to subdirs; the file ACE
 # is only_inherit (no rights on the dir itself) and propagates to new files
@@ -390,7 +421,12 @@ for subdir in $subdir_list; do
     /bin/chmod +a "\$FILE_INHERIT_RIGHTS" "\$full" 2>/dev/null || true
 done
 SETUP_EOF
-    chmod +x "$SV_PRIVATE_DIR/setup/agentsview-export"
+        else
+            printf '#!/bin/bash\n# agentsview export not enabled; no-op.\nexit 0\n'
+        fi
+        printf 'SV_SETUP_EOF\nchmod +x %s\n' "$_script_q"
+    } | sudo -u "$SANDVAULT_USER" /bin/sh \
+        || abort "agentsview: failed to install setup-merge script as $SANDVAULT_USER"
 }
 
 # First-run opt-in prompt. Shown only when no choice is recorded yet. Returns 0
@@ -435,7 +471,7 @@ agentsview_first_run_prompt() {
     printf 'Enable agentsview export? [y/N] '
     local reply
     read -r reply
-    mkdir -p "$SV_PRIVATE_DIR/setup"
+    mkdir -p "$AGENTSVIEW_HOST_CONFIG_DIR"
     if [[ "$reply" != "y" && "$reply" != "Y" ]]; then
         echo disabled > "$AGENTSVIEW_STATE_FILE"
         info "agentsview: export disabled"
@@ -451,14 +487,12 @@ agentsview_first_run_prompt() {
 # mirror symlink and scan path without re-running the whole opt-in. Returns 0
 # on success/no-op, non-zero on failure (errors already printed).
 agentsview_setup() {
-    # Always write the setup-merge script (it's a no-op until opt-in records
-    # `enabled`). This way, opt-in via `sv-agentsview-setup` after the
-    # initial `sv setup --rebuild` still wires up the sandbox-side ACL hook,
-    # and new agents land in the generated ACL loop automatically.
-    write_setup_merge_script
-
     # First-run opt-in: prompt only when no choice is recorded yet.
     if [[ ! -f "$AGENTSVIEW_STATE_FILE" ]]; then
+        # Write a no-op script for now; it will be replaced with the full
+        # ACL script below if the user opts in.
+        write_setup_merge_script false
+
         # shellcheck disable=SC2310 # declining the prompt intentionally returns early
         agentsview_first_run_prompt || return 0
     fi
@@ -469,8 +503,13 @@ agentsview_setup() {
     # user deleted the state file and re-ran the whole prompt. Now the symlink
     # is refreshed every run, and the scan path is added (with a prompt) the
     # first time it's missing.
-    [[ "$(cat "$AGENTSVIEW_STATE_FILE")" == "enabled" ]] || return 0
+    if [[ "$(cat "$AGENTSVIEW_STATE_FILE")" != "enabled" ]]; then
+        write_setup_merge_script false
+        return 0
+    fi
 
+    # Write the full ACL script now that we know the user opted in.
+    write_setup_merge_script true
     agentsview_install_symlinks
     agentsview_resync_config
 }

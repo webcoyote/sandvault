@@ -6,6 +6,10 @@ An iOS Simulator is available for app testing. It's available via HTTP at:
 
 All endpoints return plain text by default. Append `?format=json` to any URL for JSON responses.
 
+**Authentication:** Every request must include the session token. Use either:
+- Header: `Authorization: Bearer $SV_IOS_BRIDGE_TOKEN`
+- Query parameter: `?token=$SV_IOS_BRIDGE_TOKEN` (append to any URL)
+
 ## CRITICAL: Always use /describe, not /view
 
 **Your default tool for understanding the simulator UI is `GET /describe`, NOT screenshots.** After launching an app or performing any interaction, call `/describe` to get the accessibility tree. This returns element names, roles, positions, and states as structured text — everything you need to understand the UI and decide what to tap next.

@@ -23,7 +23,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 normalize_terminal() {
     # Map a user-supplied terminal name to a canonical bundle name.
-    local raw="${1,,}"
+    local raw
+    raw="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
     raw="${raw%.app}"
     case "$raw" in
         terminal|apple) echo "Terminal.app" ;;
