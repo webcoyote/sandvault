@@ -7,6 +7,7 @@
 
 mod agent;
 mod args;
+mod doctor;
 mod repair;
 mod shell;
 
@@ -42,6 +43,9 @@ Usage:
                                     file or directory in one of your workspaces
                                     (for files moved in; profile add and remove
                                     do this for kept files themselves)
+  sv2 doctor                        say what is wrong with the installation,
+                                    your profiles and the agents, and how to
+                                    put it right; changes nothing
   sv2 agent new NAME [--from AGENT] write your own definition of an agent,
                                     from a template or as a copy of AGENT
   sv2 run [OPTIONS] NAME [ARGS...]  run agent NAME in a sandbox
@@ -579,7 +583,7 @@ fn main() -> ExitCode {
             Err(e) => fail(&e),
         },
         Cmd::AgentNew { name, from } => agent_new(&sources, &name, from.as_deref()),
-        Cmd::NotYet(name) => fail(&format!("'sv2 {name}' is not implemented yet")),
+        Cmd::Doctor => doctor::run(&sources),
     }
 }
 

@@ -581,6 +581,21 @@ fi
 check "agent: the exit status is the agent's" "7" \
     "$(sb /bin/sh -c 'printf "#!/bin/sh\nexit 7\n" > ~/.local/bin/sv2test'; agent sv2test >/dev/null 2>&1; echo $?)"
 
+# sv2 doctor, from the same prefix: it finds this profile and its account,
+# asks sshd about the account, and reads the test agent's definition. (Its
+# exit status is not judged: it also reports on the user's other profiles.)
+OUT="$("$PREFIX/bin/sv2" doctor 2>&1 || true)"
+for want in "ok      installed, and the helper matches this sv2" \
+    "ok      profile '$P' ($ACCOUNT)" \
+    "ok      sshd refuses a login as $ACCOUNT" \
+    "note    agent 'sv2test' is not installed on this Mac"; do
+    if [[ "$OUT" == *"$want"* ]]; then
+        pass "doctor: ${want#* }"
+    else
+        fail "doctor: ${want#* }" "$OUT"
+    fi
+done
+
 # The attack: a definition where the sandbox can write it. It names what sv2
 # installs with Homebrew as the host user, so the sandbox would choose code
 # that runs on the host. Here the whole prefix is in the workspace.

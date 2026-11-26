@@ -680,7 +680,7 @@ Decisions this milestone made:
     `sshd -T -C user=ACCOUNT`); nothing re-checks the drop-in after install
     except its version line at launch; and an admin's own `Match` block that
     sets `DenyGroups` replaces the global list for the logins it matches.
-    These belong in `sv2 doctor`.
+    `sv2 doctor` asks sshd about each of the caller's accounts.
 - **Artifact versions (implemented after the rest of the milestone).** What
   `sv2 install` puts on a machine changes only when `sv2 install` is run
   again, with sudo. Whether that is needed no longer follows from the
@@ -791,7 +791,7 @@ Decisions this milestone made:
     done on every launch).
   - *Limits.* A program that was already installed and is not approved
     gets no such message; it is killed with "Killed: 9" and nothing else.
-    `sv2 doctor` is the place to check every definition's program. The
+    `sv2 doctor` checks every definition's program and says so. The
     rule is measured on one macOS version with Gatekeeper on.
 - **Guest launcher (2026-11-25; most of open item 5).** What a session needs
   done before its program starts is done by `sv2/guest/launch.sh`, a bash
@@ -856,6 +856,28 @@ Decisions this milestone made:
   away. It never opens or follows what it finds. A user who keeps putting a
   directory with a file in it there can still block `install`; the message
   names them.
+- **Doctor (2026-11-26).** `sv2 doctor` looks and reports; it changes
+  nothing, asks for no password, and runs as the host user
+  (`crates/cli/src/doctor.rs`). Each line is `ok`, `note` or `PROBLEM`, a
+  problem says what to run, and the exit status is 1 when there is one.
+  - *The installation:* the helper is there, answers, and matches this
+    `sv2`; the caller is in `sv2-users`.
+  - *The caller's profiles:* one left `adding` or `removing` is a problem,
+    with the command that finishes it; an active one whose account is gone
+    is too. Other users' profiles are theirs: the helper lists only the
+    caller's.
+  - *sshd:* the drop-in is there, and for each of the caller's accounts
+    `sshd -T -C user=ACCOUNT` (with a throwaway host key, as the host user)
+    reports all four refusals. This is the check the SSH lockdown's limits
+    asked for: it catches a main configuration without the `Include`, and
+    an administrator's own `Match` block that replaces `DenyGroups`.
+  - *Agents:* every definition is loaded as it would be to run, so one
+    that is refused or does not parse is a problem; a name that is also a
+    command gets a note; an installed program that is quarantined and not
+    notarized is a problem, with the `xattr` command (see "Quarantine");
+    one that is not installed gets a note.
+  - *Not looked at:* whether a session actually starts; the sandbox
+    profile files; other users.
 - **Default deny (2026-11-26; finding 11).** The base profile starts with
   `(deny default)`. Profile version 2; `sv2 install` re-renders every
   profile.
@@ -1041,12 +1063,7 @@ None recorded.
 - [ ] remove "--all-profiles" uninstall as a capability; too dangerous
 - [ ] the path search list for each agent includes both native and homebrew paths. That creates a problem where the binary could be out-of-date because the wrong one is being executed. Create separate entries for native vs. homebrew.
 - [ ] Shorten usage: doesn't need to be exhaustive (e.g. remove "refuses while..."), no newlines for agents, repair PATH shorter help, single-line help strings for commands, shorter explanation of shortening
-- [ ] `sv2 doctor`. The name is reserved and reports "not implemented yet".
-  It is also the place to report profiles left in `adding` or `removing`;
-  those are finished by running `profile add` or `profile remove` again.
-  And the place to ask sshd what it would do with each sandbox account (see
-  "SSH lockdown" under "Milestone 1"). And the place to say which agents
-  macOS will refuse to start (see "Quarantine" there).
+- [x] `sv2 doctor`; see "Doctor" under "Milestone 1".
 - [x] The guest-side launcher (open item 5); see "Guest launcher" under
   "Milestone 1". There is no unpacked payload.
 - [x] Agent definitions: format, `install.sh`, Homebrew and native install,

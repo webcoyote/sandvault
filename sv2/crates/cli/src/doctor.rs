@@ -1,0 +1,433 @@
+//! `sv2 doctor`: looks at what is installed and says what is wrong with it,
+//! and what to run to put it right. It changes nothing, asks for no
+//! password, and runs as the host user.
+//!
+//! What it looks at:
+//!
+//! - the installed helper, and whether it matches this `sv2`;
+//! - the caller's profiles: one left half added or half removed (the helper
+//!   was killed, or macOS refused a step) is finished by running the same
+//!   command again;
+//! - each profile's account, and what sshd would do with a login as it;
+//! - every agent definition: whether it can be read, whether its name is
+//!   also a command, and whether macOS will let its program start.
+//!
+//! The profiles of other users are theirs to look at: the helper lists only
+//! the caller's.
+
+use std::path::Path;
+use std::process::{Command, ExitCode, Stdio};
+
+use sv2_common::{ALLOWED_GROUP, EXIT_VERSION_MISMATCH, HELPER_PATH, SANDBOX_GROUP};
+
+use crate::agent::{self, Sources};
+use crate::{args, call_command, in_allowed_group, parse_profile_list, ProfileLine};
+
+const SSHD: &str = "/usr/sbin/sshd";
+const SSHD_DROPIN: &str = "/etc/ssh/sshd_config.d/000-sandvault2.conf";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Ok,
+    /// Worth knowing; nothing is broken.
+    Note,
+    /// Something to put right; the line says how.
+    Problem,
+}
+
+#[derive(Debug, Default)]
+pub struct Report(pub Vec<(Level, String)>);
+
+impl Report {
+    fn ok(&mut self, line: impl Into<String>) {
+        self.0.push((Level::Ok, line.into()));
+    }
+    fn note(&mut self, line: impl Into<String>) {
+        self.0.push((Level::Note, line.into()));
+    }
+    fn problem(&mut self, line: impl Into<String>) {
+        self.0.push((Level::Problem, line.into()));
+    }
+
+    pub fn problems(&self) -> usize {
+        self.0.iter().filter(|(l, _)| *l == Level::Problem).count()
+    }
+
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for (level, line) in &self.0 {
+            let tag = match level {
+                Level::Ok => "ok      ",
+                Level::Note => "note    ",
+                Level::Problem => "PROBLEM ",
+            };
+            out.push_str(&format!("{tag}{line}\n"));
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Profiles
+// ---------------------------------------------------------------------------
+
+/// A profile's state, as the helper lists it.
+pub fn check_profile_states(profiles: &[ProfileLine], report: &mut Report) {
+    if profiles.is_empty() {
+        report.note("you have no profiles; 'sv2 run shell' creates the default one");
+    }
+    for p in profiles {
+        match p.state.as_str() {
+            "active" => report.ok(format!("profile '{}' ({})", p.name, p.account)),
+            "adding" => report.problem(format!(
+                "profile '{0}' was left half added; finish with: sv2 profile add {0}",
+                p.name
+            )),
+            "removing" => report.problem(format!(
+                "profile '{0}' was left half removed; finish with: sv2 profile remove {0}",
+                p.name
+            )),
+            other => report.problem(format!(
+                "profile '{}' is in a state this sv2 does not know: {other}",
+                p.name
+            )),
+        }
+    }
+}
+
+fn account_exists(account: &str) -> bool {
+    let Ok(c) = std::ffi::CString::new(account) else {
+        return false;
+    };
+    // SAFETY: `c` is NUL-terminated; only the null-ness of the result is read.
+    unsafe { !libc::getpwnam(c.as_ptr()).is_null() }
+}
+
+// ---------------------------------------------------------------------------
+// sshd
+// ---------------------------------------------------------------------------
+
+/// What sshd must report for a sandbox account, in the lower case of
+/// `sshd -T`: each alone refuses the login (see the drop-in's text in the
+/// helper).
+const SSHD_REFUSALS: [&str; 3] = [
+    "pubkeyauthentication no",
+    "authorizedkeysfile none",
+    "forcecommand /usr/bin/false",
+];
+
+/// The refusals missing from `sshd -T` output for an account. Empty means
+/// sshd refuses the account every way the drop-in says.
+pub fn sshd_missing_refusals(output: &str) -> Vec<String> {
+    let lines: Vec<String> = output.lines().map(|l| l.trim().to_lowercase()).collect();
+    let mut missing: Vec<String> = SSHD_REFUSALS
+        .iter()
+        .filter(|want| !lines.iter().any(|l| l == *want))
+        .map(|s| (*s).to_string())
+        .collect();
+    // DenyGroups is one line listing every denied group.
+    let group = SANDBOX_GROUP.to_lowercase();
+    let denied = lines.iter().any(|l| {
+        l.strip_prefix("denygroups ")
+            .is_some_and(|rest| rest.split([' ', ',']).any(|g| g == group))
+    });
+    if !denied {
+        missing.push(format!("denygroups {group}"));
+    }
+    missing
+}
+
+/// Ask sshd what it would apply to a login as each account. `sshd -T` wants
+/// a host key it can read; a throwaway one in a private directory will do.
+fn check_sshd(accounts: &[&str], report: &mut Report) {
+    if !Path::new(SSHD_DROPIN).is_file() {
+        report.problem(format!(
+            "{SSHD_DROPIN} is missing, so sshd does not refuse sandbox accounts; run: sv2 install"
+        ));
+        return;
+    }
+    if accounts.is_empty() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("sv2-doctor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let key = dir.join("hostkey");
+    let made = {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).is_ok()
+            && Command::new("/usr/bin/ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+                .arg(&key)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+    };
+    if !made {
+        report
+            .note("could not make a throwaway host key, so sshd was not asked about the accounts");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    for account in accounts {
+        let out = Command::new(SSHD)
+            .arg("-T")
+            .arg("-h")
+            .arg(&key)
+            .arg("-C")
+            .arg(format!("user={account}"))
+            .stdin(Stdio::null())
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                let missing = sshd_missing_refusals(&String::from_utf8_lossy(&o.stdout));
+                if missing.is_empty() {
+                    report.ok(format!("sshd refuses a login as {account}"));
+                } else {
+                    report.problem(format!(
+                        "sshd would not fully refuse a login as {account} (not in effect: {}). Something in sshd's configuration overrides {SSHD_DROPIN}; run 'sv2 install', and look for a Match block of your own that sets these",
+                        missing.join("; ")
+                    ));
+                }
+            }
+            Ok(o) => report.problem(format!(
+                "sshd cannot read its configuration: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            Err(e) => report.note(format!("cannot run {SSHD}: {e}")),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Agents
+// ---------------------------------------------------------------------------
+
+fn is_program(path: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+pub fn check_agents(sources: &Sources, brew: Option<&str>, report: &mut Report) {
+    let names = sources.names();
+    if sources.builtin.is_none() {
+        report.note("no built-in agent definitions were found beside this sv2");
+    }
+    for name in &names {
+        if name == "shell" {
+            report
+                .note("a definition named 'shell' is never used: shell is part of sv2".to_string());
+            continue;
+        }
+        let def = match sources.load(name) {
+            Ok(def) => def,
+            Err(e) => {
+                report.problem(format!("agent '{name}' cannot be used: {e}"));
+                continue;
+            }
+        };
+        if args::SUBCOMMANDS.contains(&name.as_str()) {
+            report.note(format!(
+                "agent '{name}' has the name of a command; run it with: sv2 run {name}"
+            ));
+        }
+        let visible = def.host_visible_paths(brew);
+        match visible.iter().find(|p| is_program(p)) {
+            Some(program) => match agent::gatekeeper_would_stop(Path::new(program)) {
+                Some(file) => report.problem(format!(
+                    "macOS will stop agent '{name}' as it starts: {} was downloaded and Apple has not notarized it. If you trust it: xattr -d com.apple.quarantine '{}'",
+                    file.display(),
+                    file.display()
+                )),
+                None => report.ok(format!("agent '{name}' ({program})")),
+            },
+            None => report.note(format!(
+                "agent '{name}' is not installed on this Mac; sv2 installs it on first use, unless a sandbox already has its own copy"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The whole examination
+// ---------------------------------------------------------------------------
+
+pub fn run(sources: &Sources) -> ExitCode {
+    let mut report = Report::default();
+    examine(sources, &mut report);
+    print!("{}", report.text());
+    match report.problems() {
+        0 => {
+            println!("nothing is wrong");
+            ExitCode::SUCCESS
+        }
+        n => {
+            println!("{n} to put right");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn examine(sources: &Sources, report: &mut Report) {
+    let brew = agent::brew_prefix();
+    if brew.is_none() {
+        report.note("Homebrew was not found; agents can still be installed with --native");
+    }
+
+    if !Path::new(HELPER_PATH).is_file() {
+        report.problem("sandvault2 is not installed; an administrator must run: sv2 install");
+        check_agents(sources, brew, report);
+        return;
+    }
+    let listed = call_command("profile-list")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    let profiles = match listed {
+        Err(e) => {
+            report.problem(format!("cannot run sudo: {e}"));
+            None
+        }
+        Ok(out) if out.status.success() => {
+            match parse_profile_list(&String::from_utf8_lossy(&out.stdout)) {
+                Ok(profiles) => {
+                    report.ok("installed, and the helper matches this sv2");
+                    Some(profiles)
+                }
+                Err(e) => {
+                    report.problem(e);
+                    None
+                }
+            }
+        }
+        Ok(out) if out.status.code() == Some(i32::from(EXIT_VERSION_MISMATCH)) => {
+            report.problem(
+                "the installed helper or its files are older or newer than this sv2; an administrator must run: sv2 install",
+            );
+            None
+        }
+        Ok(_) if !in_allowed_group() => {
+            report.problem(format!(
+                "you are not in the {ALLOWED_GROUP} group; an administrator must run: sv2 user allow USER"
+            ));
+            None
+        }
+        Ok(out) => {
+            report.problem(format!(
+                "the helper could not list your profiles ({})",
+                out.status
+            ));
+            None
+        }
+    };
+
+    if let Some(profiles) = profiles {
+        check_profile_states(&profiles, report);
+        let mut accounts = Vec::new();
+        for p in profiles.iter().filter(|p| p.state == "active") {
+            if account_exists(&p.account) {
+                accounts.push(p.account.as_str());
+            } else {
+                report.problem(format!(
+                    "profile '{0}' has no account ({1}); make it again with: sv2 profile add {0}",
+                    p.name, p.account
+                ));
+            }
+        }
+        check_sshd(&accounts, report);
+    }
+    check_agents(sources, brew, report);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(name: &str, state: &str) -> ProfileLine {
+        ProfileLine {
+            name: name.into(),
+            state: state.into(),
+            account: format!("sv2-pat-{name}"),
+            workspace: format!("/Users/Shared/sv2/pat/{name}"),
+        }
+    }
+
+    #[test]
+    fn a_half_finished_profile_is_a_problem_with_its_remedy() {
+        let mut r = Report::default();
+        check_profile_states(
+            &[
+                profile("default", "active"),
+                profile("work", "adding"),
+                profile("old", "removing"),
+                profile("odd", "frozen"),
+            ],
+            &mut r,
+        );
+        let text = r.text();
+        assert_eq!(r.problems(), 3);
+        assert!(
+            text.contains("ok      profile 'default' (sv2-pat-default)"),
+            "{text}"
+        );
+        assert!(text.contains("finish with: sv2 profile add work"), "{text}");
+        assert!(
+            text.contains("finish with: sv2 profile remove old"),
+            "{text}"
+        );
+        assert!(text.contains("does not know: frozen"), "{text}");
+
+        let mut r = Report::default();
+        check_profile_states(&[], &mut r);
+        assert_eq!(r.problems(), 0);
+        assert!(r.text().starts_with("note    you have no profiles"));
+    }
+
+    #[test]
+    fn what_sshd_says_about_an_account() {
+        // As `sshd -T` prints for a sandbox account, among much else.
+        let refused = "port 22\nPubkeyAuthentication no\nauthorizedkeysfile none\n\
+                       forcecommand /usr/bin/false\ndenygroups other sv2-sandboxes\n";
+        assert_eq!(sshd_missing_refusals(refused), Vec::<String>::new());
+        // For the host user: only the global list applies.
+        let host = "pubkeyauthentication yes\nauthorizedkeysfile .ssh/authorized_keys\n\
+                    forcecommand none\ndenygroups sv2-sandboxes\n";
+        assert_eq!(
+            sshd_missing_refusals(host),
+            [
+                "pubkeyauthentication no",
+                "authorizedkeysfile none",
+                "forcecommand /usr/bin/false"
+            ]
+        );
+        // An admin's own Match block replaced the global DenyGroups.
+        let overridden = refused.replace("other sv2-sandboxes", "other");
+        assert_eq!(
+            sshd_missing_refusals(&overridden),
+            ["denygroups sv2-sandboxes"]
+        );
+        // A group whose name merely contains the name is not the group.
+        let lookalike = refused.replace("other sv2-sandboxes", "sv2-sandboxes-old");
+        assert_eq!(
+            sshd_missing_refusals(&lookalike),
+            ["denygroups sv2-sandboxes"]
+        );
+        assert_eq!(sshd_missing_refusals("").len(), 4);
+    }
+
+    #[test]
+    fn the_report_counts_only_problems() {
+        let mut r = Report::default();
+        r.ok("fine");
+        r.note("by the way");
+        assert_eq!(r.problems(), 0);
+        r.problem("broken; run: fix");
+        assert_eq!(r.problems(), 1);
+        assert_eq!(
+            r.text(),
+            "ok      fine\nnote    by the way\nPROBLEM broken; run: fix\n"
+        );
+    }
+}

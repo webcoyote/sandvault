@@ -58,14 +58,13 @@ pub enum Cmd {
         args: Vec<OsString>,
     },
     Repair(OsString),
+    Doctor,
     /// Create the user's definition of an agent.
     AgentNew {
         name: String,
         /// The definition to copy; the template when None.
         from: Option<String>,
     },
-    /// Parsed so the name is reserved; not implemented in this milestone.
-    NotYet(&'static str),
 }
 
 fn utf8(arg: &OsString, what: &str) -> Result<String, String> {
@@ -242,7 +241,7 @@ pub fn parse(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
             [path] => Ok(Cmd::Repair(path.clone())),
             _ => Err("usage: sv2 repair PATH".to_string()),
         },
-        "doctor" => Ok(Cmd::NotYet("doctor")),
+        "doctor" => none(rest, "sv2 doctor").map(|()| Cmd::Doctor),
         "agent" => {
             const USAGE: &str = "sv2 agent new NAME [--from AGENT]";
             let words: Option<Vec<&str>> = rest.iter().map(|a| a.to_str()).collect();
@@ -320,7 +319,7 @@ mod tests {
             Ok(Cmd::ProfileRemove("work".into()))
         );
         assert_eq!(p(&["profile", "list"]), Ok(Cmd::ProfileList));
-        assert_eq!(p(&["doctor"]), Ok(Cmd::NotYet("doctor")));
+        assert_eq!(p(&["doctor"]), Ok(Cmd::Doctor));
         assert_eq!(p(&["repair", "x"]), Ok(Cmd::Repair("x".into())));
         // The path is not an option list and not an agent line.
         assert_eq!(
@@ -469,10 +468,7 @@ mod tests {
         let everything = SUBCOMMANDS;
         assert_eq!(parse(&os(&["install"]), everything), Ok(Cmd::Install));
         assert_eq!(parse(&os(&["uninstall"]), everything), Ok(UNINSTALL));
-        assert_eq!(
-            parse(&os(&["doctor"]), everything),
-            Ok(Cmd::NotYet("doctor"))
-        );
+        assert_eq!(parse(&os(&["doctor"]), everything), Ok(Cmd::Doctor));
         assert_eq!(
             parse(&os(&["run", "install"]), everything),
             Ok(run_agent("install"))
@@ -485,7 +481,7 @@ mod tests {
         }
         // Nor does a prefix reach the agent past the subcommand.
         assert_eq!(parse(&os(&["inst"]), everything), Ok(Cmd::Install));
-        assert_eq!(parse(&os(&["doc"]), everything), Ok(Cmd::NotYet("doctor")));
+        assert_eq!(parse(&os(&["doc"]), everything), Ok(Cmd::Doctor));
     }
 
     #[test]
@@ -500,7 +496,7 @@ mod tests {
         assert_eq!(p(&["s", "s", "ru"]), Ok(run("default", &["s", "ru"])));
         assert_eq!(p(&["i"]), Ok(Cmd::Install));
         assert_eq!(p(&["h"]), Ok(Cmd::Help));
-        assert_eq!(p(&["d"]), Ok(Cmd::NotYet("doctor")));
+        assert_eq!(p(&["d"]), Ok(Cmd::Doctor));
         assert_eq!(p(&["rep", "x"]), Ok(Cmd::Repair("x".into())));
         assert_eq!(p(&["us", "a", "sam"]), Ok(Cmd::UserAllow("sam".into())));
         assert_eq!(p(&["us", "d", "sam"]), Ok(Cmd::UserDeny("sam".into())));
