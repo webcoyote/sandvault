@@ -2,6 +2,13 @@
 //!
 //! Every function is idempotent: the helper may be killed between any two
 //! calls and run again.
+//!
+//! Writes are not free. Changing an existing account (its home directory,
+//! for one) and deleting an account make macOS ask for the "administer your
+//! computer" privacy permission of the app the user ran `sv2` from. With the
+//! prompt unanswered the `dscl` call hangs for minutes; if refused, it
+//! fails. So an attribute that already has the wanted value is not written
+//! again: a repeated `profile add` then asks for nothing.
 
 use crate::sys::{run, run_ok, Res};
 
@@ -26,8 +33,12 @@ fn read_attr(record: &str, attr: &str) -> Res<Option<String>> {
 /// `dscl -read RECORD ATTR` prints `ATTR: value`, or `ATTR:` and the value on
 /// the next line when the value contains a space. An attribute the record
 /// lacks prints `No such key: ATTR`, which yields None.
+///
+/// Attributes outside the standard set (`IsHidden`) are printed with a
+/// `dsAttrTypeNative:` prefix.
 pub fn parse_attr(stdout: &str, attr: &str) -> Option<String> {
-    let rest = stdout.strip_prefix(attr)?.strip_prefix(':')?;
+    let line = stdout.strip_prefix("dsAttrTypeNative:").unwrap_or(stdout);
+    let rest = line.strip_prefix(attr)?.strip_prefix(':')?;
     Some(rest.trim().to_string())
 }
 
@@ -43,7 +54,17 @@ pub fn group_real_name(name: &str) -> Res<Option<String>> {
     read_attr(&format!("/Groups/{name}"), "RealName")
 }
 
+/// Whether an attribute read as `current` has to be written to be `wanted`.
+/// `read_attr` gives an empty string for an attribute the record lacks.
+fn needs_write(current: Option<&str>, wanted: &str) -> bool {
+    current != Some(wanted)
+}
+
+/// Set one attribute of an existing record, unless it already has the value.
 fn create(record: &str, attr: &str, value: &str) -> Res<()> {
+    if !needs_write(read_attr(record, attr)?.as_deref(), value) {
+        return Ok(());
+    }
     run_ok(DSCL, [".", "-create", record, attr, value])
 }
 
@@ -191,6 +212,32 @@ mod tests {
         assert_eq!(parse_attr("No such key: RealName\n", "RealName"), None);
         // A different attribute with the same prefix is not a match.
         assert_eq!(parse_attr("UniqueIDX: 5\n", "UniqueID"), None);
+        // Native attributes carry a prefix.
+        assert_eq!(
+            parse_attr("dsAttrTypeNative:IsHidden: 1\n", "IsHidden").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            parse_attr("Password: *\n", "Password").as_deref(),
+            Some("*")
+        );
+    }
+
+    /// A value already in place is not written again: writing is what makes
+    /// macOS ask for the privacy permission.
+    #[test]
+    fn writes_only_what_differs() {
+        assert!(!needs_write(
+            Some("/Users/sv2-pat-work"),
+            "/Users/sv2-pat-work"
+        ));
+        assert!(!needs_write(Some("1"), "1"));
+        assert!(needs_write(Some("/Users/other"), "/Users/sv2-pat-work"));
+        // Missing attribute (read as empty) and missing record.
+        assert!(needs_write(Some(""), "1"));
+        assert!(needs_write(None, "1"));
+        // No trimming or prefix matching.
+        assert!(needs_write(Some("10"), "1"));
     }
 
     #[test]

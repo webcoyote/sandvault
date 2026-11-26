@@ -425,9 +425,7 @@ fn remove_entry(reg: &mut Registry, host_uid: u32, profile: &str) -> Res<()> {
     println!("removed profile {} (account {account})", entry.profile);
     if workspace_kept {
         println!("kept {ws_path}: it is not empty");
-        println!(
-            "adding the profile again reuses the directory; a new sandbox account cannot open the files already in it until 'sv2 repair' exists"
-        );
+        println!("adding the profile again reuses the directory and the files in it");
     }
     Ok(())
 }

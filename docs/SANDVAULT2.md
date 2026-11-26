@@ -633,8 +633,9 @@ Do these before building anything else on milestone 1.
   app the command was started from (the terminal), not to `sv2`, the helper
   or root. While the prompt waits, the `dscl` call hangs (about 290 seconds,
   then `eUndefinedError`); if the answer is no, it fails at once with
-  `eDSPermissionError`. This affects `profile remove`, a repeated
-  `profile add`, and `uninstall`. The helper stays consistent (the verb can
+  `eDSPermissionError`. This affects `profile remove` and `uninstall`. A
+  repeated `profile add` no longer asks: the helper does not write an
+  attribute that already has the wanted value. The helper stays consistent (the verb can
   be run again), but it holds the registry lock for the whole wait, has no
   timeout of its own on `dscl`, and passes the raw `dscl` error to the user
   with no hint about the cause. See open item 10.
@@ -704,7 +705,8 @@ In rough dependency order.
 - [ ] iOS bridge, and the simulator trust question (open item 2).
 - [ ] Homebrew packaging of `sv2` itself, and upgrade handling when `sv2` and
   the installed helper differ in version.
-- [ ] Move from the sudoers helper to a launchd daemon (open item 3).
+- [ ] Move from the sudoers helper to a launchd daemon (open item 3). Raised
+  in priority: see the note there about the privacy prompt.
 
 ## Open items
 
@@ -715,6 +717,17 @@ In rough dependency order.
    unconfined as the host user, then document what `--ios` grants.
 3. **Daemon follow-up.** Scope and timing of the move from the sudoers helper
    to a launchd daemon.
+
+   **To do next (noted 2026-11-25):** the daemon is the likely fix for the
+   "administer your computer" prompt (open item 10). Under sudo, macOS
+   charges the helper's account changes to the terminal app the user ran
+   `sv2` from, prompts for it again every few minutes, and blocks the helper
+   for about 290 seconds when nobody answers. A daemon started by launchd has
+   no such app behind it. Before building it, measure with a throwaway
+   LaunchDaemon that deletes a test account: is the request granted, refused,
+   or still shown to someone? If it is granted, move at least account
+   creation and deletion into the daemon; `launch` can stay on sudo if that
+   keeps the session's terminal handling simple.
 4. **Terminal.** Decided in milestone 1; see "Milestone 1".
 5. **Guest-side launcher.** Which component, running as the sandbox user,
    resolves the agent binary, runs `install.sh`, and builds the final
@@ -783,10 +796,11 @@ In rough dependency order.
     - why requests were granted silently before 19:26 and prompted after;
     - exactly which operations ask: the home directory attribute and record
       deletion were seen; check `IsHidden`, group membership and the rest;
-    - whether the helper can avoid the request: not re-setting an attribute
-      that already has the right value would spare a repeated `profile add`;
-    - whether a launchd daemon (open item 3) is asked at all, since it has
-      no responsible app, and whether that changes the daemon's priority;
+    - done: the helper no longer re-sets an attribute that already has the
+      right value, which spares a repeated `profile add`. Deleting an account
+      still asks, and that cannot be skipped;
+    - whether a launchd daemon is asked at all, since it has no responsible
+      app. This is now the main reason to do open item 3;
     - what the user is told: detect `eDSPermissionError` and the long wait,
       name the permission and where to grant it, and document it in the
       README. v1 creates and deletes accounts the same way, so check whether
