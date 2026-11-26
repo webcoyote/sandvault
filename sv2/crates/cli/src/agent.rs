@@ -342,6 +342,94 @@ pub fn brew_prefix() -> Option<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// Quarantine
+// ---------------------------------------------------------------------------
+//
+// Homebrew marks what a cask downloads with the `com.apple.quarantine`
+// attribute, and macOS (Gatekeeper) judges such a program when it starts.
+// Measured on macOS 26.7, inside a session:
+//
+// - notarized by Apple (Claude Code): starts, whatever the attribute says;
+// - not notarized, attribute without the "approved by the user" flag:
+//   killed as it starts (SIGKILL; syspolicyd logs "Gatekeeper rejection");
+// - not notarized, with that flag, or with no attribute: starts.
+//
+// v1 ran every freshly installed program once as the host user to get past
+// this. sv2 does not run it, and does not remove the attribute either:
+// that is Gatekeeper's verdict, and overriding it is the user's decision.
+// What sv2 does is tell the user, at the moment it has installed such a
+// program, that macOS will stop it and how to approve it.
+
+/// "The user has approved this" in the attribute's flags.
+const QUARANTINE_APPROVED: u32 = 0x0040;
+
+/// The flags of a quarantine attribute's value, `FLAGS;TIME;AGENT;UUID`
+/// with FLAGS in hexadecimal.
+pub fn quarantine_flags(value: &str) -> Option<u32> {
+    let flags = value.split(';').next()?;
+    if flags.is_empty() || flags.len() > 8 {
+        return None;
+    }
+    u32::from_str_radix(flags, 16).ok()
+}
+
+/// The quarantine attribute of the file at `path`, if it has one.
+fn quarantine_attribute(path: &Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut buf = [0u8; 256];
+    // SAFETY: both strings are NUL-terminated and `buf` is valid for its
+    // length.
+    let n = unsafe {
+        libc::getxattr(
+            c.as_ptr(),
+            c"com.apple.quarantine".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            0,
+            0,
+        )
+    };
+    let n = usize::try_from(n).ok()?;
+    Some(String::from_utf8_lossy(&buf[..n]).into_owned())
+}
+
+/// Whether Apple has notarized the program. Reads its signature; does not
+/// run it.
+fn is_notarized(path: &Path) -> bool {
+    std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "-R=notarized"])
+        .arg(path)
+        .current_dir("/")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// The rule measured above: quarantined, not approved, not notarized.
+fn would_be_stopped(attribute: Option<&str>, notarized: impl FnOnce() -> bool) -> bool {
+    let Some(value) = attribute else {
+        return false;
+    };
+    // An attribute sv2 cannot read is treated as unapproved.
+    let approved = quarantine_flags(value).is_some_and(|f| f & QUARANTINE_APPROVED != 0);
+    !approved && !notarized()
+}
+
+/// Whether macOS will stop the program at `path` as it starts in a session.
+/// `path` may be a link, as Homebrew's `bin` entries are; the file it leads
+/// to is examined.
+pub fn gatekeeper_would_stop(path: &Path) -> Option<PathBuf> {
+    let file = path.canonicalize().ok()?;
+    would_be_stopped(quarantine_attribute(&file).as_deref(), || {
+        is_notarized(&file)
+    })
+    .then_some(file)
+}
+
+// ---------------------------------------------------------------------------
 // Where definitions are
 // ---------------------------------------------------------------------------
 
@@ -795,6 +883,73 @@ no_inject = ["update"]
             brew_install_argv("/usr/local", &Brew::Formula("codex".into())),
             ["/usr/local/bin/brew", "install", "--formula", "codex"]
         );
+    }
+
+    #[test]
+    fn quarantine_flags_are_the_first_field_in_hexadecimal() {
+        assert_eq!(
+            quarantine_flags("0181;6b07f2d0;Homebrew Cask;A689"),
+            Some(0x181)
+        );
+        assert_eq!(quarantine_flags("01c1;6b07f2d0;;"), Some(0x1c1));
+        assert_eq!(quarantine_flags("0041"), Some(0x41));
+        for bad in ["", ";0181", "zz81;x", "0181 ;x", "123456789;x"] {
+            assert_eq!(quarantine_flags(bad), None, "{bad:?}");
+        }
+    }
+
+    /// The combinations measured in a session: only a quarantined program
+    /// that is neither approved nor notarized is stopped.
+    #[test]
+    fn what_gatekeeper_stops() {
+        let stopped = |attr: Option<&str>, notarized: bool| would_be_stopped(attr, || notarized);
+        for flags in ["0181", "0081", "0001", "0281", "0201", "0101"] {
+            let attr = format!("{flags};6b07f2d0;Homebrew Cask;A689");
+            assert!(stopped(Some(&attr), false), "{flags}");
+            assert!(!stopped(Some(&attr), true), "{flags}, notarized");
+        }
+        for flags in ["0041", "01c1"] {
+            let attr = format!("{flags};6b07f2d0;Homebrew Cask;A689");
+            assert!(!stopped(Some(&attr), false), "{flags}");
+        }
+        assert!(!stopped(None, false));
+        // Unreadable flags count as not approved.
+        assert!(stopped(Some("garbage"), false));
+        assert!(!stopped(Some("garbage"), true));
+        // The signature is not examined when the answer is already known.
+        assert!(!would_be_stopped(None, || panic!("examined")));
+        assert!(!would_be_stopped(Some("0041;x"), || panic!("examined")));
+    }
+
+    /// Against real files and the real codesign: a copy of this test
+    /// program, which nobody has notarized.
+    #[test]
+    fn gatekeeper_check_on_real_files() {
+        let t = Tree::new("quarantine");
+        let file = t.0.join("program");
+        std::fs::copy(std::env::current_exe().unwrap(), &file).unwrap();
+        let link = t.0.join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let set = |value: &str| {
+            let ok = std::process::Command::new("/usr/bin/xattr")
+                .args(["-w", "com.apple.quarantine", value])
+                .arg(&file)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "could not set the attribute");
+        };
+
+        assert_eq!(gatekeeper_would_stop(&file), None);
+        set("0181;6b07f2d0;Homebrew Cask;A689CCAF-9023-478E-A715-93E029978479");
+        assert_eq!(gatekeeper_would_stop(&file), Some(file.clone()));
+        // Through a link, the file it leads to is named.
+        assert_eq!(gatekeeper_would_stop(&link), Some(file.clone()));
+        set("01c1;6b07f2d0;Homebrew Cask;A689CCAF-9023-478E-A715-93E029978479");
+        assert_eq!(gatekeeper_would_stop(&file), None);
+        assert_eq!(gatekeeper_would_stop(&t.0.join("missing")), None);
+        // An Apple program has no such attribute.
+        assert_eq!(gatekeeper_would_stop(Path::new("/bin/ls")), None);
     }
 
     #[test]

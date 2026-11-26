@@ -754,6 +754,35 @@ Decisions this milestone made:
   - *Measured on 2026-11-26:* Homebrew's `claude` runs in a session;
     `--native claude` installed and ran 2.1.332 in a throwaway profile, and
     the next run without the option used it.
+- **Quarantine (2026-11-26; open item 1).** Homebrew marks what a cask
+  downloads with `com.apple.quarantine`, and Gatekeeper judges such a
+  program when it starts. v1 ran each freshly installed program once as the
+  host user to get past that.
+  - *Measured* on macOS 26.7, in a session, with fresh copies of programs
+    and the attribute set by hand to what Homebrew writes (`0181;...`):
+    Claude Code, which Apple has notarized, starts, on its first run and
+    with the attribute untouched afterwards. A program that is not
+    notarized is killed as it starts (exit status 137; `syspolicyd` logs
+    "Terminating process due to Gatekeeper rejection") unless the
+    attribute's flags carry `0x40`, approved by the user, or the attribute
+    is absent. The flags `0001`, `0081`, `0101`, `0181`, `0201` and `0281`
+    were all killed; `0041` ran. Running the program on the host first did
+    not help, and did not change the attribute.
+  - *Decided.* sv2 does nothing for a notarized program, because nothing is
+    needed. For one that is not, it does not run it on the host and does not
+    remove the attribute: that is Gatekeeper's verdict on something
+    downloaded, and overriding it is the user's decision. What sv2 does is
+    say so at the one moment it knows the program is new, right after its
+    own `brew install`: that macOS will stop the agent, why, and the
+    `xattr -d` command that approves it.
+  - *How it knows.* The attribute is read with `getxattr`; notarization
+    with `codesign --verify -R=notarized`, which reads the signature and
+    runs nothing (0.2 s for Claude Code's 200 MB, which is why it is not
+    done on every launch).
+  - *Limits.* A program that was already installed and is not approved
+    gets no such message; it is killed with "Killed: 9" and nothing else.
+    `sv2 doctor` is the place to check every definition's program. The
+    rule is measured on one macOS version with Gatekeeper on.
 - **Guest launcher (2026-11-25; most of open item 5).** What a session needs
   done before its program starts is done by `sv2/guest/launch.sh`, a bash
   script run as the sandbox user under the sandbox profile.
@@ -854,7 +883,7 @@ order to do them in.
    account's processes" and "A taken workspace root" under "Milestone 1").
    Closed as not a gap: `install` reading its own executable by path (see
    "Installing from a path" there).
-4. Done: the guest-side launcher and agent definitions. Next: quarantine
+4. Done: the guest-side launcher, agent definitions, and quarantine
    handling.
 5. Everything else that is not the daemon, in this order: the planted
    `~/Library/LaunchAgents` measurement (open item 7); the items under "Not
@@ -904,6 +933,10 @@ order to do them in.
   definition in `~/.config/sandvault2/agents` on a real machine (unit tests
   cover the precedence); built-ins found in an installed `share/` directory
   under a real Homebrew prefix, which does not exist until sv2 is packaged.
+- [ ] **The quarantine message has not been seen for real.** The rule
+  behind it was measured by hand and is unit-tested, also against real
+  files and the real `codesign`. Not run: `sv2` installing a cask that is
+  not notarized, which is the only way the message appears.
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -954,7 +987,8 @@ See "Priority order" above for the order.
   It is also the place to report profiles left in `adding` or `removing`;
   those are finished by running `profile add` or `profile remove` again.
   And the place to ask sshd what it would do with each sandbox account (see
-  "SSH lockdown" under "Milestone 1").
+  "SSH lockdown" under "Milestone 1"). And the place to say which agents
+  macOS will refuse to start (see "Quarantine" there).
 - [x] The guest-side launcher (open item 5); see "Guest launcher" under
   "Milestone 1". There is no unpacked payload.
 - [x] Agent definitions: format, `install.sh`, Homebrew and native install,
@@ -965,7 +999,8 @@ See "Priority order" above for the order.
 - [ ] A command that creates an agent definition from a template, in
   `~/.config/sandvault2/agents`, so that adding an agent does not start
   from an empty file.
-- [ ] Quarantine handling for installed agent binaries (open item 1).
+- [x] Quarantine handling for installed agent binaries (open item 1); see
+  "Quarantine" under "Milestone 1".
 - [ ] Default deny, and per-profile capabilities (open item 8).
 - [ ] Repository credentials.
 - [ ] Browser support.
@@ -977,9 +1012,9 @@ See "Priority order" above for the order.
 
 ## Open items
 
-1. **Quarantine.** v1 clears quarantine by running freshly installed agent
-   binaries as the host user. Find a way that does not execute them (remove
-   the attribute, or install without quarantine).
+1. **Quarantine.** Decided on 2026-11-26; see "Quarantine" under
+   "Milestone 1". sv2 neither runs a fresh program on the host, as v1 did,
+   nor removes the attribute.
 2. **Simulator trust.** Confirm from the host side whether simulator apps run
    unconfined as the host user, then document what `--ios` grants.
 3. **Daemon follow-up.** Scope and timing of the move from the sudoers helper

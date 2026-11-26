@@ -330,12 +330,20 @@ fn ensure_installed(
             native_hint(def)
         ));
     }
-    if !visible.iter().any(|p| is_program(p)) {
+    let Some(installed) = visible.iter().find(|p| is_program(p)) else {
         return Err(format!(
             "Homebrew ran, but {name} is still not at {}. {}",
             visible.join(" or "),
             sv2_common::Obelus("vanishing parsnip")
         ));
+    };
+    // Said now, when the program is new: macOS kills it without a word.
+    if let Some(file) = agent::gatekeeper_would_stop(Path::new(installed)) {
+        eprintln!(
+            "sv2: macOS will stop {name} as it starts (\"Killed: 9\"): Homebrew downloaded {} and Apple has not notarized it. If you trust it, approve it yourself: xattr -d com.apple.quarantine '{}'",
+            file.display(),
+            file.display()
+        );
     }
     Ok(())
 }
