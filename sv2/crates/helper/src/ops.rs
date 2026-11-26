@@ -798,7 +798,8 @@ pub fn install(caller: &Caller) -> Res<()> {
         validate_sudoers,
     )?;
 
-    println!("sandvault2 installed ({})", sv2_common::install_version());
+    // The artifact versions are not shown: `sv2 --version` has them.
+    println!("sandvault2 {} installed", sv2_common::VERSION);
     println!("{} may now create sandboxes: sv2 run shell", caller.name);
     Ok(())
 }
