@@ -2,6 +2,32 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.42.0] - 2026-11-26
+
+### Changed
+
+- `sv` refuses to run from a checkout that the sandbox can write to (under `/Users/Shared/sv-*`, `/Users/sandvault-*`, or owned by a sandvault group). Set `SV_ALLOW_WORKSPACE_INSTALL=1` to override ([#392](https://github.com/webcoyote/sandvault/pull/392))
+- `sv-clone -k`/`-w` refuses to add a deploy key when the local source repository is inside the sandbox workspace; pass the repository URL instead ([#392](https://github.com/webcoyote/sandvault/pull/392))
+- `sv-clone` rejects repository names that contain anything other than letters, digits, `.`, `_`, and `-` ([#392](https://github.com/webcoyote/sandvault/pull/392))
+- The iOS simulator bridge requires a per-session auth token and only installs apps from the current profile's workspace ([#392](https://github.com/webcoyote/sandvault/pull/392))
+- The sandbox user is in the SSH access group only when you use `--ssh`. A rebuild without `--ssh` removes it ([#392](https://github.com/webcoyote/sandvault/pull/392))
+- agentsview opt-in and decline choices are stored in host-only config (`~/.config/codeofhonor/sandvault/`). Existing choices are migrated automatically ([#392](https://github.com/webcoyote/sandvault/pull/392))
+- `sv uninstall --all` no longer deletes unrecognized session directories ([#392](https://github.com/webcoyote/sandvault/pull/392))
+- The sandbox profile is updated, so the next `sv` run rebuilds it and asks for `sudo` once ([#395](https://github.com/webcoyote/sandvault/pull/395))
+
+### Fixed
+
+- Playwright's Chromium builds can now load pages inside the sandbox ([#395](https://github.com/webcoyote/sandvault/pull/395)) — thanks @adimoldovan!
+- Fixed several security issues where a sandboxed process could redirect host-side file writes, clones, or permission changes outside the workspace through symlinks or hard links ([#392](https://github.com/webcoyote/sandvault/pull/392))
+- A sandboxed process can no longer block builds by creating the build lock file first ([#392](https://github.com/webcoyote/sandvault/pull/392))
+- `sv-clone` no longer acts on the wrong repository when run from a git hook or another context that sets `GIT_DIR` ([#392](https://github.com/webcoyote/sandvault/pull/392))
+- The `/sv` skill's terminal launcher now works with the Bash version that ships with macOS ([#392](https://github.com/webcoyote/sandvault/pull/392))
+
+### Thanks to 2 contributors!
+
+- [@adimoldovan](https://github.com/adimoldovan)
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.41.0] - 2026-11-24
 
 ### Added

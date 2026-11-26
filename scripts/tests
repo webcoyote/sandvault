@@ -688,6 +688,61 @@ PLIST
     }
     queue_test test_sv_rewrites_stale_sandbox_profile
 
+    # Chromium child processes look up a rendezvous service named after the
+    # browser's bundle id plus the parent PID. Playwright's builds use
+    # org.chromium.Chromium and com.google.chrome.for.testing, and when the
+    # profile denies those names each child logs "bootstrap_look_up ...:
+    # Permission denied (1100)" and exits, so no page loads (#395). Look up
+    # each name from inside the sandbox: a denial is 1100
+    # (BOOTSTRAP_NOT_PRIVILEGED); an allowed name that nobody registered is
+    # 1102 (BOOTSTRAP_UNKNOWN_SERVICE). A control name that is not on the
+    # allow list must still get 1100, which proves the lookups ran under the
+    # profile rather than unsandboxed, where every name gets 1102.
+    test_sandbox_allows_chromium_rendezvous_lookup() {
+        local code denied="" got line name output status
+        local control="local.sv.rendezvous-probe.denied"
+        local names=(
+            com.google.Chrome.MachPortRendezvousServer.1
+            com.google.Chromium.MachPortRendezvousServer.1
+            org.chromium.Chromium.MachPortRendezvousServer.1
+            com.google.chrome.for.testing.MachPortRendezvousServer.1
+        )
+        code='import ctypes, sys
+libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+port = ctypes.c_uint.in_dll(libc, "bootstrap_port").value
+for name in sys.argv[1:]:
+    out = ctypes.c_uint(0)
+    print(name, libc.bootstrap_look_up(port, name.encode(), ctypes.byref(out)))'
+        set +e
+        output=$(sv_cmd s -- /usr/bin/python3 -I -c "$code" "$control" "${names[@]}" 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+            fail "sandbox allows Chromium rendezvous lookups" \
+                "the lookup probe runs in the sandbox" "exit $status: $output"
+            return
+        fi
+        got=$(sed -n "s/^${control//./\\.} \([0-9][0-9]*\)$/\1/p" <<< "$output")
+        if [[ "$got" != "1100" ]]; then
+            fail "sandbox allows Chromium rendezvous lookups" \
+                "control name $control denied (1100)" "got '${got}': $output"
+            return
+        fi
+        for name in "${names[@]}"; do
+            line=$(grep -F -- "$name " <<< "$output" || true)
+            if [[ "$line" != "$name 1102" ]]; then
+                denied+="${line:-$name (no result)}; "
+            fi
+        done
+        if [[ -n "$denied" ]]; then
+            fail "sandbox allows Chromium rendezvous lookups" \
+                "1102 (allowed, not registered) for each name" "$denied"
+        else
+            pass "sandbox allows Chromium rendezvous lookups"
+        fi
+    }
+    queue_test test_sandbox_allows_chromium_rendezvous_lookup
+
     # git runs several config values as commands on the host (core.fsmonitor,
     # core.sshCommand, core.hooksPath, core.pager, [filter] drivers). The clone
     # directory is guest-writable, and so is any workspace path passed as the
