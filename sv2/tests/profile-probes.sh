@@ -89,6 +89,19 @@ if have claude "claude"; then allowed "claude starts" claude --version; fi
 if have gh "gh (Go TLS)"; then allowed "Go program verifies TLS (gh)" /bin/sh -c 'out="$(GH_TOKEN=sv2-probe-not-a-token gh api -X GET https://api.github.com/zen 2>&1)"; echo "$out"; echo "$out" | grep -q "401\|Bad credentials"'; fi
 if have xcrun "xcrun"; then allowed "xcrun finds tools" /bin/sh -c 'xcrun --find clang >/dev/null'; fi
 
+# --- a browser, headless, as Playwright starts it. Playwright keeps its
+# browsers in the home of whoever installed them. The exit status is not
+# judged: only whether the page arrived.
+PLAYWRIGHT=""
+for candidate in "$HOME"/Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell; do
+    if [[ -f "$candidate" && -x "$candidate" ]]; then
+        allowed "Playwright's headless Chromium loads a page" /bin/sh -c "'$candidate' --headless --no-sandbox --user-data-dir='$T/browser' --dump-dom https://example.com 2>/dev/null | grep -q 'Example Domain'"
+        PLAYWRIGHT=found
+        break
+    fi
+done
+[[ -n "$PLAYWRIGHT" ]] || echo "skip Playwright's headless Chromium loads a page: none installed in this home"
+
 # --- reaching out of the sandbox
 denied "pasteboard" /bin/sh -c 'echo sv2-probe | pbcopy && test "$(pbpaste)" = sv2-probe'
 denied "AppleScript to Finder" /usr/bin/osascript -e 'tell application "Finder" to get name of startup disk'

@@ -135,6 +135,8 @@ mod tests {
                 "(global-name \"com.apple.trustd.agent\"",
                 "(global-name \"com.apple.SecurityServer\"",
                 "(global-name \"com.apple.FSEvents\"",
+                // Headless Chromium: lookup and registration, per launch.
+                "(global-name-prefix \"org.chromium.Chromium.MachPortRendezvousServer.\"",
                 // The explicit denies that follow the allow.
                 "(global-name \"com.apple.DiskArbitration.diskarbitrationd\"",
                 "(global-name \"com.apple.NetAuthAgent\"",
@@ -163,6 +165,19 @@ mod tests {
         let at = |rest: &str| root.join(rest).to_str().unwrap().to_string();
         for dir in ["home", "tmp", "ws/user/work"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        // A browser, if this user has one of Playwright's: the probe looks
+        // for it in the home it is given, so it gets a copy there.
+        if let Some(shell) = playwright_headless_shell() {
+            let cache = root.join("home/Library/Caches/ms-playwright");
+            std::fs::create_dir_all(&cache).unwrap();
+            let copied = Command::new("/bin/cp")
+                .arg("-R")
+                .arg(&shell)
+                .arg(&cache)
+                .status()
+                .unwrap();
+            assert!(copied.success(), "could not copy {}", shell.display());
         }
         let text = render_paths(&at("ws"), &at("ws/user"), &at("ws/user/work"), &at("home"))
             .expect("the scratch paths do not fit in a profile");
@@ -200,6 +215,25 @@ mod tests {
         );
         // Not vacuous: the script ran to its end.
         assert!(passed >= 35, "only {passed} probes passed:\n{report}");
+    }
+
+    /// The newest `chromium_headless_shell-N` directory in this user's
+    /// Playwright cache, if there is one.
+    fn playwright_headless_shell() -> Option<std::path::PathBuf> {
+        let cache =
+            std::path::Path::new(&std::env::var_os("HOME")?).join("Library/Caches/ms-playwright");
+        let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(cache)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("chromium_headless_shell-"))
+            })
+            .collect();
+        found.sort();
+        found.pop()
     }
 
     /// The same check the helper makes before renaming a profile into place:

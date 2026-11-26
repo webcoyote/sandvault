@@ -58,9 +58,7 @@
 ;; (defaults falls back to the file), com.apple.ocspd, com.apple.dnssd,
 ;; com.apple.mDNSResponder, com.apple.networkd and
 ;; com.apple.SystemConfiguration (names resolve and connections are made
-;; without them), and the names only a browser needs
-;; (com.apple.coreservices.launchservicesd and the Chrome and Crashpad
-;; prefixes), which come back with browser support and a probe.
+;; without them).
 (allow mach-lookup
   ;; opendirectoryd's libinfo, which carries user and group names. Probes
   ;; "id shows names" (id prints a number) and "ssh-keygen" ("No user exists
@@ -83,6 +81,29 @@
   ;; not a per-user host service. Probe "file watcher sees a change
   ;; (FSEvents)": the watcher starts and never fires.
   (global-name "com.apple.FSEvents"))
+
+;; Chromium run headless, as Playwright runs it: its "headless shell" build,
+;; started with --no-sandbox. (The browser's own sandbox cannot be set up
+;; inside this one, "sandbox initialization failed", and this one is what
+;; confines it.) Probe "Playwright's headless Chromium loads a page".
+;;
+;; The browser process and its children (renderer, GPU, utility) find each
+;; other through a Mach service the browser registers under its bundle id
+;; and process ID. Without the registration, which default deny refuses
+;; like any other, the browser stops at "bootstrap_check_in
+;; org.chromium.Chromium.MachPortRendezvousServer.N: Permission denied
+;; (1100)"; without the lookup its children cannot reach it. The names are
+;; made up per launch and carry no authority of the host user.
+;;
+;; Not here, because no probe passes with them yet: the full applications
+;; (Google Chrome, Chrome for Testing). Measured on 2026-11-26, they need
+;; their own rendezvous prefixes (com.google.Chrome.,
+;; com.google.chrome.for.testing.), org.chromium.crashpad.,
+;; com.apple.coreservices.launchservicesd and the IOKit clients
+;; IOSurfaceRootUserClient and AGXDeviceUserClient, and with all of those
+;; still loaded a page only some of the time.
+(allow mach-lookup mach-register
+  (global-name-prefix "org.chromium.Chromium.MachPortRendezvousServer."))
 
 ;; Keep these four denied explicitly, after the allow above, so that widening
 ;; the allow later cannot quietly re-admit them.

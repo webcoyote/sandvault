@@ -691,7 +691,7 @@ Decisions this milestone made:
     Bumping any of them makes every installed machine ask for
     `sv2 install`; a release that bumps none needs no reinstall.
   - *Comparison.* `sv2` passes all four as one word
-    (`helper=5,sudoers=2,sshd=1,profile=2`) where it used to pass the
+    (`helper=5,sudoers=2,sshd=1,profile=3`) where it used to pass the
     application version, and the helper refuses a word that is not its own,
     with exit status 3. `sv2 --version` prints the word on a second line.
     The numbers reach a machine only inside a new helper, because the
@@ -905,15 +905,31 @@ Decisions this milestone made:
     `com.apple.mDNSResponder`, `com.apple.networkd` and
     `com.apple.SystemConfiguration` (names resolve and connections are
     made without them); `process-info*`; the denies that default deny
-    made redundant (all writes, mounting); and what only a browser needs
-    (`com.apple.coreservices.launchservicesd`, the Chrome and Crashpad
-    prefixes), which come back with browser support and a probe of their
-    own.
+    made redundant (all writes, mounting); and what only the full browser
+    applications need (`com.apple.coreservices.launchservicesd`, the Chrome
+    and Crashpad prefixes), which come back with browser support and a
+    probe of their own.
   - *A consequence:* a session can no longer push keystrokes into a
     terminal's input queue at all. The kernel asks the sandbox for
     `hid-control` before `TIOCSTI`, and nothing allows it (seen in the
     first installed run: the ioctl fails with "Operation not permitted").
     The session's own pty is still there as the second defence.
+  - *Headless Chromium (2026-11-26, profile version 3).* v1 gained two
+    Mach name prefixes on `main` (285dd0e) so that Playwright's Chromium
+    builds start. Under default deny the same builds need more: the
+    browser also has to register its rendezvous name, which
+    `(allow default)` had let through unseen. Measured with Playwright's
+    `chromium_headless_shell-1255`, started with `--no-sandbox` as
+    Playwright starts it: with lookup and registration of
+    `org.chromium.Chromium.MachPortRendezvousServer.` a page loads, 6 times
+    of 6; without it the browser stops at `bootstrap_check_in`. That is the
+    one rule added, with a probe that the unit test runs when this user
+    has that build. The full applications, Google Chrome and Chrome for
+    Testing, are not allowed for yet: with their own rendezvous prefixes,
+    `org.chromium.crashpad.`, `com.apple.coreservices.launchservicesd` and
+    the IOKit clients `IOSurfaceRootUserClient` and `AGXDeviceUserClient`
+    they loaded a page only about half the time. That is for browser
+    support to finish, measured in a real session.
   - *Not narrowed, by decision:* file reads are still everything but
     `/Users`, `/Volumes`, `/Library/Keychains` and raw disks, and the
     network is still everything, localhost and port 22 included. Both
@@ -1014,6 +1030,10 @@ there (137 of 137).
   behind it was measured by hand and is unit-tested, also against real
   files and the real `codesign`. Not run: `sv2` installing a cask that is
   not notarized, which is the only way the message appears.
+- [ ] **Profile version 3 has not run in a session.** The probes pass under
+  it as the current user, the headless browser included. In a real session
+  that probe runs only if Playwright's browsers are installed in the
+  sandbox home (`npx playwright install chromium` in a session).
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -1073,7 +1093,9 @@ None recorded.
   port 22, and a narrower rule for reading files. All deferred on
   2026-11-26.
 - [ ] Repository credentials.
-- [ ] Browser support.
+- [ ] Browser support. Playwright's headless Chromium already runs in a
+  session; Google Chrome and Chrome for Testing do not (see "Default
+  deny" under "Milestone 1" for what was measured).
 - [ ] iOS bridge, and the simulator trust question (open item 2).
 - [ ] Homebrew packaging of `sv2` itself, and upgrade handling when `sv2` and
   the installed helper differ in version.
