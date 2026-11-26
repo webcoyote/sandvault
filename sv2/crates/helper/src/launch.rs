@@ -76,19 +76,11 @@ pub fn stage1(caller: &Caller, args: &[OsString]) -> Res<()> {
             }
         ));
     }
-    // There is no unsandboxed fallback: without the file, no session.
-    let sb = ops::profile_file(&entry.host_user, &entry.profile);
-    if !sys::exists(&sb) {
-        return Err(format!("{sb} is missing; run: sv2 profile add {profile}"));
-    }
-    // The same for the file that keeps the account from logging in over SSH
-    // and so running outside that profile.
-    let dropin = ops::sshd_dropin_path();
-    if !sys::exists(&dropin) {
-        return Err(format!(
-            "{dropin} is missing; an admin must run: sv2 install"
-        ));
-    }
+    // No session on files that are missing or that another version wrote:
+    // the sudoers file and sshd drop-in from `install`, and this profile's
+    // sandbox file.
+    ops::check_installed_files()?;
+    ops::check_profile_file(&entry.host_user, &entry.profile)?;
     lock.keep_across_exec()?;
 
     let err = Command::new("/bin/launchctl")

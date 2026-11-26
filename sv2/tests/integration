@@ -37,7 +37,10 @@ skip() {
 [[ -x "$SV2" && -x "$BUILT_HELPER" ]] || { echo >&2 "no sv2 build in $BIN_DIR"; exit 1; }
 [[ -f "$HELPER" ]] || skip "sv2 is not installed"
 /usr/bin/cmp -s "$BUILT_HELPER" "$HELPER" || skip "the installed helper is not this build"
-VERSION="$("$SV2" --version | /usr/bin/awk '{print $2}')"
+# What the helper compares: the artifact versions, not the application's.
+VERSION="$("$SV2" --version | /usr/bin/awk '$1 == "install-version" {print $2}')"
+APP_VERSION="$("$SV2" --version | /usr/bin/awk 'NR == 1 {print $2}')"
+[[ -n "$VERSION" && -n "$APP_VERSION" ]] || { echo >&2 "cannot read versions from $SV2 --version"; exit 1; }
 /usr/bin/sudo -n -- "$HELPER" call "$VERSION" profile-list >/dev/null 2>&1 \
     || skip "$(id -un) is not in the sandvault-users group"
 
@@ -109,6 +112,13 @@ else
     fail "account: in the sv2-sandboxes group" "$(/usr/bin/id -Gn "$ACCOUNT")"
 fi
 check "sshd drop-in: root-owned, not writable by others" "0 644" "$($STAT -f '%u %Lp' "$SSHD_DROPIN")"
+# Installed files carry the version the helper checks before a session. (The
+# sudoers file is not readable from here.)
+artifact_version() { /usr/bin/tr ',' '\n' <<<"$VERSION" | /usr/bin/sed -n "s/^$1=//p"; }
+check "sshd drop-in: carries its version" "# sv2-sshd-version: $(artifact_version sshd)" \
+    "$(/usr/bin/grep -m1 '^# sv2-sshd-version: ' "$SSHD_DROPIN")"
+check "sandbox profile: carries its version" ";; sv2-profile-version: $(artifact_version profile)" \
+    "$(/usr/bin/grep -m1 '^;; sv2-profile-version: ' "$SB")"
 # What sshd itself would apply to a login as USER, read from the system's
 # configuration as a whole (so a drop-in that is not included, or is
 # overridden, shows). -T needs a host key; a throwaway one will do.
@@ -444,7 +454,10 @@ fi
 refused "helper: unknown profile" "${CALL[@]}" launch nosuchprofile -- /usr/bin/true
 refused "helper: invalid profile name" "${CALL[@]}" profile-add "../x"
 refused "helper: invalid profile name (dash)" "${CALL[@]}" profile-add "a-b"
-refused "helper: wrong version" /usr/bin/sudo -n -- "$HELPER" call 0.0.0-other profile-list
+rc=0; /usr/bin/sudo -n -- "$HELPER" call "${VERSION/sshd=/sshd=9}" profile-list >/dev/null 2>&1 || rc=$?
+check "helper: one artifact version that differs is refused, with the reinstall status" "3" "$rc"
+refused "helper: the application version is not what it compares" \
+    /usr/bin/sudo -n -- "$HELPER" call "$APP_VERSION" profile-list
 refused "helper: not runnable without sudo" "$HELPER" call "$VERSION" profile-list
 refused "helper: admin verbs are not in call mode" "${CALL[@]}" uninstall
 refused "helper: stage2 is not in call mode" "${CALL[@]}" stage2 "$SB_UID" "$HOST_USER" "$P" -- /usr/bin/true

@@ -12,11 +12,13 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::{Command, Stdio};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sv2_common::{
-    home_path, valid_host_user, valid_profile, workspace_path, workspace_user_dir, ALLOWED_GROUP,
-    HELPER_PATH, MODE_CALL, SANDBOX_GROUP, VERSION, WORKSPACE_ROOT,
+    home_path, stamped_version, valid_host_user, valid_profile, workspace_path, workspace_user_dir,
+    ALLOWED_GROUP, HELPER_PATH, MODE_CALL, SANDBOX_GROUP, SANDBOX_PROFILE_STAMP,
+    SANDBOX_PROFILE_VERSION, SSHD_DROPIN_STAMP, SSHD_DROPIN_VERSION, SUDOERS_STAMP,
+    SUDOERS_VERSION, WORKSPACE_ROOT,
 };
 
 use crate::registry::{Entry, Registry, State, MAX_PROFILES_PER_USER};
@@ -67,8 +69,60 @@ pub fn profile_file(host_user: &str, profile: &str) -> String {
     format!("{}/{profile}.sb", profiles_user_dir(host_user))
 }
 
-pub fn sshd_dropin_path() -> String {
+fn sshd_dropin_path() -> String {
     format!("{SSHD_DROPIN_DIR}/{SSHD_DROPIN_NAME}")
+}
+
+fn sudoers_path() -> String {
+    format!("{SUDOERS_DIR}/{SUDOERS_NAME}")
+}
+
+/// A root-owned file must carry the version this helper writes. A file that
+/// is missing, unreadable, or carries another number is an error ending in
+/// `fix`.
+fn check_stamp(path: &str, key: &str, wanted: u32, fix: &str) -> Res<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("{path} is missing; {fix}"))
+        }
+        Err(e) => return Err(format!("read {path}: {e}")),
+    };
+    match stamped_version(&text, key) {
+        Some(v) if v == wanted => Ok(()),
+        Some(v) => Err(format!(
+            "{path} is version {v} and this helper writes version {wanted}; {fix}"
+        )),
+        None => Err(format!("{path} carries no version; {fix}")),
+    }
+}
+
+/// The files `install` writes are the ones this helper writes. They can
+/// differ when an install stopped after it replaced the helper: the sudoers
+/// file gives a session its own terminal and the drop-in keeps the account
+/// from logging in over SSH, so no session starts and no profile is built
+/// on stale ones.
+pub fn check_installed_files() -> Res<()> {
+    const FIX: &str = "an admin must run: sv2 install";
+    check_stamp(&sudoers_path(), SUDOERS_STAMP, SUDOERS_VERSION, FIX)?;
+    check_stamp(
+        &sshd_dropin_path(),
+        SSHD_DROPIN_STAMP,
+        SSHD_DROPIN_VERSION,
+        FIX,
+    )
+}
+
+/// The same for one profile's sandbox file, which `profile add` rewrites
+/// without a password. There is no unsandboxed fallback: without a current
+/// file, no session.
+pub fn check_profile_file(host_user: &str, profile: &str) -> Res<()> {
+    check_stamp(
+        &profile_file(host_user, profile),
+        SANDBOX_PROFILE_STAMP,
+        SANDBOX_PROFILE_VERSION,
+        &format!("run: sv2 profile add {profile}"),
+    )
 }
 
 pub fn lock(exclusive: bool) -> Res<Lock> {
@@ -110,6 +164,7 @@ pub fn profile_add(caller: &Caller, profile: &str) -> Res<()> {
     let _lock = lock(true)?;
     let mut reg = load_registry()?;
     reject_sandbox_caller(&reg, caller)?;
+    check_installed_files()?;
 
     match reg.find(caller.uid, profile).map(|e| e.state) {
         Some(State::Removing) => {
@@ -393,13 +448,39 @@ fn remove_home(entry: &Entry, account: &str) -> Res<()> {
         run_as_sandbox(entry.id, "/bin/chmod", &["-R", "-N", &home])?;
         run_as_sandbox(entry.id, "/bin/chmod", &["-R", "u+rwx", &home])?;
         run_as_sandbox(entry.id, "/bin/rm", &["-rf", "--", &home])?;
-        if sys::rmdir_at(&users, account)? {
+        if rmdir_home(&users, account, &home)? {
             return Ok(());
         }
     }
     Err(format!(
         "{home} could not be emptied as {account}; remove its contents and run the removal again"
     ))
+}
+
+/// How long macOS may go on refusing the rmdir after the account is gone.
+const HOME_RELEASE_WAIT: Duration = Duration::from_secs(15);
+
+/// Remove the (emptied) home. Ok(false) means it is not empty yet.
+///
+/// macOS refuses, even to root, to remove the home of an account that
+/// exists, and goes on refusing for a moment after the account record is
+/// deleted: measured, 3 of 8 removals got EPERM here and every one succeeded
+/// a second later. So a refusal is waited out, for a bounded time.
+fn rmdir_home(users: &std::os::fd::OwnedFd, account: &str, home: &str) -> Res<bool> {
+    let deadline = Instant::now() + HOME_RELEASE_WAIT;
+    loop {
+        match sys::try_rmdir_at(users, account)? {
+            sys::Rmdir::Removed => return Ok(true),
+            sys::Rmdir::NotEmpty => return Ok(false),
+            sys::Rmdir::Refused if Instant::now() < deadline => sleep(Duration::from_millis(100)),
+            sys::Rmdir::Refused => {
+                return Err(format!(
+                    "macOS still refuses to remove {home} {} seconds after the account was deleted; run the removal again",
+                    HOME_RELEASE_WAIT.as_secs()
+                ))
+            }
+        }
+    }
 }
 
 fn remove_entry(reg: &mut Registry, host_uid: u32, profile: &str) -> Res<()> {
@@ -486,7 +567,8 @@ pub fn profile_list(caller: &Caller) -> Res<()> {
 
 fn sudoers_content() -> String {
     format!(
-        "# sandvault2 {VERSION}: written by 'sv2 install', removed by 'sv2 uninstall'.\n\
+        "# {SUDOERS_STAMP}: {SUDOERS_VERSION}\n\
+         # sandvault2: written by 'sv2 install', removed by 'sv2 uninstall'.\n\
          # Members of {ALLOWED_GROUP} may create, list, remove and enter their own\n\
          # sandboxes without a password. Only the helper's '{MODE_CALL}' mode is covered;\n\
          # install, uninstall and user allow/deny fall through to ordinary sudo rules.\n\
@@ -526,7 +608,8 @@ fn validate_sudoers(path: &str) -> Res<()> {
 /// would stop `install`.
 fn sshd_dropin_content() -> String {
     format!(
-        "# sandvault2 {VERSION}: written by 'sv2 install', removed by 'sv2 uninstall'.\n\
+        "# {SSHD_DROPIN_STAMP}: {SSHD_DROPIN_VERSION}\n\
+         # sandvault2: written by 'sv2 install', removed by 'sv2 uninstall'.\n\
          # Sandbox accounts may not log in over SSH: a login would run outside the\n\
          # sandbox profile. Every sandbox account is a member of {SANDBOX_GROUP}.\n\
          DenyGroups {SANDBOX_GROUP}\n\
@@ -716,7 +799,7 @@ pub fn install(caller: &Caller) -> Res<()> {
         validate_sudoers,
     )?;
 
-    println!("sandvault2 {VERSION} installed");
+    println!("sandvault2 installed ({})", sv2_common::install_version());
     println!("{} may now create sandboxes: sv2 run shell", caller.name);
     Ok(())
 }
@@ -751,14 +834,14 @@ pub fn uninstall() -> Res<()> {
                 ));
             }
         }
-        sys::remove_file(&format!("{SUDOERS_DIR}/{SUDOERS_NAME}"))?;
+        sys::remove_file(&sudoers_path())?;
         sys::remove_file(&registry_path())?;
         if let Ok(state) = sys::open_dir(STATE_DIR) {
             let _ = sys::rmdir_at(&state, PROFILES_DIR_NAME);
         }
         sys::remove_file(&lock_path())?;
     }
-    sys::remove_file(&format!("{SUDOERS_DIR}/{SUDOERS_NAME}"))?;
+    sys::remove_file(&sudoers_path())?;
     // Every sandbox account is gone, so there is nobody left to refuse.
     sys::remove_file(&sshd_dropin_path())?;
     match ds::group_real_name(SANDBOX_GROUP)? {
@@ -831,6 +914,79 @@ pub fn user_deny(user: &str) -> Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each generated file is pinned to its version number. When this fails,
+    /// the text changed: bump the file's version in sv2_common (installed
+    /// machines are then told to run `sv2 install`) and record the new
+    /// fingerprint here.
+    #[test]
+    fn generated_files_are_pinned_to_their_versions() {
+        let now = [
+            ("sudoers", SUDOERS_VERSION, sudoers_content()),
+            ("sshd drop-in", SSHD_DROPIN_VERSION, sshd_dropin_content()),
+            (
+                "sandbox profile",
+                SANDBOX_PROFILE_VERSION,
+                sandbox::render("pat", "work").unwrap(),
+            ),
+        ]
+        .map(|(name, version, text)| (name, version, sys::fingerprint(&text)));
+        let pinned = [
+            ("sudoers", 1, 12_711_600_353_197_359_900u64),
+            ("sshd drop-in", 1, 1_053_182_674_171_491_837),
+            ("sandbox profile", 1, 14_978_722_656_307_676_699),
+        ];
+        assert_eq!(
+            now, pinned,
+            "a generated file's text changed: bump its version and update its pin"
+        );
+    }
+
+    #[test]
+    fn generated_files_carry_their_versions() {
+        assert_eq!(
+            stamped_version(&sudoers_content(), SUDOERS_STAMP),
+            Some(SUDOERS_VERSION)
+        );
+        assert_eq!(
+            stamped_version(&sshd_dropin_content(), SSHD_DROPIN_STAMP),
+            Some(SSHD_DROPIN_VERSION)
+        );
+    }
+
+    #[test]
+    fn a_stale_or_missing_file_is_refused() {
+        let dir = std::env::temp_dir().join(format!("sv2-stamp-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        let path = path.to_str().unwrap();
+        let check = || check_stamp(path, SUDOERS_STAMP, 2, "do the fix");
+
+        let missing = check().unwrap_err();
+        std::fs::write(path, "# sv2-sudoers-version: 2\nrule\n").unwrap();
+        let current = check();
+        std::fs::write(path, "# sv2-sudoers-version: 1\nrule\n").unwrap();
+        let older = check().unwrap_err();
+        std::fs::write(path, "# sv2-sudoers-version: 3\nrule\n").unwrap();
+        let newer = check().unwrap_err();
+        // What a version before the stamps wrote.
+        std::fs::write(path, "# sandvault2 0.1.1: written by 'sv2 install'\nrule\n").unwrap();
+        let unstamped = check().unwrap_err();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(current, Ok(()));
+        assert!(missing.contains("is missing; do the fix"), "{missing}");
+        assert!(
+            older.contains("is version 1") && older.ends_with("do the fix"),
+            "{older}"
+        );
+        assert!(newer.contains("is version 3"), "{newer}");
+        assert!(
+            unstamped.contains("carries no version; do the fix"),
+            "{unstamped}"
+        );
+    }
 
     #[test]
     fn sudoers_covers_only_call_mode() {

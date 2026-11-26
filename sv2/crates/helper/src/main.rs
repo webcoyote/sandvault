@@ -1,6 +1,7 @@
 //! sv2-helper: the only sandvault2 code that runs as root.
 //!
-//! Invoked through sudo as `sv2-helper MODE VERSION VERB [ARGS...]`:
+//! Invoked through sudo as `sv2-helper MODE VERSION VERB [ARGS...]`, where
+//! VERSION is `sv2_common::install_version()` as the calling `sv2` has it:
 //!
 //! - `call`: `profile-add NAME`, `profile-remove NAME`, `profile-list`,
 //!   `launch NAME -- ARGV`. The sudoers line lets members of
@@ -24,7 +25,7 @@ mod sys;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use sv2_common::{valid_host_user, EXIT_VERSION_MISMATCH, MODE_ADMIN, MODE_CALL, VERSION};
+use sv2_common::{install_version, valid_host_user, EXIT_VERSION_MISMATCH, MODE_ADMIN, MODE_CALL};
 
 use ops::Caller;
 use sys::Res;
@@ -97,9 +98,12 @@ fn run() -> Result<ExitCode, String> {
     }
 
     let version = args.get(1).and_then(|a| a.to_str()).ok_or(USAGE)?;
-    if version != VERSION {
+    // The application version is not compared: a new sv2 whose helper and
+    // installed files are unchanged needs no reinstall.
+    let mine = install_version();
+    if version != mine {
         eprintln!(
-            "sv2-helper: version mismatch: helper is {VERSION}, sv2 is {version}; run: sv2 install"
+            "sv2-helper: the installed helper ({mine}) is not the one this sv2 ships ({version}); run: sv2 install"
         );
         return Ok(ExitCode::from(EXIT_VERSION_MISMATCH));
     }

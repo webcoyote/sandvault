@@ -6,12 +6,8 @@
 
 use sv2_common::{
     account_name, home_path, valid_host_user, valid_profile, workspace_path, workspace_user_dir,
-    WORKSPACE_ROOT,
+    SANDBOX_PROFILE_VERSION, WORKSPACE_ROOT,
 };
-
-/// Bump on every change to `base.sb` or to the rendering. `install` then
-/// re-renders every profile file the registry lists.
-pub const PROFILE_VERSION: u32 = 1;
 
 const BASE: &str = include_str!("base.sb");
 
@@ -30,7 +26,7 @@ pub fn render(host_user: &str, profile: &str) -> Result<String, String> {
     }
     let account = account_name(host_user, profile);
     let subs = [
-        ("__PROFILE_VERSION__", PROFILE_VERSION.to_string()),
+        ("__PROFILE_VERSION__", SANDBOX_PROFILE_VERSION.to_string()),
         ("__WORKSPACE_ROOT__", WORKSPACE_ROOT.to_string()),
         ("__WORKSPACE_USER_DIR__", workspace_user_dir(host_user)),
         ("__WORKSPACE__", workspace_path(host_user, profile)),
@@ -61,7 +57,10 @@ mod tests {
     fn fills_every_placeholder() {
         let text = render("pat", "work").unwrap();
         assert!(!text.contains("__"));
-        assert!(text.contains(";; sv2-profile-version: 1\n"));
+        assert_eq!(
+            sv2_common::stamped_version(&text, sv2_common::SANDBOX_PROFILE_STAMP),
+            Some(SANDBOX_PROFILE_VERSION)
+        );
         assert!(text.contains("(subpath \"/Users/Shared/sv2/pat/work\")"));
         assert!(text.contains("(subpath \"/Users/sv2-pat-work\")"));
         assert!(text.contains("(literal \"/Users/Shared/sv2\")"));

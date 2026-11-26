@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use sv2_common::{
-    ALLOWED_GROUP, DEFAULT_PROFILE, EXIT_VERSION_MISMATCH, HELPER_PATH, MODE_ADMIN, MODE_CALL,
-    VERSION,
+    install_version, ALLOWED_GROUP, DEFAULT_PROFILE, EXIT_VERSION_MISMATCH, HELPER_PATH,
+    MODE_ADMIN, MODE_CALL, VERSION,
 };
 
 use args::Cmd;
@@ -108,7 +108,7 @@ fn admin(verb: &str, extra: &[&str]) -> ExitCode {
         .arg(format!("Password required for 'sv2 {verb}': "))
         .arg("--")
         .arg(&helper)
-        .args([MODE_ADMIN, VERSION, verb])
+        .args([MODE_ADMIN, install_version().as_str(), verb])
         .args(extra)
         .status();
     match status {
@@ -121,7 +121,9 @@ fn call_command(verb: &str) -> Command {
     let mut cmd = Command::new(SUDO);
     // -n: never prompt. The sudoers line makes this passwordless for members
     // of the allowed group; for anyone else it fails at once.
-    cmd.args(["-n", "--", HELPER_PATH, MODE_CALL, VERSION, verb]);
+    cmd.args(["-n", "--", HELPER_PATH, MODE_CALL])
+        .arg(install_version())
+        .arg(verb);
     cmd
 }
 
@@ -136,7 +138,7 @@ fn check_installed() -> Result<(), String> {
 fn explain_call_failure(status: std::process::ExitStatus) {
     if status.code() == Some(i32::from(EXIT_VERSION_MISMATCH)) {
         eprintln!(
-            "sv2: the installed helper is a different version; an admin must run: sv2 install"
+            "sv2: the installed helper or its files are out of date; an admin must run: sv2 install"
         );
     } else if !in_allowed_group() {
         eprintln!(
@@ -318,6 +320,8 @@ fn main() -> ExitCode {
         }
         Cmd::Version => {
             println!("sv2 {VERSION}");
+            // What the installed helper and its files must match.
+            println!("install-version {}", install_version());
             ExitCode::SUCCESS
         }
         Cmd::Install => admin("install", &[]),

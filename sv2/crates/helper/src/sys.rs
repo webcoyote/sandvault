@@ -180,20 +180,40 @@ pub fn mkdir_at(parent: &OwnedFd, name: &str, mode: u32) -> Res<bool> {
     Err(format!("mkdir {name}: {err}"))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Rmdir {
+    /// Gone, or was not there.
+    Removed,
+    NotEmpty,
+    /// EPERM. Root gets this for the home directory of an account macOS
+    /// still knows about.
+    Refused,
+}
+
 /// rmdir `name` inside `parent`. Succeeds only on an empty directory and
-/// never follows a link. Ok(false) means "not empty"; a missing entry is
-/// Ok(true).
-pub fn rmdir_at(parent: &OwnedFd, name: &str) -> Res<bool> {
+/// never follows a link.
+pub fn try_rmdir_at(parent: &OwnedFd, name: &str) -> Res<Rmdir> {
     let c = cstring(name)?;
     // SAFETY: as open_dir.
     if unsafe { libc::unlinkat(parent.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) } == 0 {
-        return Ok(true);
+        return Ok(Rmdir::Removed);
     }
     let err = io::Error::last_os_error();
     match err.raw_os_error() {
-        Some(libc::ENOENT) => Ok(true),
-        Some(libc::ENOTEMPTY) | Some(libc::EEXIST) => Ok(false),
+        Some(libc::ENOENT) => Ok(Rmdir::Removed),
+        Some(libc::ENOTEMPTY) | Some(libc::EEXIST) => Ok(Rmdir::NotEmpty),
+        Some(libc::EPERM) => Ok(Rmdir::Refused),
         _ => Err(format!("rmdir {name}: {err}")),
+    }
+}
+
+/// As `try_rmdir_at`, for directories nothing protects: Ok(false) means "not
+/// empty", and a refusal is an error.
+pub fn rmdir_at(parent: &OwnedFd, name: &str) -> Res<bool> {
+    match try_rmdir_at(parent, name)? {
+        Rmdir::Removed => Ok(true),
+        Rmdir::NotEmpty => Ok(false),
+        Rmdir::Refused => Err(format!("rmdir {name}: Operation not permitted")),
     }
 }
 
@@ -462,4 +482,13 @@ pub fn user_temp_dir() -> Option<String> {
     }
     let s = CStr::from_bytes_until_nul(&buf).ok()?.to_str().ok()?;
     s.starts_with('/').then(|| s.to_owned())
+}
+
+/// FNV-1a, for the tests that pin a generated file's text to its version
+/// number. Not for anything that needs a real hash.
+#[cfg(test)]
+pub fn fingerprint(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }

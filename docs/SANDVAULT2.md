@@ -87,7 +87,8 @@ launchd daemon is a planned follow-up.
   runs `sudo <prefix>/sv2-helper install` itself, which asks for the
   password; the helper copies its own executable to a root-owned path and
   writes the other root-owned artifacts. `sv2` itself never runs as root.
-- `sv2` and the helper check each other's version.
+- `sv2` and the helper compare artifact versions, not the application
+  version (see "Artifact versions" under "Milestone 1").
 - The helper is not setuid, because Homebrew cannot install a setuid binary.
 - One sudoers line:
   `%sandvault-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper call *`.
@@ -488,9 +489,9 @@ the top of this document, so it is opt-in and held to these requirements:
 
 v2 installs four things as root: the helper, one sudoers line, the sshd
 drop-in, and the registry. The helper also writes one `sandbox-exec` profile
-file per sandvault profile. Each of these carries a version and has an upgrade
-path, and each is written to a temporary file, validated, then renamed into
-place (§2, §5). Upgrading the base profile means re-rendering every profile
+file per sandvault profile. Each of these carries a version (see "Artifact
+versions" under "Milestone 1") and has an upgrade path, and each is written
+to a temporary file, validated, then renamed into place (§2, §5). Upgrading the base profile means re-rendering every profile
 file listed in the registry.
 
 There are no generated root scripts (finding 10) and no per-launch setup. The
@@ -558,7 +559,12 @@ Decisions this milestone made:
   files omit `search` (the execute bit), as in v1.
 - **Sandbox home.** Mode 0700, owned by the sandbox user. On
   `profile remove` the sandbox user empties it and root removes the empty
-  directory; root never walks it.
+  directory; root never walks it. macOS refuses that rmdir (EPERM) while the
+  account exists, and for a moment after its record is deleted: measured on
+  2026-11-25, 3 of 8 removals were refused and each succeeded a second
+  later. The helper retries a refused rmdir for up to 15 seconds. Why the
+  refusal outlasts the record, and whether it is the same privacy
+  permission as open item 10, is not known.
 - **Removal and launch.** `launch` holds the registry lock (shared) until its
   process has become the sandbox user; `profile-remove` takes it exclusively
   before it kills the account's processes.
@@ -634,17 +640,48 @@ Decisions this milestone made:
     configuration without the `Include` line, or one that was already
     broken, stops the install. The drop-in is left in place in that case.
   - *Launch.* `launch` refuses to start a session when the drop-in is
-    missing, as it does for the sandbox profile file.
-  - *Upgrade.* The version is 0.1.1, so `sv2` refuses a helper installed
-    before this until `sv2 install` is run. `install` adds every `active`
-    account in the registry to the group.
+    missing or stale (see "Artifact versions" below).
+  - *Upgrade.* `install` adds every `active` account in the registry to the
+    group. (The application version went to 0.1.1 for this, which was the
+    only way then to make an old install notice.)
   - *Uninstall* removes the drop-in and the group after the accounts.
   - *Limits.* The helper does not check that sshd sees an account as a
     member (the integration suite does, from the host side, with
     `sshd -T -C user=ACCOUNT`); nothing re-checks the drop-in after install
-    except its existence at launch; and an admin's own `Match` block that
+    except its version line at launch; and an admin's own `Match` block that
     sets `DenyGroups` replaces the global list for the logins it matches.
     These belong in `sv2 doctor`.
+- **Artifact versions (implemented after the rest of the milestone).** What
+  `sv2 install` puts on a machine changes only when `sv2 install` is run
+  again, with sudo. Whether that is needed no longer follows from the
+  application version.
+  - *Numbers.* `crates/common/src/lib.rs` has one for the helper itself
+    (`HELPER_VERSION`) and one for each file the helper writes
+    (`SUDOERS_VERSION`, `SSHD_DROPIN_VERSION`, `SANDBOX_PROFILE_VERSION`).
+    Bumping any of them makes every installed machine ask for
+    `sv2 install`; a release that bumps none needs no reinstall.
+  - *Comparison.* `sv2` passes all four as one word
+    (`helper=1,sudoers=1,sshd=1,profile=1`) where it used to pass the
+    application version, and the helper refuses a word that is not its own,
+    with exit status 3. `sv2 --version` prints the word on a second line.
+    The numbers reach a machine only inside a new helper, because the
+    helper holds the text of every file, so one comparison covers them all.
+  - *In the files.* Each file carries its number in a comment line
+    (`# sv2-sudoers-version: N`, `# sv2-sshd-version: N`,
+    `;; sv2-profile-version: N`). Before `launch` and `profile-add` the
+    helper reads the sudoers file and the drop-in back, and `launch` also
+    reads the profile's sandbox file; a missing file, another number, or no
+    number is refused with the command that fixes it (`sv2 install`, or
+    `sv2 profile add NAME` for the sandbox file). This catches an install
+    that replaced the helper and then stopped. `profile-remove` and
+    `profile-list` do not check, so a stale machine can still be cleaned up.
+  - *Forgetting to bump.* A unit test pins the text of each generated file
+    to its number and fails when one changes without the other. Nothing
+    does that for `HELPER_VERSION`: a change to the helper's code that
+    installed machines need must be bumped by hand.
+  - *Not covered.* The registry has its own format number in its header.
+    The two groups and the directories have none; `install` checks and
+    repairs them each time it runs.
 - **Allowed-users group.** v1 would name the sandbox group of a host user
   called `users` exactly `sandvault-users`. `install` therefore refuses a
   group of that name it did not create (it checks the group's RealName).
@@ -663,17 +700,15 @@ Do these before building anything else on milestone 1.
   sandvault2" and "SandVault2 Tests"; neither has run on a runner. The first
   also turns Remote Login on (`launchctl load -w .../ssh.plist`) so that the
   suite's SSH login attempt runs; whether that works on a runner is unknown.
-- [ ] **The SSH lockdown has not run as root.** It was written without sudo:
-  the unit tests and the measurements with a private sshd passed, but
-  `sv2 install` with this build, the integration suite's SSH checks, and
-  `sv2 uninstall` have not been run. To check on the first run: that sshd
-  sees a new account's membership at once (the suite asks right after
-  `profile add`, and again after a remove and add of the same name); whether
-  adding to or removing from the group raises the "administer your computer"
-  prompt (open item 10); and, on a Mac where Remote Login is open to all
-  users, that the suite's login attempt succeeds against a build without the
-  drop-in. On the development Mac Remote Login is limited to listed users,
-  so that attempt is refused either way.
+- [ ] **The SSH lockdown is partly verified.** `sv2 install` with it and the
+  integration suite (107 of 107, 2026-11-25) have run: sshd sees a new
+  account's membership at once, also after a remove and add of the same
+  name. Still unverified: `sv2 uninstall`; whether adding to or removing
+  from the group raises the "administer your computer" prompt (open
+  item 10); and, on a Mac where Remote Login is open to all users, that the
+  suite's login attempt succeeds against a build without the drop-in. On
+  the development Mac Remote Login is limited to listed users, so that
+  attempt is refused either way.
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -750,18 +785,6 @@ In rough dependency order.
   those are finished by running `profile add` or `profile remove` again.
   And the place to ask sshd what it would do with each sandbox account (see
   "SSH lockdown" under "Milestone 1").
-- [ ] Versions for installed artifacts, separate from the application
-  version. Each file `sv2` installs and manages (the helper's sudoers file,
-  the sshd drop-in, the rendered sandbox profiles, the registry format,
-  later the guest payload) carries its own version number, as v1 does with
-  `SV_SANDBOX_PROFILE_VERSION` and its siblings. Bumping one makes `sv2`
-  tell the user to run `sv2 install` again, without a new application
-  version. Today the only lever is the application version, which `sv2` and
-  the helper compare: the SSH lockdown had to go to 0.1.1 to make an old
-  install notice. To decide: where the installed numbers are recorded (in
-  each file's header, or in one root-owned stamp file), who compares them
-  (`sv2`, or the helper on every call), and which artifacts `profile add`
-  can rewrite by itself instead of asking for a reinstall.
 - [ ] Embedded guest payload and the guest-side launcher (open item 5).
 - [ ] Agent definitions: format, `install.sh`, Homebrew and native install,
   `--native`.

@@ -3,9 +3,70 @@
 //! This crate has no dependencies and does no I/O: everything in it also runs
 //! as root inside the helper.
 
-/// `sv2` and the helper must be the same version. `sv2` passes this string on
-/// every call and the helper refuses a different one.
+/// The application version: what `sv2 --version` prints and a release is
+/// named by. It does not decide whether an installed machine is up to date;
+/// the artifact versions below do.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// ---------------------------------------------------------------------------
+// Artifact versions
+// ---------------------------------------------------------------------------
+//
+// `sv2 install` puts a root-owned helper on the machine, and the helper
+// writes root-owned files. None of them changes when a new `sv2` is unpacked:
+// only `sv2 install` (sudo) replaces them. Each has a number here. Bump the
+// number when the thing changes, and every installed machine is told to run
+// `sv2 install` again; leave them alone, and a new application version needs
+// no reinstall.
+//
+// `sv2` passes `install_version()` on every call and the helper refuses one
+// that differs from its own. Each file also carries its own number in a
+// comment line, which the helper reads back before it starts a session, so a
+// file left behind by an install that stopped halfway is noticed too.
+//
+// A unit test beside each file's text pins the text to its number: changing
+// one without the other fails the test.
+
+/// The helper itself: bump on any change to its code that an installed
+/// machine must get (a fix, a new check, a new verb or argument). Nothing
+/// can detect a forgotten bump here.
+pub const HELPER_VERSION: u32 = 1;
+/// `/etc/sudoers.d/sandvault2`.
+pub const SUDOERS_VERSION: u32 = 1;
+/// The sshd drop-in that refuses sandbox accounts.
+pub const SSHD_DROPIN_VERSION: u32 = 1;
+/// The rendered `sandbox-exec` profile: `base.sb` and how it is filled in.
+pub const SANDBOX_PROFILE_VERSION: u32 = 1;
+
+/// The key of the comment line each file carries: `<key>: <number>`.
+pub const SUDOERS_STAMP: &str = "sv2-sudoers-version";
+pub const SSHD_DROPIN_STAMP: &str = "sv2-sshd-version";
+pub const SANDBOX_PROFILE_STAMP: &str = "sv2-profile-version";
+
+/// All artifact versions as one word, for the helper's command line and for
+/// `sv2 --version`. No spaces, and nothing a shell or sudo treats specially.
+pub fn install_version() -> String {
+    format!(
+        "helper={HELPER_VERSION},sudoers={SUDOERS_VERSION},sshd={SSHD_DROPIN_VERSION},profile={SANDBOX_PROFILE_VERSION}"
+    )
+}
+
+/// The number a file carries for `key`: the first line that, after its
+/// comment characters (`#` or `;`), reads exactly `<key>: <digits>`. None
+/// when there is no such line or the number does not parse.
+pub fn stamped_version(text: &str, key: &str) -> Option<u32> {
+    text.lines().find_map(|line| {
+        let digits = line
+            .trim_start_matches(['#', ';'])
+            .strip_prefix(' ')?
+            .strip_prefix(key)?
+            .strip_prefix(": ")?;
+        if digits.is_empty() || digits.len() > 9 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
+    })
+}
 
 /// Where `sv2 install` puts the root-owned helper. Outside the Homebrew
 /// prefix, which an admin user can write.
@@ -32,7 +93,8 @@ pub const DEFAULT_PROFILE: &str = "default";
 pub const MODE_CALL: &str = "call";
 pub const MODE_ADMIN: &str = "admin";
 
-/// Helper exit status for "sv2 and the helper are different versions". Only
+/// Helper exit status for "sv2 and the installed helper differ in an artifact
+/// version" (`install_version`). Only
 /// meaningful for verbs that do not end in `exec` (everything but `launch`).
 pub const EXIT_VERSION_MISMATCH: u8 = 3;
 
@@ -139,6 +201,53 @@ mod tests {
         assert_ne!(
             workspace_path("pat", "work"),
             workspace_path("pat-work", "default")
+        );
+    }
+
+    #[test]
+    fn install_version_is_one_plain_word() {
+        let v = install_version();
+        assert_eq!(v, "helper=1,sudoers=1,sshd=1,profile=1");
+        assert!(v
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'=' || b == b','));
+    }
+
+    #[test]
+    fn reads_the_version_a_file_carries() {
+        let sudoers = "# sv2-sudoers-version: 3\n# words\n%g ALL=(root) NOPASSWD: /x call *\n";
+        assert_eq!(stamped_version(sudoers, SUDOERS_STAMP), Some(3));
+        let sb = "(version 1)\n;; sv2-profile-version: 12\n(allow default)\n";
+        assert_eq!(stamped_version(sb, SANDBOX_PROFILE_STAMP), Some(12));
+        // Another file's key, no line at all, an empty file.
+        assert_eq!(stamped_version(sudoers, SSHD_DROPIN_STAMP), None);
+        assert_eq!(
+            stamped_version("(allow default)\n", SANDBOX_PROFILE_STAMP),
+            None
+        );
+        assert_eq!(stamped_version("", SUDOERS_STAMP), None);
+        // Only a whole comment line counts, and only plain digits.
+        for bad in [
+            "sv2-sudoers-version: 3",
+            "#sv2-sudoers-version: 3",
+            "x # sv2-sudoers-version: 3",
+            "# sv2-sudoers-version: 3 ",
+            "# sv2-sudoers-version: +3",
+            "# sv2-sudoers-version: 3x",
+            "# sv2-sudoers-version:3",
+            "# sv2-sudoers-version: ",
+            "# sv2-sudoers-version: 99999999999",
+            "# sv2-sudoers-version-old: 3",
+        ] {
+            assert_eq!(stamped_version(bad, SUDOERS_STAMP), None, "{bad:?}");
+        }
+        // The first matching line decides.
+        assert_eq!(
+            stamped_version(
+                "# sv2-sudoers-version: 1\n# sv2-sudoers-version: 2\n",
+                SUDOERS_STAMP
+            ),
+            Some(1)
         );
     }
 
