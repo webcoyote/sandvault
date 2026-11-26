@@ -46,6 +46,10 @@ jobs:
 
       - name: Install sandvault2
         run: |
+          # scripts/tests-sv2 lints the guest scripts, and the integration
+          # suite runs tmux in a session; with SV_TESTS_FAIL_ON_SKIP a
+          # missing tool is a failure, not a skipped check.
+          brew install shellcheck tmux
           ./scripts/build
           sv2/target/release/sv2 install
           # The suite has a sandbox account try to log in over SSH; with

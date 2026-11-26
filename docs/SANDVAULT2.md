@@ -889,61 +889,55 @@ What milestone 1 left undone, untested, or knowingly imperfect. Remove an item
 when it is fixed. Design questions still to be answered are under "Open
 items" below.
 
-### Priority order
-
-**Decided (2026-11-25).** The sections below group items by kind; this is the
-order to do them in.
-
-1. Done: the group `sandvault-users` is renamed to `sv2-users`.
-2. Done: `next-id` is kept across `uninstall`.
-3. The helper's security gaps that do not concern launchd. Done: a stalled
-   helper holding the lock, the fork storm against `profile remove`, and a
-   pre-created `/Users/Shared/sv2` (see "Holding the lock", "Killing an
-   account's processes" and "A taken workspace root" under "Milestone 1").
-   Closed as not a gap: `install` reading its own executable by path (see
-   "Installing from a path" there).
-4. Done: the guest-side launcher, agent definitions, and quarantine
-   handling.
-5. Everything else that is not the daemon, in this order: the planted
-   `~/Library/LaunchAgents` measurement (open item 7); the items under "Not
-   yet verified"; default deny and per-profile capabilities; `sv2 doctor`;
-   repository credentials; browser support; the iOS bridge; Homebrew
-   packaging.
-6. Last, the daemon: the measurement in open item 3, the move of account
-   changes into it, and with it what `sv2` does about the "administer your
-   computer" permission (open item 10).
-
 ### Not yet verified
 
-- [ ] **CI steps are unverified.** `.github/workflows/ci.yml` gained "Install
-  sandvault2" and "SandVault2 Tests"; neither has run on a runner. The first
-  also turns Remote Login on (`launchctl load -w .../ssh.plist`) so that the
-  suite's SSH login attempt runs; whether that works on a runner is unknown.
+`sv2/tests/root-checks` makes the checks below that need an administrator
+(they are marked "root-checks"). It deletes every profile on the Mac, so it
+is run by hand: `sv2/tests/root-checks sv2/target/release
+--delete-every-profile`. It has not been run yet.
+
+- [ ] **CI steps are unverified.** `.github/workflows/ci.yml` has "Install
+  sandvault2" and "SandVault2 Tests"; neither has run on a runner, because
+  the branch has not been pushed. The first also turns Remote Login on
+  (`launchctl load -w .../ssh.plist`) so that the suite's SSH login attempt
+  runs; whether that works on a runner is unknown. Read against the code on
+  2026-11-26: the step now installs `shellcheck` and `tmux`, which the
+  tests need and fail without under `SV_TESTS_FAIL_ON_SKIP`.
 - [ ] **The SSH lockdown is partly verified.** `sv2 install` with it and the
-  integration suite (107 of 107, 2026-11-25) have run: sshd sees a new
-  account's membership at once, also after a remove and add of the same
-  name. Still unverified: `sv2 uninstall`; whether adding to or removing
-  from the group raises the "administer your computer" prompt (open
-  item 10); and, on a Mac where Remote Login is open to all users, that the
-  suite's login attempt succeeds against a build without the drop-in. On
-  the development Mac Remote Login is limited to listed users, so that
-  attempt is refused either way.
+  integration suite have run: sshd sees a new account's membership at once,
+  also after a remove and add of the same name. Still unverified:
+  `sv2 uninstall` (root-checks: the drop-in and the group go, and sshd's
+  configuration still parses); whether adding to or removing from the
+  group raises the "administer your computer" prompt (open item 10); and,
+  on a Mac where Remote Login is open to all users, that the suite's login
+  attempt succeeds against a build without the drop-in. On the development
+  Mac Remote Login is limited to listed users, so that attempt is refused
+  either way.
 - [ ] **The kept registry is partly verified.** Run by hand on 2026-11-25:
   `sv2 uninstall` kept the registry and `sv2 install` after it succeeded.
   Not checked: that the next account's ID is above the last one given out
-  before the uninstall. No test covers either, because the integration suite
-  cannot run `uninstall`.
+  before the uninstall (root-checks).
 - [ ] **Large account IDs have not been tried.** IDs may now go up to
-  2^31-1, but every account so far has had an ID just above 600. To measure:
-  as root, set `next-id` in the registry to a value near the top, then run
-  the integration suite (`launchctl asuser`, the sandbox profile, the ACLs
-  and sshd's group check all see the ID).
-- [ ] **Parts of the lock, kill and workspace-root changes are untested.**
-  The integration suite has run against them (114 of 114, 2026-11-25),
-  with its checks for the full pipe, the fork storm, and stop signals in a
-  session. Not covered by any test: `^Z` at a helper that holds the lock;
-  an account that stops the kill child; `install` over a `sv2` directory
-  another user made (the logic is unit-tested without root).
+  2^31-1, but every account so far has had an ID just above 600.
+  root-checks sets `next-id` near the top, creates and enters a profile,
+  runs the integration suite, and puts `next-id` back.
+- [ ] **Parts of the kill and workspace-root changes are untested.** The
+  integration suite covers the full pipe, the fork storm, stop signals in
+  a session, and (since 2026-11-26) `^Z` typed at a helper that holds the
+  lock, with a control that the same keystrokes suspend a session. Not
+  covered: an account that stops the kill child on purpose (the path that
+  continues it runs on every removal, because on macOS the child stops
+  itself); `install` over a `sv2` directory another user made (root-checks,
+  when no kept workspace is in the way; the logic is unit-tested without
+  root). Seen while writing the `^Z` check and not pursued: `^Z` typed
+  while sudo is still starting, before the helper runs, can leave that one
+  sudo waiting for good. Nothing is locked at that point.
+- [ ] **The integration suite fails now and then for a known reason.** In
+  9 runs in a row on 2026-11-26, one failed: `dscl . -delete` of an account
+  waited on the "administer your computer" permission (open item 10) for
+  more than a minute, with the helper holding the lock, so that removal
+  and the next one failed. Which removal meets it is chance. The `^Z`
+  check's watchdog prints the processes when it happens and says so.
 - [ ] **Parts of agent definitions have not run.** Unit tests, the
   integration suite (126 of 126, 2026-11-26, with a test agent) and the two
   measurements with `claude` cover the rest. Not run: the Homebrew install
@@ -958,16 +952,8 @@ order to do them in.
   not notarized, which is the only way the message appears.
 - [ ] **The uninstall refusal has not run installed.** Unit tests cover the
   list and the arguments. Not yet run on a machine: `sv2 uninstall` with a
-  profile present (refused, nothing removed), and `--all-profiles`.
-- [ ] **Four built-in agents have not been run.** `codex`, `gemini`,
-  `opencode` and `pi` were written from v1's working wrappers
-  (`guest/home/bin`) and its install step: flags, the subcommands that
-  must not get them, package names (formula or cask checked with
-  `brew info`), native installers. None was installed, so none has been
-  started by sv2, and none was checked against a current version of its
-  program, as §7 asks. v1 also made sure Node.js was installed on the host
-  for the npm-based ones; sv2 does not, and their native installer says so
-  when `npm` is missing.
+  profile present (refused, nothing removed), and `--all-profiles`
+  (root-checks).
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -1006,8 +992,9 @@ None recorded.
 
 ### Features not in milestone 1
 
-See "Priority order" above for the order.
-
+- [ ] remove "--all-profiles" uninstall as a capability; too dangerous
+- [ ] the path search list for each agent includes both native and homebrew paths. That creates a problem where the binary could be out-of-date because the wrong one is being executed. Create separate entries for native vs. homebrew.
+- [ ] Shorten usage: doesn't need to be exhaustive (e.g. remove "refuses while..."), no newlines for agents, repair PATH shorter help, single-line help strings for commands, shorter explanation of shortening
 - [ ] `sv2 doctor`. The name is reserved and reports "not implemented yet".
   It is also the place to report profiles left in `adding` or `removing`;
   those are finished by running `profile add` or `profile remove` again.

@@ -47,6 +47,8 @@ APP_VERSION="$("$SV2" --version | /usr/bin/awk 'NR == 1 {print $2}')"
 HOST_USER="$(id -un)"
 HOST_UID="$(id -u)"
 P="svt$((RANDOM % 90000 + 10000))"
+# A second throwaway profile, for the checks that add and remove one.
+P2="${P}b"
 ACCOUNT="sv2-$HOST_USER-$P"
 WS="/Users/Shared/sv2/$HOST_USER/$P"
 SB="/Library/Application Support/sandvault2/profiles/$HOST_USER/$P.sb"
@@ -76,6 +78,7 @@ cleanup() {
     # helper removes the directory too, whichever check the run stopped at.
     [[ -d "$WS" && ! -L "$WS" ]] && /usr/bin/find "$WS" -mindepth 1 -delete 2>/dev/null
     "$SV2" profile remove "$P" >/dev/null 2>&1
+    "$SV2" profile remove "$P2" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
@@ -576,6 +579,94 @@ else
     fail "agent: a definition inside the workspace is refused" "$OUT"
 fi
 /bin/rm -rf "$WS/prefix"
+
+# ^Z. Suspended with the registry lock held, the helper would keep every
+# other user's sv2 waiting, so it ignores the terminal's stop signals; a
+# session must still be suspendable.
+#
+# job_control LINE PATTERN TENTHS: an interactive bash on a fresh pty runs
+# LINE; once a process matching PATTERN is running, ^Z is typed ten times;
+# when that process has gone, or after TENTHS of a second, the shell says how
+# many jobs it has. Interactive, because only a shell with job
+# control makes ^Z mean anything: a stop signal from the keyboard is
+# discarded for a process group nobody would resume. And only once the
+# process is there: typed earlier, ^Z reaches sv2 or sudo before the helper has
+# started, which holds nobody up and is not what is being tested. (Measured:
+# typed while sudo is still setting up, it can leave sudo waiting for good.
+# The patterns below therefore match the helper itself, from the start of its
+# command line, and not the sudo that names it in its arguments.)
+job_control() {
+    local out="$SCRATCH/job-control.out" waited=0
+    # The rcfile does not exist; its path marks the process for the watchdog.
+    {
+        local n=0
+        /bin/sleep 0.5
+        printf '%s\n' "$1"
+        until /usr/bin/pgrep -f "$2" >/dev/null || [[ "$n" -ge 200 ]]; do
+            /bin/sleep 0.02
+            n=$((n + 1))
+        done
+        for _ in 1 2 3 4 5 6 7 8 9 10; do printf '\032'; /bin/sleep 0.03; done
+        # Nothing more is typed until the process is gone, or stays stopped:
+        # sudo passes what is typed on to the command, which would swallow
+        # the lines below.
+        n=0
+        while /usr/bin/pgrep -f "$2" >/dev/null && [[ "$n" -lt "$3" ]]; do
+            /bin/sleep 0.1
+            n=$((n + 1))
+        done
+        /bin/sleep 0.5
+        printf 'echo "jobs=$(jobs | /usr/bin/wc -l | /usr/bin/tr -d " ")"\n'
+        /bin/sleep 0.5
+        # Twice: bash declines the first exit while a job is stopped.
+        printf 'kill %%1 2>/dev/null; exit\nexit\n'
+        /bin/sleep 3
+    } | SV2="$SV2" P="$P" P2="$P2" PS1='$ ' /usr/bin/script -q /dev/null \
+        /bin/bash --noprofile --rcfile "$SCRATCH/no-rcfile" -i > "$out" 2>&1 &
+    # A shell that will not exit must not hang the suite.
+    while /bin/kill -0 "$!" 2>/dev/null; do
+        if [[ "$waited" -ge 120 ]]; then
+            echo "watchdog: the shell did not exit in 60 seconds; processes then:"
+            /bin/ps -axo pid,ppid,pgid,stat,user,command \
+                | /usr/bin/grep -E "sv2-helper|[/]sudo |/sv2 |$ACCOUNT|sv2-$HOST_USER-$P2" \
+                | /usr/bin/grep -v grep | /usr/bin/cut -c1-160
+            # Not the keystrokes: a known wait in macOS (design doc, open
+            # item 10), which this check happened to be the one to meet.
+            if /usr/bin/pgrep -f '^/usr/bin/dscl \. -delete /Users/sv2-' >/dev/null; then
+                echo "the helper is waiting for dscl to delete an account: macOS is asking, or" \
+                    "waiting to be asked, whether your terminal may administer this computer"
+            fi
+            /usr/bin/pkill -f "$SCRATCH/no-rcfile" || true
+            break
+        fi
+        /bin/sleep 0.5
+        waited=$((waited + 1))
+    done
+    /usr/bin/tr -d '\r' < "$out"
+}
+# The control: the keystroke does arrive, and does stop a session. (An odd
+# duration, so that the pattern matches this sleep and no other.)
+OUT="$(job_control '"$SV2" --profile "$P" shell /bin/sleep 3.25; echo "status=$?"' '^/bin/sleep 3\.25$' 10)"
+if [[ "$OUT" == *"Stopped"* && "$OUT" == *"jobs=1"* ]]; then
+    pass "^Z: suspends a session (control)"
+else
+    fail "^Z: suspends a session (control)" "$OUT"
+fi
+# The same keystrokes at a helper that holds the lock exclusively.
+OUT="$(job_control '"$SV2" profile add "$P2" >/dev/null 2>&1; echo "status=$?"' "^$HELPER call [^ ]+ profile-add $P2\$" 400)"
+if [[ "$OUT" == *"status=0"* && "$OUT" == *"jobs=0"* && "$OUT" != *"Stopped"* ]]; then
+    pass "^Z: does not suspend the helper while it holds the lock"
+else
+    fail "^Z: does not suspend the helper while it holds the lock" "$OUT"
+fi
+check "^Z: and the command it was typed at finished its work" "active" \
+    "$("$SV2" profile list | /usr/bin/awk -v p="$P2" '$1 == p {print $2}')"
+OUT="$(job_control '"$SV2" profile remove "$P2" >/dev/null 2>&1; echo "status=$?"' "^$HELPER call [^ ]+ profile-remove $P2\$" 400)"
+if [[ "$OUT" == *"status=0"* && "$OUT" == *"jobs=0"* && "$OUT" != *"Stopped"* ]]; then
+    pass "^Z: does not suspend a removal either"
+else
+    fail "^Z: does not suspend a removal either" "$OUT"
+fi
 
 # The caller chooses the helper's standard output. A pipe that is already
 # full blocks the helper where it prints, for as long as the caller likes;

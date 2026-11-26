@@ -1,0 +1,222 @@
+#!/bin/bash
+# Checks of sv2 that need an administrator, and that the integration suite
+# therefore cannot make: uninstall, install over a name somebody else took,
+# account IDs across a reinstall, and very large account IDs.
+#
+# Run it yourself, from a terminal. It asks for your sudo password, and macOS
+# may ask whether your terminal may "administer your computer": allow it.
+#
+# IT DELETES EVERY SANDBOX PROFILE ON THIS MAC, of every user: the accounts
+# and the sandbox homes, with the agents' logins and installed programs.
+# Workspaces that have files in them are kept. It leaves sandvault2 installed,
+# from this build, with no profiles.
+#
+# Usage: root-checks DIR --delete-every-profile
+#   DIR holds the sv2 and sv2-helper to test (sv2/target/release)
+#
+# Not covered here, and still unverified: use_pty on a sudo older than
+# 1.9.14, and the workspace ACL checks against a helper with a weakened ACL.
+#
+# shellcheck disable=SC2310,SC2312 # failures are handled by the checks
+set -euo pipefail
+
+usage() {
+    /usr/bin/sed -n '2,/^# shellcheck/p' "${BASH_SOURCE[0]}" | /usr/bin/sed -e '$d' -e 's/^# \{0,1\}//'
+    exit 2
+}
+[[ $# -eq 2 && "$2" == "--delete-every-profile" ]] || usage
+[[ "$(/usr/bin/id -u)" -ne 0 ]] || { echo >&2 "run it as yourself, not as root"; exit 2; }
+[[ -t 0 ]] || { echo >&2 "run it from a terminal: sudo has to ask for a password"; exit 2; }
+
+BIN_DIR="$(cd "$1" && pwd)"
+SV2="$BIN_DIR/sv2"
+BUILT_HELPER="$BIN_DIR/sv2-helper"
+TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HELPER="/Library/PrivilegedHelperTools/sv2-helper"
+STATE_DIR="/Library/Application Support/sandvault2"
+REGISTRY="$STATE_DIR/registry"
+SUDOERS="/etc/sudoers.d/sandvault2"
+SSHD_DROPIN="/etc/ssh/sshd_config.d/000-sandvault2.conf"
+ROOT="/Users/Shared/sv2"
+STAT=/usr/bin/stat
+ME="$(/usr/bin/id -un)"
+P="rootchk$((RANDOM % 9000 + 1000))"
+ACCOUNT="sv2-$ME-$P"
+[[ -x "$SV2" && -x "$BUILT_HELPER" ]] || { echo >&2 "no sv2 build in $BIN_DIR"; exit 1; }
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; ORANGE='\033[38;5;208m'; NC='\033[0m'
+PASSED=0
+FAILED=0
+pass() { PASSED=$((PASSED + 1)); echo -e "${GREEN}ok${NC}   $1"; }
+fail() { FAILED=$((FAILED + 1)); echo -e "${RED}FAIL${NC} $1"; [[ -z "${2:-}" ]] || echo "     $2"; }
+check() { if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1" "expected [$2] got [$3]"; fi; }
+note() { echo -e "${ORANGE}     $1${NC}"; }
+section() { echo; echo "== $1"; /usr/bin/sudo -v; }
+uid_of() { /usr/bin/dscl . -read "/Users/$1" UniqueID 2>/dev/null | /usr/bin/awk '{print $2}'; }
+group_exists() { /usr/bin/dscl . -read "/Groups/$1" RecordName >/dev/null 2>&1; }
+next_id() { /usr/bin/sudo /usr/bin/awk '$1 == "next-id" {print $2}' "$REGISTRY"; }
+# run CMD...: run CMD, keep its output in OUT and its status in RC.
+run() { OUT="$("$@" 2>&1)" && RC=0 || RC=$?; }
+
+echo "This deletes every sandbox profile on this Mac. Profiles now:"
+"$SV2" profile list 2>/dev/null || true
+/usr/bin/sudo -v
+
+###############################################################################
+section "this build, installed"
+###############################################################################
+run "$SV2" install
+check "install: succeeds" "0" "$RC"
+if /usr/bin/cmp -s "$BUILT_HELPER" "$HELPER"; then
+    pass "install: the installed helper is this build"
+else
+    fail "install: the installed helper is this build"
+    echo "cannot go on"; exit 1
+fi
+"$SV2" profile add "$P" >/dev/null
+UID1="$(uid_of "$ACCOUNT")"
+[[ "$UID1" =~ ^[0-9]+$ ]] || { echo >&2 "profile $P was not created"; exit 1; }
+
+###############################################################################
+section "uninstall refuses while a profile exists"
+###############################################################################
+run "$SV2" uninstall
+if [[ "$RC" -ne 0 && "$OUT" == *"$ME: $P (account $ACCOUNT)"* && "$OUT" == *"--all-profiles"* ]]; then
+    pass "uninstall: refused, naming the profile and its owner"
+else
+    fail "uninstall: refused, naming the profile and its owner" "rc=$RC: $OUT"
+fi
+check "uninstall refused: the account is still there" "$UID1" "$(uid_of "$ACCOUNT")"
+check "uninstall refused: sessions still run" "$ACCOUNT" "$("$SV2" --profile "$P" shell /usr/bin/id -un 2>/dev/null)"
+if [[ -f "$HELPER" && -f "$SUDOERS" && -f "$SSHD_DROPIN" ]]; then
+    pass "uninstall refused: nothing installed was removed"
+else
+    fail "uninstall refused: nothing installed was removed"
+fi
+
+###############################################################################
+section "uninstall --all-profiles"
+###############################################################################
+run "$SV2" uninstall --all-profiles
+check "uninstall --all-profiles: succeeds" "0" "$RC"
+[[ "$RC" -eq 0 ]] || echo "     $OUT"
+check "uninstall: every sandbox account is gone" "" \
+    "$(/usr/bin/dscl . -list /Users | /usr/bin/grep '^sv2-' | /usr/bin/tr '\n' ' ')"
+for file in "$HELPER" "$SUDOERS" "$SSHD_DROPIN"; do
+    if [[ -e "$file" ]]; then fail "uninstall: $file is removed"; else pass "uninstall: $file is removed"; fi
+done
+for group in sv2-users sv2-sandboxes; do
+    if group_exists "$group"; then fail "uninstall: the group $group is removed"; else pass "uninstall: the group $group is removed"; fi
+done
+# The SSH lockdown must not leave sshd with a configuration it cannot read.
+if /usr/bin/sudo /usr/sbin/sshd -G >/dev/null 2>&1; then
+    pass "uninstall: sshd's configuration still parses"
+else
+    fail "uninstall: sshd's configuration still parses"
+fi
+if /usr/bin/sudo /bin/test -f "$REGISTRY"; then
+    pass "uninstall: the registry is kept"
+    NEXT="$(next_id)"
+    if [[ "$NEXT" =~ ^[0-9]+$ && "$NEXT" -gt "$UID1" ]]; then
+        pass "uninstall: its next-id is above the last account's ID"
+    else
+        fail "uninstall: its next-id is above the last account's ID" "next-id $NEXT, last ID $UID1"
+    fi
+    check "uninstall: it lists no profile" "" "$(/usr/bin/sudo /usr/bin/grep '^profile ' "$REGISTRY" || true)"
+else
+    fail "uninstall: the registry is kept"
+    NEXT=""
+fi
+
+###############################################################################
+section "install over a name somebody else took"
+###############################################################################
+if [[ -e "$ROOT" || -L "$ROOT" ]]; then
+    note "$ROOT still exists (workspaces with files were kept): these checks NOT RUN"
+else
+    # An empty directory that root did not make: replaced.
+    /bin/mkdir "$ROOT"
+    run "$SV2" install
+    check "taken root, empty directory: install succeeds" "0" "$RC"
+    check "taken root, empty directory: it is root's now" "0" "$($STAT -f '%u' "$ROOT" 2>/dev/null)"
+    "$SV2" uninstall >/dev/null 2>&1 || true
+
+    # A link: replaced, and what it points to is left alone.
+    TARGET="$(/usr/bin/mktemp -d)"
+    : > "$TARGET/keep"
+    /bin/ln -s "$TARGET" "$ROOT"
+    run "$SV2" install
+    check "taken root, a link: install succeeds" "0" "$RC"
+    if [[ -d "$ROOT" && ! -L "$ROOT" && -f "$TARGET/keep" ]]; then
+        pass "taken root, a link: replaced by a directory, target untouched"
+    else
+        fail "taken root, a link: replaced by a directory, target untouched"
+    fi
+    check "taken root, a link: nothing was made in its target" "keep" "$(/bin/ls -A "$TARGET" | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+    /bin/rm -rf "$TARGET"
+    "$SV2" uninstall >/dev/null 2>&1 || true
+
+    # A directory with a file in it: refused, and left as it is.
+    /bin/mkdir "$ROOT"
+    echo mine > "$ROOT/file"
+    run "$SV2" install
+    if [[ "$RC" -ne 0 && "$OUT" == *"was made by $ME"* && "$OUT" == *"squatting heron"* ]]; then
+        pass "taken root, with a file: install refuses and names the owner"
+    else
+        fail "taken root, with a file: install refuses and names the owner" "rc=$RC: $OUT"
+    fi
+    check "taken root, with a file: the file is untouched" "mine" "$(/bin/cat "$ROOT/file" 2>/dev/null)"
+    /bin/rm -rf "$ROOT"
+fi
+
+###############################################################################
+section "account IDs continue after a reinstall"
+###############################################################################
+run "$SV2" install
+check "reinstall: succeeds" "0" "$RC"
+"$SV2" profile add "$P" >/dev/null
+UID2="$(uid_of "$ACCOUNT")"
+if [[ "$UID2" =~ ^[0-9]+$ && "$UID2" -gt "$UID1" ]]; then
+    pass "reinstall: the new account's ID ($UID2) is above the old one's ($UID1)"
+else
+    fail "reinstall: the new account's ID is above the old one's" "old $UID1 new $UID2"
+fi
+"$SV2" profile remove "$P" >/dev/null
+
+###############################################################################
+section "very large account IDs"
+###############################################################################
+BEFORE="$(next_id)"
+LARGE=2147483000
+/usr/bin/sudo /usr/bin/sed -i '' "s/^next-id .*/next-id $LARGE/" "$REGISTRY"
+"$SV2" profile add "$P" >/dev/null && RC=0 || RC=$?
+check "large ID: a profile is created" "0" "$RC"
+UID3="$(uid_of "$ACCOUNT")"
+if [[ "$UID3" =~ ^[0-9]+$ && "$UID3" -ge "$LARGE" ]]; then
+    pass "large ID: the account's ID is $UID3"
+else
+    fail "large ID: the account has a large ID" "$UID3"
+fi
+check "large ID: a session runs as it" "$UID3" "$("$SV2" --profile "$P" shell /usr/bin/id -u 2>/dev/null)"
+check "large ID: in its own launchd domain" "$UID3" "$("$SV2" --profile "$P" shell /bin/launchctl manageruid 2>/dev/null)"
+"$SV2" profile remove "$P" >/dev/null && RC=0 || RC=$?
+check "large ID: the profile is removed" "0" "$RC"
+echo "     running the integration suite with large IDs"
+if "$TESTS_DIR/integration" "$BIN_DIR"; then
+    pass "large ID: the integration suite passes"
+else
+    fail "large ID: the integration suite passes"
+fi
+# Back to where numbering was. The large IDs used here are simply skipped
+# when, two thousand million accounts from now, numbering reaches them.
+/usr/bin/sudo /usr/bin/sed -i '' "s/^next-id .*/next-id $BEFORE/" "$REGISTRY"
+check "large ID: numbering is put back" "$BEFORE" "$(next_id)"
+
+echo
+echo "sandvault2 is installed from this build, with no profiles;"
+echo "'sv2 run shell' creates the default one again."
+if [[ "$FAILED" -ne 0 ]]; then
+    echo -e "${RED}sv2 root checks: $FAILED failed, $PASSED passed${NC}"
+    exit 1
+fi
+echo -e "${GREEN}sv2 root checks: $PASSED passed${NC}"
