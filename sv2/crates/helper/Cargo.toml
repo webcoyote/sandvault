@@ -1,0 +1,10 @@
+[package]
+name = "sv2-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sv2-common = { path = "../common" }
+libc = { workspace = true }

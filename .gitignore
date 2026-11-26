@@ -2,6 +2,7 @@
 /logs/
 /worktrees/
 /node_modules/
+/sv2/target/
 .DS_Store
 .claude/settings.local.json
 .env

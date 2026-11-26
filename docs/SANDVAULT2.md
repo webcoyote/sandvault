@@ -1,7 +1,9 @@
 # Sandvault 2 design
 
-Status: design, nothing implemented. Decisions marked **Decided** were made on
-2026-11-24. Open items are listed at the end.
+Status: milestone 1 (shell sessions) is implemented in `sv2/`; see
+"Milestone 1" near the end for what exists and what it decided. Everything
+else is design. Decisions marked **Decided** were made on 2026-11-24. Open
+items are listed at the end.
 
 Section references such as §1 are to `docs/review-guidelines.md`. "Finding N"
 refers to `docs/security-review-2026-11-24.md`.
@@ -87,9 +89,13 @@ launchd daemon is a planned follow-up.
   writes the other root-owned artifacts. `sv2` itself never runs as root.
 - `sv2` and the helper check each other's version.
 - The helper is not setuid, because Homebrew cannot install a setuid binary.
-- One sudoers line, for example
-  `%sandvault-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper`.
-  There is no per-user sudoers file.
+- One sudoers line:
+  `%sandvault-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper call *`.
+  There is no per-user sudoers file. The helper's first argument is a mode.
+  `call` (the profile verbs and `launch`) is what the line covers. `install`,
+  `uninstall`, `user-allow` and `user-deny` are in `admin` mode, which the
+  line does not match, so sudo itself asks for a password and requires general
+  sudo rights. The helper cannot tell whether a password was typed; sudo can.
 - The helper's interface is designed as a wire protocol so it can move behind
   a daemon without redesign:
   - narrow verbs only: `profile-add NAME`, `profile-remove NAME`,
@@ -284,7 +290,7 @@ sv2 doctor
 - Options come before `NAME`. Everything after `NAME` is passed to the agent
   unchanged; no `--` is needed.
 - `sv2 run` creates the `default` profile on first use.
-- `sv2 run --profile work claude` selects a profile.
+- `sv2 run --profile work claude` selects a profile; `-p` is the short form.
 - One uninstall path, which removes only what the
   registry lists (finding 17).
 
@@ -495,6 +501,149 @@ A checkout inside the workspace lets a sandboxed agent edit the source of the
 root helper (finding 7). A helper build must be reviewed, and built from a
 checkout the sandbox cannot write, before `sv2 install`.
 
+## Milestone 1
+
+Implemented in `sv2/` (a Cargo workspace): `sv2 install`, `uninstall`,
+`user allow|deny`, `profile add|remove|list`, and `sv2 run shell`, with v1's
+sandbox profile ported unchanged.
+
+| Crate | Binary | Runs as | Dependencies |
+|---|---|---|---|
+| `crates/common` | (library) | both | none |
+| `crates/helper` | `sv2-helper` | root | `libc` |
+| `crates/cli` | `sv2` | host user | `libc` |
+
+Build and test: `scripts/tests-sv2` (also run by `scripts/validate`). Unit
+tests need no privileges. `sv2/tests/integration` creates a throwaway profile
+and needs this build installed (`sv2/target/release/sv2 install`); without
+that it reports itself SKIPPED, and fails under `SV_TESTS_FAIL_ON_SKIP=1`.
+
+Decisions this milestone made:
+
+- **Helper modes.** See the sudoers line under "Privileged helper".
+- **Registry format (open item 6).** A line-oriented text file, documented at
+  the top of `crates/helper/src/registry.rs`. Each entry has a state:
+  `adding`, `active`, or `removing`. The state is written before the first
+  system change and every later step is idempotent, so a killed
+  `profile-add` or `profile-remove` is finished by running it again.
+  `next-id` only grows: an account ID is never reused, so files a removed
+  sandbox left in `/tmp` are never owned by a later sandbox. Two limits:
+  `uninstall` deletes the registry, so a reinstall starts again at 600; and
+  nothing reclaims IDs, so the range (600-60000) can be used up by repeated
+  add and remove.
+- **Launch (part of open item 5).** The helper takes no environment and no
+  path from its caller. A session gets a fixed environment (`HOME`, `USER`,
+  `LOGNAME`, `SHELL`, a system `PATH`, `TMPDIR`, `SV2_HOST_USER`,
+  `SV2_PROFILE`, `SV2_WORKSPACE`). Whatever else `sv2` wants (terminal
+  variables, the starting directory) it puts in the command line, as
+  `/usr/bin/env NAME=value ... /bin/zsh -c 'cd ...'`, which runs as the
+  sandbox user. The command must be an absolute path: it follows
+  `sandbox-exec -f FILE`, where a leading `-p` would replace the profile.
+- **Workspace access.** ACL entries name the sandbox user and the host user
+  directly, so the host user joins no group. The entry on the workspace
+  directory itself omits `delete`, `writesecurity` and `chown`: the sandbox
+  cannot remove, move, or re-permission the workspace. Inherited entries for
+  files omit `search` (the execute bit), as in v1.
+- **Sandbox home.** Mode 0700, owned by the sandbox user. On
+  `profile remove` the sandbox user empties it and root removes the empty
+  directory; root never walks it.
+- **Removal and launch.** `launch` holds the registry lock (shared) until its
+  process has become the sandbox user; `profile-remove` takes it exclusively
+  before it kills the account's processes.
+- **Allowed-users group.** v1 would name the sandbox group of a host user
+  called `users` exactly `sandvault-users`. `install` therefore refuses a
+  group of that name it did not create (it checks the group's RealName).
+
+## Remaining work
+
+What milestone 1 left undone, untested, or knowingly imperfect. Remove an item
+when it is fixed. Design questions still to be answered are under "Open
+items" below.
+
+### Not yet verified
+
+Do these before building anything else on milestone 1.
+
+- [ ] **CI steps are unverified.** `.github/workflows/ci.yml` gained "Install
+  sandvault2" and "SandVault2 Tests"; neither has run on a runner.
+- [ ] **tmux and the shared terminal** (open item 4). Check in the
+  first working session.
+- [ ] **Unit tests that only compare strings.** The ACL entries
+  (`ops::workspace_aces`), the sudoers line, and the session environment are
+  asserted as text. Their effect is covered only by the integration suite, so
+  it needs cases for: sandbox cannot delete/rename/chmod the workspace
+  directory, new files are not executable by inheritance, host user can read
+  and write what the sandbox creates.
+
+### Security gaps
+
+- [ ] **SSH to self leaves the sandbox.** With Remote Login enabled for all
+  users, a sandbox account can `ssh localhost` and get a shell without the
+  `sandbox-exec` profile. Fix: the sshd drop-in and shared sandbox group
+  ("Closing other routes out of the sandbox").
+- [ ] **launchd as a route around the profile** (open item 7). Measure
+  whether a session can start a job in its own launchd domain; such a job
+  would run unconfined as the sandbox user.
+- [ ] **`install` reads its own executable by path.** The helper copies itself
+  to `/Library/PrivilegedHelperTools` by reopening the path. Whoever can write
+  the directory it was run from (the Homebrew prefix) can swap the file
+  between sudo's exec and the copy. Fix: copy from an already-open descriptor,
+  or have `sv2` pass the file on a descriptor and verify a hash.
+- [ ] **A suspended helper blocks everyone.** An allowed user can stop the
+  helper (^Z) while it holds the exclusive registry lock; every other user's
+  `sv2` command then waits forever. Fix: ignore job-control stop signals while
+  the lock is held, and/or give waiters a timeout with a message naming the
+  holder.
+- [ ] **Fork storm against `profile remove`.** `kill_all_processes_of` loops
+  `kill(-1, SIGKILL)` as the sandbox user; a process forking fast enough can
+  outlast the loop's bound and removal fails (safely, state stays `removing`).
+  Fix: take away the account's ability to run first (e.g. `launchctl bootout`
+  plus a per-user process limit), then kill.
+- [ ] **A pre-created `/Users/Shared/sv2` blocks install.** `/Users/Shared` is
+  world-writable, so any local user can create the directory first; `install`
+  refuses a directory root does not own, and an admin must delete it by hand.
+  Fix: decide whether `install` may replace an empty one, or move the root
+  somewhere users cannot write.
+
+### Functional gaps
+
+- [ ] **Kept workspaces are unreadable after re-add.** `profile remove` keeps a
+  non-empty workspace. A later `profile add` reuses the directory, but the new
+  account has a new ID and the old files' ACLs name the deleted one. Needs
+  `sv2 repair` (below).
+- [ ] **Account IDs.** `uninstall` deletes the registry, so a reinstall starts
+  numbering at 600 again and a new sandbox can own files an old one left in
+  `/tmp`. Nothing reclaims IDs, so 600-60000 can be used up by repeated add
+  and remove. Fix: keep `next-id` somewhere `uninstall` does not delete, and
+  decide on wraparound.
+- [ ] **Group name `sandvault-users`.** v1 gives a host user named `users` a
+  sandbox group of exactly this name. `install` refuses a group it did not
+  create, so the two cannot be confused, but they also cannot coexist.
+  Renaming to `sv2-users` removes the overlap; do it before anyone installs.
+- [ ] **No guest payload.** Sessions get Homebrew on `PATH` from `sv2`, and the
+  sandbox user's shell creates an empty `~/.zshrc`. The embedded payload
+  (shell setup, `install.sh` runner) is not written.
+
+### Features not in milestone 1
+
+In rough dependency order.
+
+- [ ] `sv2 repair` (re-apply ACLs and ownership; finish half-done add/remove).
+  The name is reserved and reports "not implemented yet".
+- [ ] `sv2 doctor`. Reserved the same way.
+- [ ] sshd drop-in and the shared sandbox group (closes the SSH gap above).
+- [ ] Embedded guest payload and the guest-side launcher (open item 5).
+- [ ] Agent definitions: format, `install.sh`, Homebrew and native install,
+  `--native`.
+- [ ] Quarantine handling for installed agent binaries (open item 1).
+- [ ] Default deny, and per-profile capabilities (open item 8).
+- [ ] Repository credentials.
+- [ ] Browser support.
+- [ ] iOS bridge, and the simulator trust question (open item 2).
+- [ ] Homebrew packaging of `sv2` itself, and upgrade handling when `sv2` and
+  the installed helper differ in version.
+- [ ] Move from the sudoers helper to a launchd daemon (open item 3).
+
 ## Open items
 
 1. **Quarantine.** v1 clears quarantine by running freshly installed agent
@@ -512,9 +661,9 @@ checkout the sandbox cannot write, before `sv2 install`.
    argument vector: the helper after it drops privileges, or a script in the
    embedded payload. Also how the agent definition, initial directory, and
    terminal variables reach it, given that sudo passes only stdin, stdout,
-   and stderr.
-6. **Registry format.** Fields, and the intent record that makes
-   `profile-add` and `profile-remove` safe to interrupt and repeat.
+   and stderr. Milestone 1 answers the last part for `shell` (see
+   "Milestone 1"); agent definitions are still open.
+6. **Registry format.** Decided in milestone 1; see "Milestone 1".
 7. **launchd as a route around the profile.** Measure whether a session can
    start a job in its own launchd domain (`launchctl bootstrap` or `submit`,
    or a plist in `~/Library/LaunchAgents`). Such a job would run as the

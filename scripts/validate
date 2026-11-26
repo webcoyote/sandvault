@@ -10,6 +10,11 @@ export VERBOSE
 ORANGE='\033[38;5;208m'
 NC='\033[0m'
 
+[[ "$VERBOSE" -ne 0 ]] && echo -e "${ORANGE}scripts/tests-sv2${NC}"
+"$SCRIPT_DIR/tests-sv2"
+
+[[ "$VERBOSE" -ne 0 ]] && echo
+
 [[ "$VERBOSE" -ne 0 ]] && echo -e "${ORANGE}scripts/tests${NC}"
 "$SCRIPT_DIR/tests"
 

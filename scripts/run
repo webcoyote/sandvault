@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Builds sandvault2, then runs this checkout's sv2 with the given arguments,
+# from the caller's directory (sv2 uses it as the session's starting point).
+#
+#   scripts/run install      # once; asks for your password
+#   scripts/run shell
+#
+# Everything but `install` needs the installed helper to be this build's
+# version; rerun `scripts/run install` after the version changes.
+VERBOSE="${VERBOSE:-0}" "$SCRIPT_DIR/build"
+exec "$SCRIPT_DIR/../sv2/target/release/sv2" "$@"

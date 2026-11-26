@@ -1,0 +1,250 @@
+#!/bin/bash
+# Privileged integration tests for sv2: real accounts, real sessions.
+#
+# Usage: integration DIR     (DIR holds the sv2 and sv2-helper to test)
+#
+# Runs only against an installed helper that is byte-identical to DIR's.
+# Everything is done in a throwaway profile with a random name; the caller's
+# other profiles, and this checkout, are never touched (review-guidelines §8).
+# Escapes are judged from the host side, not from what the sandbox reports.
+#
+# No -E and no ERR trap: most commands here are expected to fail inside $(...)
+# and are judged by check/refused, so a trap would only add noise.
+# shellcheck disable=SC2016 # literal $ and backticks are test data
+# shellcheck disable=SC2310,SC2312 # failures are handled by the checks
+set -euo pipefail
+
+BIN_DIR="${1:?usage: integration DIR}"
+SV2="$BIN_DIR/sv2"
+BUILT_HELPER="$BIN_DIR/sv2-helper"
+HELPER="/Library/PrivilegedHelperTools/sv2-helper"
+STAT=/usr/bin/stat
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; ORANGE='\033[38;5;208m'; NC='\033[0m'
+
+skip() {
+    echo -e "${ORANGE}sv2 integration tests SKIPPED: $1${NC}"
+    echo "    to run them: $SV2 install   (needs sudo)"
+    if [[ "${SV_TESTS_FAIL_ON_SKIP:-0}" == "1" ]]; then
+        echo >&2 "SV_TESTS_FAIL_ON_SKIP=1: a skipped suite is a failure"
+        exit 1
+    fi
+    exit 0
+}
+
+[[ -x "$SV2" && -x "$BUILT_HELPER" ]] || { echo >&2 "no sv2 build in $BIN_DIR"; exit 1; }
+[[ -f "$HELPER" ]] || skip "sv2 is not installed"
+/usr/bin/cmp -s "$BUILT_HELPER" "$HELPER" || skip "the installed helper is not this build"
+VERSION="$("$SV2" --version | /usr/bin/awk '{print $2}')"
+/usr/bin/sudo -n -- "$HELPER" call "$VERSION" profile-list >/dev/null 2>&1 \
+    || skip "$(id -un) is not in the sandvault-users group"
+
+HOST_USER="$(id -un)"
+HOST_UID="$(id -u)"
+P="svt$((RANDOM % 90000 + 10000))"
+ACCOUNT="sv2-$HOST_USER-$P"
+WS="/Users/Shared/sv2/$HOST_USER/$P"
+SB="/Library/Application Support/sandvault2/profiles/$HOST_USER/$P.sb"
+
+PASSED=0
+FAILED=0
+pass() { PASSED=$((PASSED + 1)); [[ "${VERBOSE:-0}" == "0" ]] || echo -e "${GREEN}ok${NC}   $1"; }
+fail() { FAILED=$((FAILED + 1)); echo -e "${RED}FAIL${NC} $1"; [[ -z "${2:-}" ]] || echo "     $2"; }
+# check NAME EXPECTED GOT
+check() { if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1" "expected [$2] got [$3]"; fi; }
+
+cleanup() {
+    set +e
+    # Host-owned test files only, by name; then let the helper remove the rest.
+    /bin/rm -f "$WS/host-file" 2>/dev/null
+    "$SV2" profile remove "$P" >/dev/null 2>&1
+}
+trap cleanup EXIT
+
+# Run a command in the throwaway profile's sandbox.
+sb() { "$SV2" --profile "$P" shell "$@"; }
+account_exists() { /usr/bin/dscl . -read "/Users/$ACCOUNT" UniqueID >/dev/null 2>&1; }
+
+###############################################################################
+# profile add
+###############################################################################
+"$SV2" profile add "$P" >/dev/null
+check "profile add: listed as active" "active" \
+    "$("$SV2" profile list | /usr/bin/awk -v p="$P" '$1 == p {print $2}')"
+
+SB_UID="$(/usr/bin/dscl . -read "/Users/$ACCOUNT" UniqueID | /usr/bin/awk '{print $2}')"
+[[ "$SB_UID" =~ ^[0-9]+$ ]] || { echo >&2 "account $ACCOUNT was not created"; exit 1; }
+if [[ "$SB_UID" -ge 600 ]]; then pass "account: UID >= 600"; else fail "account: UID >= 600" "$SB_UID"; fi
+check "account: primary group is its own" "$SB_UID" \
+    "$(/usr/bin/dscl . -read "/Users/$ACCOUNT" PrimaryGroupID | /usr/bin/awk '{print $2}')"
+if /usr/bin/id -Gn "$ACCOUNT" | /usr/bin/tr ' ' '\n' | /usr/bin/grep -qx staff; then
+    fail "account: not in staff"
+else
+    pass "account: not in staff"
+fi
+check "account: no usable password" "*" \
+    "$(/usr/bin/dscl . -read "/Users/$ACCOUNT" Password | /usr/bin/awk '{print $2}')"
+
+check "home: owner and mode" "$SB_UID 700" "$($STAT -f '%u %Lp' "/Users/$ACCOUNT")"
+check "workspace: owner and mode" "$HOST_UID 700" "$($STAT -f '%u %Lp' "$WS")"
+check "workspace parents: root-owned, not writable by others" "0 755 0 755" \
+    "$($STAT -f '%u %Lp' /Users/Shared/sv2) $($STAT -f '%u %Lp' "/Users/Shared/sv2/$HOST_USER")"
+check "sandbox profile: root-owned, read-only" "0 444" "$($STAT -f '%u %Lp' "$SB")"
+
+if "$SV2" profile add "$P" >/dev/null; then pass "profile add: repeatable"; else fail "profile add: repeatable"; fi
+check "profile add: repeat keeps the UID" "$SB_UID" \
+    "$(/usr/bin/dscl . -read "/Users/$ACCOUNT" UniqueID | /usr/bin/awk '{print $2}')"
+
+###############################################################################
+# sessions
+###############################################################################
+check "session: runs as the sandbox account" "$ACCOUNT" "$(sb /usr/bin/id -un)"
+check "session: no staff, no host groups" "" \
+    "$(sb /usr/bin/id -Gn | /usr/bin/tr ' ' '\n' | /usr/bin/grep -xE 'staff|admin|wheel|sandvault-users' || true)"
+# Acceptance test from the design: the session is in the sandbox user's own
+# launchd domain, not the host user's.
+check "session: own launchd domain (manageruid == uid)" "$SB_UID" "$(sb /bin/launchctl manageruid)"
+check "session: starts in the workspace" "$WS" "$(cd / && sb /bin/pwd)"
+/bin/mkdir "$WS/host dir"
+check "session: starts in the host's directory inside the workspace" "$WS/host dir" \
+    "$(cd "$WS/host dir" && sb /bin/pwd)"
+/bin/rmdir "$WS/host dir"
+check "session: HOME" "/Users/$ACCOUNT" "$(sb /bin/sh -c 'echo "$HOME"')"
+
+check "arguments: passed unchanged" 'a b|$HOME|`id`|x;y|q'"'"'"||-l|--|ünï|*|' \
+    "$(sb /usr/bin/printf '%s|' 'a b' '$HOME' '`id`' 'x;y' "q'\"" '' -l -- 'ünï' '*')"
+rc=0; sb /bin/sh -c 'exit 7' || rc=$?
+check "exit status: propagates" "7" "$rc"
+check "stdin: piped commands run" "piped-42" "$(echo 'echo piped-$((6*7))' | "$SV2" --profile "$P" shell)"
+check "stdin: reaches the command" "HELLO" "$(echo hello | sb /usr/bin/tr a-z A-Z)"
+
+check "environment: host variables do not leak" "" \
+    "$(SV2_TEST_LEAK=leaked SSH_AUTH_SOCK=/tmp/x sb /usr/bin/env | /usr/bin/grep -E '^(SV2_TEST_LEAK|SSH_AUTH_SOCK|SUDO_)' || true)"
+check "environment: TERM is forwarded" "sv2-test-term" "$(TERM=sv2-test-term sb /bin/sh -c 'echo "$TERM"')"
+
+###############################################################################
+# confinement (judged from the host side)
+###############################################################################
+MARK="sv2-test-$$-$RANDOM"
+check "sandbox: cannot read the host home" "" "$(sb /bin/ls "$HOME" 2>/dev/null || true)"
+sb /usr/bin/touch "/Users/Shared/$MARK" 2>/dev/null || true
+if [[ -e "/Users/Shared/$MARK" ]]; then
+    fail "sandbox: cannot write outside the workspace" "/Users/Shared/$MARK was created"
+    /usr/bin/sudo -n -- "$HELPER" call "$VERSION" launch "$P" -- /bin/rm -f "/Users/Shared/$MARK" || true
+else
+    pass "sandbox: cannot write outside the workspace"
+fi
+sb /usr/bin/touch "/Users/Shared/sv2/$HOST_USER/$MARK" 2>/dev/null || true
+if [[ -e "/Users/Shared/sv2/$HOST_USER/$MARK" ]]; then
+    fail "sandbox: cannot create a sibling of the workspace"
+else
+    pass "sandbox: cannot create a sibling of the workspace"
+fi
+sb /bin/mv "$WS" "/private/tmp/$MARK" 2>/dev/null || true
+if [[ -d "$WS" && ! -e "/private/tmp/$MARK" ]]; then
+    pass "sandbox: cannot move the workspace away"
+else
+    fail "sandbox: cannot move the workspace away"
+fi
+
+sb /bin/sh -c 'echo from-sandbox > sandbox-file && mkdir -p d/e && echo x > d/e/f'
+if [[ -f "$WS/sandbox-file" && -f "$WS/d/e/f" ]]; then
+    pass "workspace: sandbox can create files and directories"
+else
+    fail "workspace: sandbox can create files and directories"
+fi
+check "workspace: sandbox files are owned by the sandbox account" "$SB_UID" "$($STAT -f '%u' "$WS/sandbox-file")"
+# The host user reaches sandbox-created entries through the inherited ACEs.
+if /bin/rm -f "$WS/d/e/f" && /bin/rmdir "$WS/d/e" "$WS/d" && /bin/rm -f "$WS/sandbox-file"; then
+    pass "workspace: host can remove what the sandbox created"
+else
+    fail "workspace: host can remove what the sandbox created"
+fi
+echo from-host > "$WS/host-file"
+check "workspace: sandbox can read and rewrite host files" "from-host" \
+    "$(sb /bin/sh -c 'cat host-file && echo changed > host-file')"
+if [[ ! -x "$WS/host-file" ]]; then pass "workspace: new files are not executable"; else fail "workspace: new files are not executable"; fi
+
+###############################################################################
+# the helper refuses what it must
+###############################################################################
+refused() { # NAME CMD...
+    local name="$1"; shift
+    if "$@" >/dev/null 2>&1; then fail "$name" "command succeeded: $*"; else pass "$name"; fi
+}
+CALL=(/usr/bin/sudo -n -- "$HELPER" call "$VERSION")
+# sandbox-exec would read a leading -p as "use this profile instead".
+OUT="$("${CALL[@]}" launch "$P" -- -p '(version 1)(allow default)' /usr/bin/touch "/Users/Shared/$MARK" 2>&1 || true)"
+if [[ ! -e "/Users/Shared/$MARK" && "$OUT" == *"absolute path"* ]]; then
+    pass "helper: command cannot be a sandbox-exec option"
+else
+    fail "helper: command cannot be a sandbox-exec option" "$OUT"
+    /usr/bin/sudo -n -- "$HELPER" call "$VERSION" launch "$P" -- /bin/rm -f "/Users/Shared/$MARK" || true
+fi
+refused "helper: unknown profile" "${CALL[@]}" launch nosuchprofile -- /usr/bin/true
+refused "helper: invalid profile name" "${CALL[@]}" profile-add "../x"
+refused "helper: invalid profile name (dash)" "${CALL[@]}" profile-add "a-b"
+refused "helper: wrong version" /usr/bin/sudo -n -- "$HELPER" call 0.0.0-other profile-list
+refused "helper: not runnable without sudo" "$HELPER" call "$VERSION" profile-list
+refused "helper: admin verbs are not in call mode" "${CALL[@]}" uninstall
+refused "helper: stage2 is not in call mode" "${CALL[@]}" stage2 "$SB_UID" "$HOST_USER" "$P" -- /usr/bin/true
+refused "sandbox account: cannot reach the helper through sudo" sb /usr/bin/sudo -n -- "$HELPER" call "$VERSION" profile-list
+# The sudoers line covers call mode only. -k ignores a cached sudo password.
+# Skipped where the user has blanket passwordless sudo (CI runners).
+if /usr/bin/sudo -k -n /usr/bin/true 2>/dev/null; then
+    echo "     (blanket passwordless sudo: admin/stage2 password checks not applicable)"
+else
+    refused "sudoers: admin mode needs a password" \
+        /usr/bin/sudo -k -n -- "$HELPER" admin "$VERSION" user-deny sv2-no-such-user
+    refused "sudoers: stage2 needs a password" \
+        /usr/bin/sudo -k -n -- "$HELPER" stage2 "$SB_UID" "$HOST_USER" "$P" -- /usr/bin/true
+fi
+
+###############################################################################
+# profile remove
+###############################################################################
+# A detached process outlives the session, and removal kills it.
+sb /bin/sh -c '/usr/bin/nohup /bin/sleep 600 >/dev/null 2>&1 &'
+if /usr/bin/pgrep -u "$SB_UID" -x sleep >/dev/null; then
+    pass "detached process outlives the session"
+else
+    fail "detached process outlives the session"
+fi
+# A home laid out to resist deletion: immutable file, unreadable directories.
+sb /bin/sh -c 'mkdir -p ~/deep/tree && echo x > ~/deep/tree/file && chflags uchg ~/deep/tree/file && chmod 000 ~/deep/tree ~/deep'
+
+OUT="$("$SV2" profile remove "$P")"
+if /usr/bin/pgrep -u "$SB_UID" >/dev/null; then fail "remove: kills the account's processes"; else pass "remove: kills the account's processes"; fi
+if account_exists; then fail "remove: account deleted"; else pass "remove: account deleted"; fi
+if [[ -e "/Users/$ACCOUNT" ]]; then fail "remove: home deleted"; else pass "remove: home deleted"; fi
+if [[ -e "$SB" ]]; then fail "remove: sandbox profile deleted"; else pass "remove: sandbox profile deleted"; fi
+# host-file is still there: the user's files are never deleted.
+if [[ -f "$WS/host-file" && "$OUT" == *"kept $WS"* ]]; then
+    pass "remove: non-empty workspace is kept and reported"
+else
+    fail "remove: non-empty workspace is kept and reported" "$OUT"
+fi
+check "remove: no longer listed" "" "$("$SV2" profile list | /usr/bin/awk -v p="$P" '$1 == p')"
+refused "remove: no session after removal" "${CALL[@]}" launch "$P" -- /usr/bin/true
+
+# Adding the name again reuses the kept workspace, under a new UID.
+"$SV2" profile add "$P" >/dev/null
+NEW_UID="$(/usr/bin/dscl . -read "/Users/$ACCOUNT" UniqueID | /usr/bin/awk '{print $2}')"
+if [[ "$NEW_UID" =~ ^[0-9]+$ && "$NEW_UID" -gt "$SB_UID" ]]; then
+    pass "re-add: UID is not reused"
+else
+    fail "re-add: UID is not reused" "old $SB_UID new $NEW_UID"
+fi
+# The directory is reused. Files already in it carry ACL entries for the old
+# account, so the new one cannot open them until 'sv2 repair' exists.
+check "re-add: kept workspace directory is reused" "host-file" "$(sb /bin/ls)"
+/bin/rm -f "$WS/host-file"
+"$SV2" profile remove "$P" >/dev/null
+if [[ -e "$WS" ]]; then fail "remove: empty workspace is removed"; else pass "remove: empty workspace is removed"; fi
+
+echo
+if [[ "$FAILED" -ne 0 ]]; then
+    echo -e "${RED}sv2 integration: $FAILED failed, $PASSED passed${NC}"
+    exit 1
+fi
+echo -e "${GREEN}sv2 integration: $PASSED passed${NC}"

@@ -1,0 +1,29 @@
+#!/bin/bash
+# sandvault2 (sv2) tests: build, lint, unit tests, then the privileged
+# integration suite when sv2 is installed on this machine.
+#
+# The integration suite needs the helper this checkout builds to be the one
+# installed (sv2/target/release/sv2 install). Without it the suite is SKIPPED,
+# which is reported as such and is a failure under SV_TESTS_FAIL_ON_SKIP=1.
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SV2_DIR="$SCRIPT_DIR/../sv2"
+
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
+if ! command -v cargo >/dev/null; then
+    echo >&2 "sv2 tests: cargo not found; install Rust (https://rustup.rs)"
+    exit 1
+fi
+
+QUIET=(--quiet)
+[[ "$VERBOSE" -ne 0 ]] && QUIET=()
+
+cd "$SV2_DIR"
+cargo fmt --all --check
+cargo clippy --locked --all-targets "${QUIET[@]+"${QUIET[@]}"}" -- -D warnings
+cargo test --locked "${QUIET[@]+"${QUIET[@]}"}"
+VERBOSE="$VERBOSE" "$SCRIPT_DIR/build"
+
+"$SV2_DIR/tests/integration" "$SV2_DIR/target/release"

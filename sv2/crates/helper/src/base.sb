@@ -1,0 +1,165 @@
+;; Sandbox profile for sandvault2: v1 profile (allow-default with a deny list),
+;; ported unchanged apart from the account and workspace paths. Rendered by
+;; sv2-helper; the placeholders are filled in by sandbox.rs.
+(version 1)
+;; sv2-profile-version: __PROFILE_VERSION__
+(allow default)
+
+;; restrict writes to everything
+(deny file-write*
+    (subpath "/"))
+
+;; restrict reads to Volumes to prevent access to removable disks,
+;; but ensure the main disk is readable via Volumes.
+(deny file-read*
+    (subpath "/Volumes"))
+(allow file-read*
+    (subpath "/Volumes/Macintosh HD"))
+
+;; Deny mounting disks
+(deny file-mount file-unmount)
+
+;; Deny every Mach service except the ones a session needs. Sessions run in
+;; the sandvault user's own launchd domain (user/<uid>), which sv2-helper
+;; enters with "launchctl asuser". So a per-user agent name allowed here
+;; reaches the sandvault user's own agent, not the host user's; launchctl
+;; manageruid in a session prints the sandvault uid.
+(deny mach-lookup)
+(allow mach-lookup
+  ;; CFPreferences: defaults, plutil, curl and the other CoreFoundation
+  ;; clients look up com.apple.cfprefsd.agent and com.apple.cfprefsd.daemon.
+  ;; Kept as insurance, not as a fix: defaults write, read and delete pass
+  ;; with only com.apple.system. allowed, and a denied preferences lookup
+  ;; falls back to reading the plist, so a client that needs this one fails
+  ;; silently rather than loudly.
+  (global-name-prefix "com.apple.cfprefsd")
+  ;; opendirectoryd's libinfo, which carries the prefs path and user and group
+  ;; names: without it id -un and whoami print a uid, id loses group names,
+  ;; dscl fails with eServerError, and defaults writes do not persist.
+  (global-name-prefix "com.apple.system.")
+  ;; DNS, and the sockets curl, git and node resolve through.
+  (global-name-prefix "com.apple.dnssd")
+  (global-name-prefix "com.apple.mDNSResponder")
+  (global-name-prefix "com.apple.networkd")
+  (global-name-prefix "com.apple.SystemConfiguration")
+  ;; TLS trust evaluation. curl needs TrustEvaluationAgent: with it denied,
+  ;; curl https://example.com fails with (60) unable to get local issuer
+  ;; certificate. Go programs (gh, and any Go binary) verify through the
+  ;; per-user trustd agent: with com.apple.trustd.agent denied they fail with
+  ;; "x509: OSStatus -26276". Measured in user/<uid>: the agent that answers
+  ;; is the sandvault user's own trustd --agent, and Go verifies both
+  ;; https://example.com and https://api.github.com. Only the agent name is
+  ;; allowed, not the com.apple.trustd prefix: curl, git and python3 verify
+  ;; without the rest of it.
+  (global-name "com.apple.TrustEvaluationAgent")
+  (global-name "com.apple.trustd.agent")
+  ;; LaunchServices, which Chrome and Chromium check in with at startup: with
+  ;; it denied, start-chrome (sv --chrome) reports "Chrome exited
+  ;; unexpectedly" and the browser logs nothing. This one name is the narrow
+  ;; grant that restores Chrome, and a launch still does not reach the host:
+  ;; open on the test bundle fails with kLSNoExecutableErr, and open -a
+  ;; Calculator leaves no Calculator process owned by the host user (measured
+  ;; while sudo sessions still ran in the host user's login session).
+  (global-name "com.apple.coreservices.launchservicesd")
+  ;; Keychain access, reads and writes, by security and the agent tools
+  ;; (Claude Code keeps its credentials in sandvault.keychain-db). securityd
+  ;; is a system daemon; it keys its state on the caller's audit session,
+  ;; which in user/<uid> is the sandvault user's own. Without it security
+  ;; reports "One or more parameters passed to a function were not valid".
+  (global-name "com.apple.SecurityServer")
+  ;; OCSP revocation checks. not measured: no probe failed without it.
+  (global-name "com.apple.ocspd")
+  ;; File system change notifications, used by watchexec, fswatch, and other
+  ;; file watchers. fseventsd is a root system daemon, not a per-user host
+  ;; service. Without this name, FSEventStreamCreate never delivers events,
+  ;; so watchers start but never fire (watchexec --poll still works).
+  (global-name "com.apple.FSEvents")
+  ;; Chrome / Chromium multi-process IPC. Chrome's child processes (renderer,
+  ;; GPU, utility) register and look up dynamic Mach services whose names
+  ;; contain the parent PID. Without these, child processes log
+  ;; "No rendezvous client, terminating process (parent died?)" and exit,
+  ;; leaving the browser unable to serve CDP commands (connectOverCDP hangs).
+  ;; Crashpad (crash reporter) similarly registers per-launch Mach services.
+  ;; The prefixes are scoped to Chrome/Chromium names and carry no host-user
+  ;; authority — they are ad-hoc bootstrap services, not launchd daemons.
+  (global-name-prefix "com.google.Chrome.MachPortRendezvousServer.")
+  (global-name-prefix "com.google.Chromium.MachPortRendezvousServer.")
+  (global-name-prefix "org.chromium.crashpad."))
+
+;; Keep these four denied explicitly, after the allow above, so that widening
+;; the allow later cannot quietly re-admit them.
+;; diskarbitrationd -- diskutil mount, hdiutil attach, Finder disk handling
+;; NetAuthAgent     -- NetFS: 'open smb://...', Connect to Server
+;; NetAuthSysAgent
+;; appleeventsd     -- disallow osascript telling Finder to do it
+(deny mach-lookup
+  (global-name "com.apple.DiskArbitration.diskarbitrationd")
+  (global-name "com.apple.NetAuthAgent")
+  (global-name "com.apple.NetAuthSysAgent")
+  (global-name "com.apple.appleeventsd"))
+
+;; Block raw disk and packet-capture devices regardless of the broader
+;; /dev write allow below. Defense in depth: /dev/*disk* is already
+;; root:operator 640, but this removes reliance on POSIX perms alone.
+(deny file-read* file-write*
+    (regex #"^/dev/r?disk")
+    (regex #"^/private/dev/r?disk")
+    (regex #"^/dev/bpf"))
+
+;; Default-deny reads under /Users, then re-allow only the sandvault
+;; user's home and its shared workspace. Catches the host user's home
+;; plus any other accounts on the machine (other users, /Users/Guest,
+;; sibling sv-* workspaces under /Users/Shared) without enumeration.
+;; Last-match-wins, so the re-allows below must follow this deny.
+;;
+;; The literal re-allows on /Users, /Users/Shared and the two root-owned
+;; parents of the workspace grant lookup of
+;; those directory entries themselves so that path resolution into the
+;; allowed subpaths works. Without them, mkdir -p and open() under
+;; the allowed subtrees fail because path traversal touches the denied
+;; parent components.
+(deny file-read*
+    (subpath "/Users"))
+(allow file-read*
+    (literal "/Users")
+    (literal "/Users/Shared")
+    (literal "__WORKSPACE_ROOT__")
+    (literal "__WORKSPACE_USER_DIR__")
+    (subpath "__WORKSPACE__")
+    (subpath "__HOME__"))
+
+;; Deny /Library/Keychains, then re-allow only System.keychain.
+;; The other keychains there hold user and system secrets, and unlike
+;; /dev/*disk* they are not protected by restrictive file permissions
+;; (System.keychain itself is mode 644), so this deny is the only thing
+;; keeping the sandvault user out of them.
+;; System.keychain is re-allowed because it holds the CA trust anchors
+;; that tools like LightPanda need to validate TLS connections; its
+;; contents are public certificates, not secrets.
+(deny file-read*
+    (subpath "/Library/Keychains"))
+(allow file-read*
+    (literal "/Library/Keychains/System.keychain"))
+
+;; Allow writes to sandvault home, shared workspace, temporary directories.
+;; Allow writes to devices, which are protected by unix permissions
+(allow file-write*
+    (subpath "__WORKSPACE__")
+    (subpath "__HOME__")
+    (subpath "/tmp")
+    (subpath "/private/tmp")
+    (subpath "/var/folders")
+    (subpath "/private/var/folders")
+    (subpath "/dev"))
+
+;; allow basic process info queries
+(allow process-info*)
+(allow sysctl-read)
+
+;; allow process exec/fork (ps may require process info access)
+(allow process*)
+
+;; allow /bin/ps (setuid) to run without sandbox restrictions
+(allow process-exec
+    (literal "/bin/ps")
+    (with no-sandbox))
