@@ -2,9 +2,11 @@
 //!
 //! Runs as the host user and never as root. Everything privileged goes
 //! through `sv2-helper` under sudo. `sv2` itself does not open, read, or
-//! write anything inside a workspace or a sandbox home.
+//! write anything inside a workspace or a sandbox home, with one exception:
+//! `sv2 repair` (see `repair.rs`).
 
 mod args;
+mod repair;
 mod shell;
 
 use std::ffi::{OsStr, OsString};
@@ -32,6 +34,8 @@ Usage:
   sv2 profile add NAME              create a sandbox profile
   sv2 profile remove NAME           delete a profile but keeps workspace files
   sv2 profile list
+  sv2 repair PATH                   let you and the sandbox both use PATH, a
+                                    file or directory in one of your workspaces
   sv2 run [OPTIONS] NAME [ARGS...]  run agent NAME in a sandbox
   sv2 [OPTIONS] NAME [ARGS...]      shorthand for sv2 run
 
@@ -326,6 +330,11 @@ fn main() -> ExitCode {
             agent,
             args,
         } => run(&profile, &agent, &args),
+        Cmd::Repair(path) => match repair::run(&path) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(e) => fail(&e),
+        },
         Cmd::NotYet(name) => fail(&format!("'sv2 {name}' is not implemented yet")),
     }
 }

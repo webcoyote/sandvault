@@ -222,8 +222,9 @@ separates user from profile unambiguously.
   as root. Because it is a host operation on sandbox-writable paths, it is an
   exception to the rule and is held to §1: it walks the tree without following
   links, changes each entry through an open file descriptor rather than by
-  path, and skips (with a warning) anything the host user does not own or
-  that has more than one hard link.
+  path, and skips (with a warning, and a failing exit status) a file that has
+  more than one hard link and anything that belongs to another account. See
+  "`sv2 repair`" under "Milestone 1" for what was built.
 - `sv2 profile remove` never deletes the user's files. The helper removes the
   workspace directory only if it is empty. Otherwise it leaves it, says so,
   and a later `profile add` of the same name reuses it.
@@ -506,8 +507,8 @@ checkout the sandbox cannot write, before `sv2 install`.
 ## Milestone 1
 
 Implemented in `sv2/` (a Cargo workspace): `sv2 install`, `uninstall`,
-`user allow|deny`, `profile add|remove|list`, and `sv2 run shell`, with v1's
-sandbox profile ported unchanged.
+`user allow|deny`, `profile add|remove|list`, `sv2 run shell`, and
+`sv2 repair`, with v1's sandbox profile ported unchanged.
 
 | Crate | Binary | Runs as | Dependencies |
 |---|---|---|---|
@@ -562,6 +563,28 @@ Decisions this milestone made:
   another sudoers file turning the default off. tmux needs nothing further:
   the base profile allows writes under `/private/tmp`, where its socket
   directory is.
+- **`sv2 repair` (implemented after the rest of the milestone).** It lives in
+  `crates/cli/src/repair.rs` and does not use the helper.
+  - *What it writes.* Each file and directory under PATH gets the ACL the
+    kernel would have given it by inheritance, replacing whatever ACL it had.
+    That ACL is computed from the workspace directory's own, which the helper
+    writes and the sandbox cannot change, so the rights are listed in one
+    place (`ops::workspace_aces`). Mode bits and ownership are not changed,
+    and neither is the workspace directory.
+  - *Whose entries.* The design said to skip what the host user does not own.
+    That would leave a kept workspace unusable after `profile remove` and
+    `profile add`, because most of its files belong to the removed account.
+    So repair also handles entries owned by this profile's sandbox account and
+    by a UID with no account. It needs no extra privilege for those: the old
+    inherited entry gives the host user the right to rewrite the ACL. Entries
+    of any other existing account are skipped.
+  - *PATH.* Checked as text first (inside `sv2/<caller>/<profile>`, no `..`),
+    then opened one component at a time without following links. A link
+    named by PATH or on the way to it is an error; links found during the
+    walk are left alone.
+  - *Limits.* A sandbox-owned entry whose ACL the sandbox removed cannot be
+    repaired from the host; it is reported. `profile add` does not yet say
+    that a reused workspace needs `sv2 repair`.
 - **Allowed-users group.** v1 would name the sandbox group of a host user
   called `users` exactly `sandvault-users`. `install` therefore refuses a
   group of that name it did not create (it checks the group's RealName).
@@ -587,6 +610,19 @@ Do these before building anything else on milestone 1.
   re-ACL, delete or rename it) and for inheritance (no execute bit, host
   access to sandbox-private entries) pass, but no build with a weakened ACL
   has been installed to confirm they fail.
+
+- [ ] **Account changes need a macOS privacy permission.** Changing an
+  existing account's home directory, and deleting an account, make
+  `opendirectoryd` ask TCC for `kTCCServiceSystemPolicySysAdminFiles`
+  ("would like to administer your computer"). The permission belongs to the
+  app the command was started from (the terminal), not to `sv2`, the helper
+  or root. While the prompt waits, the `dscl` call hangs (about 290 seconds,
+  then `eUndefinedError`); if the answer is no, it fails at once with
+  `eDSPermissionError`. This affects `profile remove`, a repeated
+  `profile add`, and `uninstall`. The helper stays consistent (the verb can
+  be run again), but it holds the registry lock for the whole wait, has no
+  timeout of its own on `dscl`, and passes the raw `dscl` error to the user
+  with no hint about the cause. See open item 10.
 
 ### Security gaps
 
@@ -622,10 +658,11 @@ Do these before building anything else on milestone 1.
 
 ### Functional gaps
 
-- [ ] **Kept workspaces are unreadable after re-add.** `profile remove` keeps a
-  non-empty workspace. A later `profile add` reuses the directory, but the new
-  account has a new ID and the old files' ACLs name the deleted one. Needs
-  `sv2 repair` (below).
+- [ ] **Kept workspaces need a manual `sv2 repair` after re-add.**
+  `profile remove` keeps a non-empty workspace. A later `profile add` reuses
+  the directory, but the new account has a new ID and the old files' ACLs name
+  the deleted one. `sv2 repair PATH` fixes that; `profile add` should say so
+  when it reuses a directory that is not empty.
 - [ ] **Account IDs.** `uninstall` deletes the registry, so a reinstall starts
   numbering at 600 again and a new sandbox can own files an old one left in
   `/tmp`. Nothing reclaims IDs, so 600-60000 can be used up by repeated add
@@ -643,9 +680,9 @@ Do these before building anything else on milestone 1.
 
 In rough dependency order.
 
-- [ ] `sv2 repair` (re-apply ACLs and ownership; finish half-done add/remove).
-  The name is reserved and reports "not implemented yet".
-- [ ] `sv2 doctor`. Reserved the same way.
+- [ ] `sv2 doctor`. The name is reserved and reports "not implemented yet".
+  It is also the place to report profiles left in `adding` or `removing`;
+  those are finished by running `profile add` or `profile remove` again.
 - [ ] sshd drop-in and the shared sandbox group (closes the SSH gap above).
 - [ ] Embedded guest payload and the guest-side launcher (open item 5).
 - [ ] Agent definitions: format, `install.sh`, Homebrew and native install,
@@ -697,3 +734,48 @@ In rough dependency order.
    to rules it already contains, or raw SBPL rules added to the base profile.
    Named capabilities keep root's parser small and every rule reviewed. Raw
    SBPL is more flexible, but the helper then has to parse and validate it.
+9. **What `sv2 repair` should do.** Go over the behaviour that was built
+   (see "`sv2 repair`" under "Milestone 1") and decide whether it is right:
+   - whose entries it repairs. The design said only the host user's; the
+     build also takes this profile's sandbox account and UIDs with no account;
+   - whether it replaces an entry's ACL or adds to it, and whether it should
+     also fix mode bits or ownership;
+   - whether PATH is required, or `sv2 repair` alone means a whole profile;
+   - whether `profile add` runs it, or only mentions it, when it reuses a
+     workspace.
+10. **The "administer your computer" permission.** `profile remove`, a
+    repeated `profile add` and `uninstall` depend on a TCC permission held by
+    the user's terminal app (see "Account changes need a macOS privacy
+    permission" under "Remaining work"). Decide what sv2 does about it.
+
+    What was observed on 2026-11-25, macOS 26.7, with `sv2` run from a
+    terminal app (cmux):
+    - Until 19:25 every request for `kTCCServiceSystemPolicySysAdminFiles`
+      was granted without a prompt. `tccd` checks
+      `kTCCServiceSystemPolicyAllFiles` (Full Disk Access) first.
+    - At 19:26:14 `tccd` logged `AUTHREQ_PROMPTING` for the terminal app.
+      With the prompt unanswered, `ODRecordSetValue` (re-setting
+      `NFSHomeDirectory`) ran 283 s and `ODRecordDelete` 294 s before
+      `opendirectoryd` forced `ODErrorPluginOperationTimeout`; `dscl` printed
+      `DS Error: -14987 (eUndefinedError)` and exited with status 139. A
+      later delete went through, and runs passed again until 20:02.
+    - At 20:02 the same requests were answered at once with `authValue=0,
+      authReason=2` (denied, set by the user); `dscl` printed
+      `DS Error: -14120 (eDSPermissionError)` and exited with status 40.
+    - `opendirectoryd` did not restart. Creating an account, and reads, were
+      never affected.
+
+    To find out and decide:
+    - why requests were granted silently before 19:26 and prompted after;
+    - exactly which operations ask: the home directory attribute and record
+      deletion were seen; check `IsHidden`, group membership and the rest;
+    - whether the helper can avoid the request: not re-setting an attribute
+      that already has the right value would spare a repeated `profile add`;
+    - whether a launchd daemon (open item 3) is asked at all, since it has
+      no responsible app, and whether that changes the daemon's priority;
+    - what the user is told: detect `eDSPermissionError` and the long wait,
+      name the permission and where to grant it, and document it in the
+      README. v1 creates and deletes accounts the same way, so check whether
+      it has the same dependency;
+    - a timeout on `dscl` shorter than the daemon's, and whether to release
+      the registry lock while waiting.

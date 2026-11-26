@@ -45,6 +45,7 @@ pub enum Cmd {
         agent: String,
         args: Vec<OsString>,
     },
+    Repair(OsString),
     /// Parsed so the name is reserved; not implemented in this milestone.
     NotYet(&'static str),
 }
@@ -151,7 +152,10 @@ pub fn parse(args: &[OsString], is_agent: &dyn Fn(&str) -> bool) -> Result<Cmd, 
             }
         }
         "run" => parse_run(rest, is_agent),
-        "repair" => Ok(Cmd::NotYet("repair")),
+        "repair" => match rest {
+            [path] => Ok(Cmd::Repair(path.clone())),
+            _ => Err("usage: sv2 repair PATH".to_string()),
+        },
         "doctor" => Ok(Cmd::NotYet("doctor")),
         // Shorthand: `sv2 --profile work shell`.
         s if s.starts_with('-') => parse_run(args, is_agent),
@@ -208,7 +212,12 @@ mod tests {
         );
         assert_eq!(p(&["profile", "list"]), Ok(Cmd::ProfileList));
         assert_eq!(p(&["doctor"]), Ok(Cmd::NotYet("doctor")));
-        assert_eq!(p(&["repair", "x"]), Ok(Cmd::NotYet("repair")));
+        assert_eq!(p(&["repair", "x"]), Ok(Cmd::Repair("x".into())));
+        // The path is not an option list and not an agent line.
+        assert_eq!(
+            p(&["repair", "--profile"]),
+            Ok(Cmd::Repair("--profile".into()))
+        );
     }
 
     #[test]
@@ -223,6 +232,8 @@ mod tests {
             &["profile"][..],
             &["profile", "add"][..],
             &["profile", "list", "x"][..],
+            &["repair"][..],
+            &["repair", "a", "b"][..],
         ] {
             assert!(p(bad).is_err(), "{bad:?}");
         }

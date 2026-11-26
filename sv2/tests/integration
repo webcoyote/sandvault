@@ -54,6 +54,13 @@ pass() { PASSED=$((PASSED + 1)); [[ "${VERBOSE:-0}" == "0" ]] || echo -e "${GREE
 fail() { FAILED=$((FAILED + 1)); echo -e "${RED}FAIL${NC} $1"; [[ -z "${2:-}" ]] || echo "     $2"; }
 # check NAME EXPECTED GOT
 check() { if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1" "expected [$2] got [$3]"; fi; }
+refused() { # NAME CMD...
+    local name="$1"; shift
+    if "$@" >/dev/null 2>&1; then fail "$name" "command succeeded: $*"; else pass "$name"; fi
+}
+# Mode, owner, group and ACL of a path, without the parts of a listing that
+# change when entries are added (link count, size, time).
+security_of() { $STAT -f '%Sp %u %g' "$1"; /bin/ls -lde "$1" | /usr/bin/tail -n +2; }
 
 # Host-only scratch (never the workspace).
 SCRATCH="$(/usr/bin/mktemp -d)"
@@ -61,8 +68,9 @@ SCRATCH="$(/usr/bin/mktemp -d)"
 cleanup() {
     set +e
     /bin/rm -rf "$SCRATCH"
-    # Host-owned test files only, by name; then let the helper remove the rest.
-    /bin/rm -f "$WS/host-file" 2>/dev/null
+    # Empty the throwaway workspace (find does not follow links), so that the
+    # helper removes the directory too, whichever check the run stopped at.
+    [[ -d "$WS" && ! -L "$WS" ]] && /usr/bin/find "$WS" -mindepth 1 -delete 2>/dev/null
     "$SV2" profile remove "$P" >/dev/null 2>&1
 }
 trap cleanup EXIT
@@ -227,9 +235,9 @@ else
 fi
 
 # The sandbox can use the workspace but not re-permission, re-own, delete or
-# replace the directory itself. Judged by the directory's listing (mode,
-# owner, ACL) as the host sees it before and after.
-WS_BEFORE="$(/bin/ls -lde "$WS")"
+# replace the directory itself. Judged by the directory's mode, owner and ACL
+# as the host sees them before and after.
+WS_BEFORE="$(security_of "$WS")"
 sb /bin/sh -c '
     chmod 777 .
     chmod +a "everyone allow list,search,add_file,delete_child" .
@@ -238,7 +246,7 @@ sb /bin/sh -c '
     rmdir "$SV2_WORKSPACE"
     mv "$SV2_WORKSPACE" "$SV2_WORKSPACE.moved"
 ' >/dev/null 2>&1 || true
-check "workspace: sandbox cannot change the directory's mode, owner or ACL" "$WS_BEFORE" "$(/bin/ls -lde "$WS" 2>&1)"
+check "workspace: sandbox cannot change the directory's mode, owner or ACL" "$WS_BEFORE" "$(security_of "$WS" 2>&1)"
 if [[ ! -e "$WS.moved" ]]; then
     pass "workspace: sandbox cannot rename the directory in place"
 else
@@ -295,12 +303,69 @@ check "workspace: sandbox can read and rewrite host files" "from-host" \
 if [[ ! -x "$WS/host-file" ]]; then pass "workspace: new files are not executable"; else fail "workspace: new files are not executable"; fi
 
 ###############################################################################
+# repair
+###############################################################################
+# Entries with no inherited ACL, as if moved in from elsewhere: host-owned,
+# private mode, so the sandbox has no way in.
+(
+    umask 077
+    echo moved-in > "$WS/moved"
+    /bin/mkdir -p "$WS/moved-dir/sub"
+    echo inner > "$WS/moved-dir/sub/inner"
+)
+/bin/chmod -R -N "$WS/moved" "$WS/moved-dir"
+check "repair: precondition, sandbox cannot open entries without the ACL" "" \
+    "$(sb /bin/sh -c 'cat moved moved-dir/sub/inner' 2>/dev/null || true)"
+check "repair: a file by absolute path" "repaired 1, already correct 0, skipped 0" "$("$SV2" repair "$WS/moved" 2>&1)"
+check "repair: sandbox can read and write the repaired file" "moved-in" \
+    "$(sb /bin/sh -c 'cat moved && echo more >> moved' 2>&1)"
+check "repair: a directory by relative path, with its contents" "repaired 3, already correct 0, skipped 0" \
+    "$(cd "$WS" && "$SV2" repair moved-dir 2>&1)"
+check "repair: sandbox can use the repaired directory" "inner" \
+    "$(sb /bin/sh -c 'cat moved-dir/sub/inner && echo new > moved-dir/sub/from-sandbox' 2>&1)"
+# moved, moved-dir, sub, inner, from-sandbox, and host-file from above.
+check "repair: a second run changes nothing" "repaired 0, already correct 6, skipped 0" "$("$SV2" repair "$WS" 2>&1)"
+check "repair: the workspace directory itself is untouched" "$WS_BEFORE" "$(security_of "$WS" 2>&1)"
+/bin/rm -rf "$WS/moved" "$WS/moved-dir"
+
+# The attack: the sandbox plants links to things of the host's outside the
+# workspace and waits for the host to run repair. Judged by the targets.
+echo secret > "$SCRATCH/victim"
+/bin/mkdir "$SCRATCH/victim-dir"
+VICTIMS_BEFORE="$(/bin/ls -lde "$SCRATCH" "$SCRATCH/victim" "$SCRATCH/victim-dir")"
+sb /bin/sh -c 'ln -s "$1/victim" link-file; ln -s "$1/victim-dir" link-dir; mkdir real; ln -s "$1" real/link-up' sv2 "$SCRATCH"
+if [[ -L "$WS/link-file" && -L "$WS/link-dir" && -L "$WS/real/link-up" ]]; then
+    pass "repair: precondition, the sandbox planted its links"
+else
+    fail "repair: precondition, the sandbox planted its links"
+fi
+"$SV2" repair "$WS" >/dev/null 2>&1 || true
+refused "repair: a link named directly is refused" "$SV2" repair "$WS/link-file"
+refused "repair: a path through a link is refused" "$SV2" repair "$WS/link-dir/x"
+refused "repair: a path through a nested link is refused" "$SV2" repair "$WS/real/link-up/victim"
+check "repair: nothing the links point to was changed" "$VICTIMS_BEFORE" \
+    "$(/bin/ls -lde "$SCRATCH" "$SCRATCH/victim" "$SCRATCH/victim-dir")"
+/bin/rm -rf "$WS/link-file" "$WS/link-dir" "$WS/real"
+
+refused "repair: a path outside any workspace is refused" "$SV2" repair /private/tmp
+refused "repair: the host home is refused" "$SV2" repair "$HOME"
+refused "repair: the directory above the workspace is refused" "$SV2" repair "/Users/Shared/sv2/$HOST_USER"
+refused "repair: '..' is refused" "$SV2" repair "$WS/../$P"
+refused "repair: a profile that does not exist is refused" "$SV2" repair "/Users/Shared/sv2/$HOST_USER/nosuchprofile"
+
+# What the host has no right to change is reported, and the exit status says so.
+sb /bin/sh -c 'umask 077; echo mine > locked; chmod -N locked'
+rc=0; OUT="$("$SV2" repair "$WS" 2>&1)" || rc=$?
+if [[ "$rc" -ne 0 && "$OUT" == *"skipped 1"* && "$OUT" == *locked* ]]; then
+    pass "repair: an entry it may not change is reported and fails the run"
+else
+    fail "repair: an entry it may not change is reported and fails the run" "rc=$rc $OUT"
+fi
+/bin/rm -f "$WS/locked"
+
+###############################################################################
 # the helper refuses what it must
 ###############################################################################
-refused() { # NAME CMD...
-    local name="$1"; shift
-    if "$@" >/dev/null 2>&1; then fail "$name" "command succeeded: $*"; else pass "$name"; fi
-}
 CALL=(/usr/bin/sudo -n -- "$HELPER" call "$VERSION")
 # sandbox-exec would read a leading -p as "use this profile instead".
 OUT="$("${CALL[@]}" launch "$P" -- -p '(version 1)(allow default)' /usr/bin/touch "/Users/Shared/$MARK" 2>&1 || true)"
@@ -339,6 +404,8 @@ if /usr/bin/pgrep -u "$SB_UID" -x sleep >/dev/null; then
 else
     fail "detached process outlives the session"
 fi
+# A private file of the sandbox's, kept across removal (see re-add below).
+sb /bin/sh -c 'umask 077; echo kept > sandbox-kept'
 # A home laid out to resist deletion: immutable file, unreadable directories.
 sb /bin/sh -c 'mkdir -p ~/deep/tree && echo x > ~/deep/tree/file && chflags uchg ~/deep/tree/file && chmod 000 ~/deep/tree ~/deep'
 
@@ -365,9 +432,18 @@ else
     fail "re-add: UID is not reused" "old $SB_UID new $NEW_UID"
 fi
 # The directory is reused. Files already in it carry ACL entries for the old
-# account, so the new one cannot open them until 'sv2 repair' exists.
-check "re-add: kept workspace directory is reused" "host-file" "$(sb /bin/ls)"
-/bin/rm -f "$WS/host-file"
+# account and one belongs to it, so the new account cannot open that one
+# until 'sv2 repair' rewrites the entries.
+check "re-add: kept workspace directory is reused" "host-file sandbox-kept" \
+    "$(sb /bin/ls | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+check "re-add: the old account's file belongs to no account" "$SB_UID" "$($STAT -f '%u' "$WS/sandbox-kept")"
+check "re-add: precondition, the new account cannot open the old one's file" "" \
+    "$(sb /bin/cat sandbox-kept 2>/dev/null || true)"
+check "re-add: repair rewrites the kept files" "repaired 2, already correct 0, skipped 0" "$("$SV2" repair "$WS" 2>&1)"
+check "re-add: the new account can use the kept files" "kept changed" \
+    "$(sb /bin/sh -c 'cat sandbox-kept host-file && echo more >> sandbox-kept && echo more >> host-file' 2>&1 \
+        | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+/bin/rm -f "$WS/host-file" "$WS/sandbox-kept"
 "$SV2" profile remove "$P" >/dev/null
 if [[ -e "$WS" ]]; then fail "remove: empty workspace is removed"; else pass "remove: empty workspace is removed"; fi
 
