@@ -30,7 +30,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The helper itself: bump on any change to its code that an installed
 /// machine must get (a fix, a new check, a new verb or argument). Nothing
 /// can detect a forgotten bump here.
-pub const HELPER_VERSION: u32 = 4;
+pub const HELPER_VERSION: u32 = 5;
 /// `/etc/sudoers.d/sandvault2`.
 pub const SUDOERS_VERSION: u32 = 2;
 /// The sshd drop-in that refuses sandbox accounts.
@@ -110,6 +110,10 @@ pub const DEFAULT_PROFILE: &str = "default";
 /// policy (a password, from a user with general sudo rights).
 pub const MODE_CALL: &str = "call";
 pub const MODE_ADMIN: &str = "admin";
+
+/// The helper's `uninstall` takes this word to mean "and remove every
+/// profile there is"; `sv2 uninstall --all-profiles` passes it.
+pub const UNINSTALL_ALL_PROFILES: &str = "all-profiles";
 
 /// Helper exit status for "sv2 and the installed helper differ in an artifact
 /// version" (`install_version`). Only
@@ -305,7 +309,7 @@ mod tests {
     #[test]
     fn install_version_is_one_plain_word() {
         let v = install_version();
-        assert_eq!(v, "helper=4,sudoers=2,sshd=1,profile=1");
+        assert_eq!(v, "helper=5,sudoers=2,sshd=1,profile=1");
         assert!(v
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'=' || b == b','));

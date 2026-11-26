@@ -824,6 +824,8 @@ pub fn install(caller: &Caller) -> Res<()> {
     Ok(())
 }
 
+/// Refuses while any profile exists, unless `all_profiles` is set.
+///
 /// Removes exactly what the registry lists, then the installed artifacts,
 /// except the registry itself. With every profile gone it holds only
 /// `next-id`, which is what keeps an account ID from being given out twice:
@@ -835,11 +837,37 @@ pub fn install(caller: &Caller) -> Res<()> {
 /// the uninstall before the sudoers line, registry and helper are touched:
 /// the machine is left installed and consistent, and `sv2 uninstall` can be
 /// run again.
-pub fn uninstall() -> Res<()> {
+/// Why `uninstall` will not go ahead: the profiles that exist, each with
+/// the user it belongs to. A profile is a sandbox home with whatever the
+/// agents kept in it (logins, installed programs), and none of that comes
+/// back. So it goes only when asked for by name: by each user's own
+/// `profile remove`, or by `uninstall --all-profiles`.
+fn profiles_in_the_way(reg: &Registry) -> Option<String> {
+    if reg.entries.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = reg
+        .entries
+        .iter()
+        .map(|e| format!("  {}: {} (account {})", e.host_user, e.profile, e.account()))
+        .collect();
+    lines.sort();
+    Some(format!(
+        "not uninstalled: these sandbox profiles exist, and uninstalling deletes their accounts and sandbox homes for good:\n{}\nRemove them first (each user: sv2 profile remove NAME), or remove everything with: sv2 uninstall --all-profiles",
+        lines.join("\n")
+    ))
+}
+
+pub fn uninstall(all_profiles: bool) -> Res<()> {
     if sys::exists(&lock_path()) {
         let _lock = lock(true)?;
         if sys::exists(&registry_path()) {
             let mut reg = load_registry()?;
+            if !all_profiles {
+                if let Some(refusal) = profiles_in_the_way(&reg) {
+                    return Err(refusal);
+                }
+            }
             let all: Vec<(u32, String)> = reg
                 .entries
                 .iter()
@@ -1013,6 +1041,31 @@ mod tests {
             unstamped.contains("carries no version; do the fix"),
             "{unstamped}"
         );
+    }
+
+    #[test]
+    fn uninstall_names_the_profiles_in_its_way() {
+        assert_eq!(profiles_in_the_way(&Registry::default()), None);
+        let reg = Registry::parse(
+            "sv2-registry 1\nnext-id 603\n\
+             profile 502 sam default 601 active\n\
+             profile 501 pat work 600 adding\n\
+             profile 501 pat default 602 removing\n",
+        )
+        .unwrap();
+        let text = profiles_in_the_way(&reg).unwrap();
+        // Every profile, whatever its state, with its owner; sorted.
+        let listed: Vec<&str> = text.lines().filter(|l| l.starts_with("  ")).collect();
+        assert_eq!(
+            listed,
+            [
+                "  pat: default (account sv2-pat-default)",
+                "  pat: work (account sv2-pat-work)",
+                "  sam: default (account sv2-sam-default)",
+            ]
+        );
+        assert!(text.contains("sv2 uninstall --all-profiles"), "{text}");
+        assert!(text.contains("sv2 profile remove NAME"), "{text}");
     }
 
     #[test]

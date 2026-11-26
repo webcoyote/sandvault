@@ -1,7 +1,7 @@
 //! Command-line parsing.
 //!
 //! ```text
-//! sv2 install | uninstall
+//! sv2 install | uninstall [--all-profiles]
 //! sv2 user allow USER | user deny USER
 //! sv2 profile add NAME | profile remove NAME | profile list
 //! sv2 run [OPTIONS] NAME [ARGS...]   OPTIONS: --profile NAME, --native
@@ -39,7 +39,10 @@ pub enum Cmd {
     Help,
     Version,
     Install,
-    Uninstall,
+    Uninstall {
+        /// Remove every user's profiles too, instead of refusing.
+        all_profiles: bool,
+    },
     UserAllow(String),
     UserDeny(String),
     ProfileAdd(String),
@@ -200,7 +203,14 @@ pub fn parse(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
     match name {
         "help" => Ok(Cmd::Help),
         "install" => none(rest, "sv2 install").map(|()| Cmd::Install),
-        "uninstall" => none(rest, "sv2 uninstall").map(|()| Cmd::Uninstall),
+        "uninstall" => match rest.iter().map(|a| a.to_str()).collect::<Vec<_>>()[..] {
+            [] => Ok(Cmd::Uninstall {
+                all_profiles: false,
+            }),
+            // Written in full, like the command: it deletes sandbox homes.
+            [Some("--all-profiles")] => Ok(Cmd::Uninstall { all_profiles: true }),
+            _ => Err("usage: sv2 uninstall [--all-profiles]".to_string()),
+        },
         "user" => {
             const USAGE: &str = "sv2 user allow USER | sv2 user deny USER";
             match verb(USER_VERBS)? {
@@ -238,6 +248,10 @@ mod tests {
         v.iter().map(OsString::from).collect()
     }
 
+    const UNINSTALL: Cmd = Cmd::Uninstall {
+        all_profiles: false,
+    };
+
     fn p(v: &[&str]) -> Result<Cmd, String> {
         parse(&os(v), &["shell"])
     }
@@ -266,7 +280,7 @@ mod tests {
         assert_eq!(p(&["--help"]), Ok(Cmd::Help));
         assert_eq!(p(&["--version"]), Ok(Cmd::Version));
         assert_eq!(p(&["install"]), Ok(Cmd::Install));
-        assert_eq!(p(&["uninstall"]), Ok(Cmd::Uninstall));
+        assert_eq!(p(&["uninstall"]), Ok(UNINSTALL));
         assert_eq!(
             p(&["user", "allow", "sam"]),
             Ok(Cmd::UserAllow("sam".into()))
@@ -288,6 +302,26 @@ mod tests {
             p(&["repair", "--profile"]),
             Ok(Cmd::Repair("--profile".into()))
         );
+    }
+
+    #[test]
+    fn uninstall_removes_profiles_only_when_told_to() {
+        assert_eq!(p(&["uninstall"]), Ok(UNINSTALL));
+        assert_eq!(
+            p(&["uninstall", "--all-profiles"]),
+            Ok(Cmd::Uninstall { all_profiles: true })
+        );
+        // Not shortened, not guessed at, not repeated.
+        for bad in [
+            &["uninstall", "--all"][..],
+            &["uninstall", "--all-p"][..],
+            &["uninstall", "all-profiles"][..],
+            &["uninstall", "-a"][..],
+            &["uninstall", "--all-profiles", "--all-profiles"][..],
+            &["uninstall", "--all-profiles", "x"][..],
+        ] {
+            assert!(p(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -379,7 +413,7 @@ mod tests {
     fn subcommands_win_over_agents() {
         let everything = SUBCOMMANDS;
         assert_eq!(parse(&os(&["install"]), everything), Ok(Cmd::Install));
-        assert_eq!(parse(&os(&["uninstall"]), everything), Ok(Cmd::Uninstall));
+        assert_eq!(parse(&os(&["uninstall"]), everything), Ok(UNINSTALL));
         assert_eq!(
             parse(&os(&["doctor"]), everything),
             Ok(Cmd::NotYet("doctor"))
@@ -475,7 +509,7 @@ mod tests {
                 "{err}"
             );
         }
-        assert_eq!(p(&["uninstall"]), Ok(Cmd::Uninstall));
+        assert_eq!(p(&["uninstall"]), Ok(UNINSTALL));
         assert_eq!(
             p(&["p", "remove", "work"]),
             Ok(Cmd::ProfileRemove("work".into()))

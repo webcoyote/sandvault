@@ -17,7 +17,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use sv2_common::{
     install_version, ALLOWED_GROUP, DEFAULT_PROFILE, EXIT_VERSION_MISMATCH, HELPER_PATH,
-    MODE_ADMIN, MODE_CALL, VERSION,
+    MODE_ADMIN, MODE_CALL, UNINSTALL_ALL_PROFILES, VERSION,
 };
 
 use args::Cmd;
@@ -29,7 +29,10 @@ sv2: run AI agents in a sandboxed macOS user account
 
 Usage:
   sv2 install                       install application (sudo)
-  sv2 uninstall                     remove application and sandboxes (sudo)
+  sv2 uninstall                     remove application (sudo); refuses while
+                                    any sandbox profile exists
+  sv2 uninstall --all-profiles      remove application and every user's
+                                    sandboxes, with what is in their homes
   sv2 user allow USER               let USER create sandboxes (sudo)
   sv2 user deny USER                stop USER creating/using sandboxes (sudo)
   sv2 profile add NAME              create a sandbox profile
@@ -509,7 +512,14 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Cmd::Install => admin("install", &[]),
-        Cmd::Uninstall => admin("uninstall", &[]),
+        Cmd::Uninstall { all_profiles } => {
+            let extra: &[&str] = if all_profiles {
+                &[UNINSTALL_ALL_PROFILES]
+            } else {
+                &[]
+            };
+            admin("uninstall", extra)
+        }
         Cmd::UserAllow(user) => admin("user-allow", &[&user]),
         Cmd::UserDeny(user) => admin("user-deny", &[&user]),
         // After the helper has done its part, `sv2` itself (the host user,

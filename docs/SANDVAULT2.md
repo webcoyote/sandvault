@@ -284,7 +284,8 @@ Sharing.
 
 ```
 sv2 install                       # asks for sudo, once per machine
-sv2 uninstall                     # asks for sudo
+sv2 uninstall                     # asks for sudo; refuses while profiles exist
+sv2 uninstall --all-profiles      # asks for sudo; removes every profile too
 sv2 user allow USER               # asks for sudo
 sv2 user deny USER                # asks for sudo
 sv2 profile add NAME
@@ -689,7 +690,7 @@ Decisions this milestone made:
     Bumping any of them makes every installed machine ask for
     `sv2 install`; a release that bumps none needs no reinstall.
   - *Comparison.* `sv2` passes all four as one word
-    (`helper=4,sudoers=2,sshd=1,profile=1`) where it used to pass the
+    (`helper=5,sudoers=2,sshd=1,profile=1`) where it used to pass the
     application version, and the helper refuses a word that is not its own,
     with exit status 3. `sv2 --version` prints the word on a second line.
     The numbers reach a machine only inside a new helper, because the
@@ -846,6 +847,15 @@ Decisions this milestone made:
   away. It never opens or follows what it finds. A user who keeps putting a
   directory with a file in it there can still block `install`; the message
   names them.
+- **Uninstall and profiles (2026-11-26).** `sv2 uninstall` used to remove
+  every profile of every user, with the sandbox homes and what the agents
+  kept in them (logins, native installs), behind nothing but the sudo
+  password. It now refuses while any profile exists, in whatever state,
+  and lists them with their owners. They go by each user's own
+  `profile remove`, or all at once with `sv2 uninstall --all-profiles`,
+  which is not shortened. The helper decides (it alone can list every
+  user's profiles), so the password is asked for before the refusal is
+  shown.
 - **Installing from a path (2026-11-25): not a gap.** `install` copies the
   helper to its root-owned place by opening its own path again, so whoever
   can write the directory it was run from (the Homebrew prefix, a checkout)
@@ -937,6 +947,9 @@ order to do them in.
   behind it was measured by hand and is unit-tested, also against real
   files and the real `codesign`. Not run: `sv2` installing a cask that is
   not notarized, which is the only way the message appears.
+- [ ] **The uninstall refusal has not run installed.** Unit tests cover the
+  list and the arguments. Not yet run on a machine: `sv2 uninstall` with a
+  profile present (refused, nothing removed), and `--all-profiles`.
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -971,13 +984,7 @@ order to do them in.
 
 ### Functional gaps
 
-- [ ] **`uninstall` is too easy to regret.** It removes every profile of
-  every user on the Mac: the accounts, and the sandbox homes with whatever
-  the agents kept there (logins, caches, native installs). Only workspaces
-  with files in them survive. Nothing stands between the command and that
-  but the sudo password, which says nothing about what is about to go.
-  Make it less dangerous: say what will be removed and ask, or refuse while
-  profiles exist unless told otherwise.
+None recorded.
 
 ### Features not in milestone 1
 

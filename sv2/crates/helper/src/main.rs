@@ -6,7 +6,8 @@
 //! - `call`: `profile-add NAME`, `profile-remove NAME`, `profile-list`,
 //!   `launch NAME -- ARGV`. The sudoers line lets members of
 //!   `sv2-users` run this mode without a password.
-//! - `admin`: `install`, `uninstall`, `user-allow USER`, `user-deny USER`.
+//! - `admin`: `install`, `uninstall [all-profiles]`, `user-allow USER`,
+//!   `user-deny USER`.
 //!   No sandvault sudoers rule covers it, so sudo asks for a password and
 //!   requires general sudo rights.
 //!
@@ -30,7 +31,10 @@ mod sys;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use sv2_common::{install_version, valid_host_user, EXIT_VERSION_MISMATCH, MODE_ADMIN, MODE_CALL};
+use sv2_common::{
+    install_version, valid_host_user, EXIT_VERSION_MISMATCH, MODE_ADMIN, MODE_CALL,
+    UNINSTALL_ALL_PROFILES,
+};
 
 use ops::Caller;
 use sys::Res;
@@ -140,8 +144,12 @@ fn run() -> Result<ExitCode, String> {
             ops::install(&caller)?
         }
         (MODE_ADMIN, "uninstall") => {
-            no_args(rest)?;
-            ops::uninstall()?
+            let all_profiles = match rest {
+                [] => false,
+                [word] if word.to_str() == Some(UNINSTALL_ALL_PROFILES) => true,
+                _ => return Err("unexpected arguments".to_string()),
+            };
+            ops::uninstall(all_profiles)?
         }
         (MODE_ADMIN, "user-allow") => ops::user_allow(one_arg(rest, "USER")?)?,
         (MODE_ADMIN, "user-deny") => ops::user_deny(one_arg(rest, "USER")?)?,
