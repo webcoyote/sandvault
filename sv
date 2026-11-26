@@ -139,11 +139,7 @@ readonly VERSION="1.41.0"
 
 # Bump when the sandbox policy changes: the profile is root owned, so the
 # version line it carries is how an installed machine learns it is stale.
-# The ocspd removal takes effect on the next --rebuild. Bumping the version
-# would force an immediate rebuild on every existing install, which requires
-# sudo and would break non-interactive setups. The version stays at 5 until
-# the next breaking change that justifies the forced rewrite.
-readonly SV_SANDBOX_PROFILE_VERSION="5"
+readonly SV_SANDBOX_PROFILE_VERSION="7"
 
 # Bump when the session launcher (SANDVAULT_LAUNCHER) changes, for the same
 # reason: it is root owned, so its version line is how a machine learns it
@@ -2065,7 +2061,10 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
   ;; service. Without this name, FSEventStreamCreate never delivers events,
   ;; so watchers start but never fire (watchexec --poll still works).
   (global-name "com.apple.FSEvents")
-  ;; Chrome / Chromium multi-process IPC. Chrome's child processes (renderer,
+  ;; Chrome / Chromium multi-process IPC, for the apps that start-chrome
+  ;; launches and for the builds that Playwright downloads (Chromium headless
+  ;; shell, Google Chrome for Testing). org.chromium.Chromium is also the
+  ;; bundle id of Chromium.app. Chrome's child processes (renderer,
   ;; GPU, utility) register and look up dynamic Mach services whose names
   ;; contain the parent PID. Without these, child processes log
   ;; "No rendezvous client, terminating process (parent died?)" and exit,
@@ -2075,6 +2074,8 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
   ;; authority — they are ad-hoc bootstrap services, not launchd daemons.
   (global-name-prefix "com.google.Chrome.MachPortRendezvousServer.")
   (global-name-prefix "com.google.Chromium.MachPortRendezvousServer.")
+  (global-name-prefix "org.chromium.Chromium.MachPortRendezvousServer.")
+  (global-name-prefix "com.google.chrome.for.testing.MachPortRendezvousServer.")
   (global-name-prefix "org.chromium.crashpad."))
 
 ;; Keep these four denied explicitly, after the allow above, so that widening
