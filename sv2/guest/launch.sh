@@ -13,6 +13,11 @@
 #   DIR    where the session starts
 #   KIND   shell: a login zsh, or ARGS as a command in a login zsh's
 #          environment
+#          agent NAME NATIVE SCRIPT N PATH1..PATHN [ARGS...]: the first of
+#          the N paths that is a program, with ARGS. When none is and NATIVE
+#          is 1, SCRIPT (the text of the agent's installer) is run first.
+#          probe N PATH1..PATHN: exit 0 when one of the paths is a program,
+#          1 when none is. Starts nothing.
 #
 # It must run on /bin/bash 3.2. ARGS are never parsed as shell text.
 set -euo pipefail
@@ -85,6 +90,37 @@ seed .zshrc <<'ZSHRC'
 ZSHRC
 
 ###############################################################################
+# Agents
+###############################################################################
+# take_paths N PATH...: move the N paths into PATHS. Sets TAKEN to the number
+# of arguments used, for the caller to shift.
+PATHS=()
+TAKEN=0
+take_paths() {
+    local n="${1:-}"
+    if [[ ! "$n" =~ ^[1-9]$ ]] || [[ $# -le "$n" ]]; then
+        warn "launcher: bad list of paths"
+        exit 2
+    fi
+    PATHS=("${@:2:n}")
+    TAKEN=$((n + 1))
+}
+
+# Set PROGRAM to the first of PATHS that is a program, or to nothing. Paths
+# are used as given and never looked up: a name on PATH could be anything.
+PROGRAM=""
+find_program() {
+    local candidate
+    PROGRAM=""
+    for candidate in "${PATHS[@]}"; do
+        if [[ "$candidate" == /* && -f "$candidate" && -x "$candidate" ]]; then
+            PROGRAM="$candidate"
+            return 0
+        fi
+    done
+}
+
+###############################################################################
 # Start
 ###############################################################################
 # The helper has already put the session in the workspace or the home.
@@ -101,6 +137,48 @@ case "$KIND" in
         # and becomes the command.
         # shellcheck disable=SC2016 # expanded by the zsh this starts
         exec /bin/zsh -lc 'exec -- "$@"' sv2 "$@"
+        ;;
+    probe)
+        take_paths "$@"
+        find_program
+        if [[ -z "$PROGRAM" ]]; then
+            exit 1
+        fi
+        exit 0
+        ;;
+    agent)
+        if [[ $# -lt 5 ]]; then
+            warn "launcher: agent needs NAME NATIVE SCRIPT N PATH..."
+            exit 2
+        fi
+        NAME="$1"
+        NATIVE="$2"
+        SCRIPT="$3"
+        shift 3
+        take_paths "$@"
+        shift "$TAKEN"
+        find_program
+        if [[ -z "$PROGRAM" ]]; then
+            if [[ "$NATIVE" != "1" || -z "$SCRIPT" ]]; then
+                warn "$NAME is not installed in this sandbox; looked for: ${PATHS[*]}"
+                exit 127
+            fi
+            warn "installing $NAME in the sandbox home, with its own installer"
+            # The installer's standard input is the terminal: it may ask.
+            /bin/bash -c "$SCRIPT" "sv2-install-$NAME" && st=0 || st=$?
+            if [[ "$st" -ne 0 ]]; then
+                warn "the installer of $NAME failed (exit status $st)"
+                exit "$st"
+            fi
+            find_program
+            if [[ -z "$PROGRAM" ]]; then
+                warn "the installer of $NAME finished, but none of these exists: ${PATHS[*]}"
+                exit 127
+            fi
+        fi
+        warn "running $PROGRAM as ${USER:-the sandbox user}"
+        # shellcheck disable=SC2016 # expanded by the zsh this starts
+        exec /bin/zsh -lc 'exec -- "$@"' sv2 "$PROGRAM" "$@"
         ;;
     *)
         warn "launcher: unknown kind '$KIND'"

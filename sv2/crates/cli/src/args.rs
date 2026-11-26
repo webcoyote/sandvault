@@ -4,7 +4,7 @@
 //! sv2 install | uninstall
 //! sv2 user allow USER | user deny USER
 //! sv2 profile add NAME | profile remove NAME | profile list
-//! sv2 run [OPTIONS] NAME [ARGS...]
+//! sv2 run [OPTIONS] NAME [ARGS...]   OPTIONS: --profile NAME, --native
 //! sv2 [OPTIONS] NAME [ARGS...]        shorthand for sv2 run
 //! sv2 repair PATH | doctor
 //! ```
@@ -20,6 +20,8 @@
 use std::ffi::OsString;
 
 use sv2_common::{valid_profile, DEFAULT_PROFILE};
+
+use crate::agent::valid_agent_name;
 
 pub const SUBCOMMANDS: &[&str] = &[
     "install",
@@ -45,22 +47,14 @@ pub enum Cmd {
     ProfileList,
     Run {
         profile: String,
+        /// Install the agent with its own installer, inside the sandbox.
+        native: bool,
         agent: String,
         args: Vec<OsString>,
     },
     Repair(OsString),
     /// Parsed so the name is reserved; not implemented in this milestone.
     NotYet(&'static str),
-}
-
-/// Agent names match `^[a-z0-9][a-z0-9-]*$`.
-pub fn valid_agent_name(s: &str) -> bool {
-    let b = s.as_bytes();
-    !b.is_empty()
-        && b.len() <= 64
-        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
-        && b.iter()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 
 fn utf8(arg: &OsString, what: &str) -> Result<String, String> {
@@ -131,6 +125,7 @@ fn resolve<'a>(word: &str, names: &[&'a str]) -> Result<Option<&'a str>, String>
 /// `[OPTIONS] NAME [ARGS...]`, for both `sv2 run` and the shorthand.
 fn parse_run(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
     let mut profile = DEFAULT_PROFILE.to_string();
+    let mut native = false;
     let mut i = 0;
     while i < args.len() {
         let Some(a) = args[i].to_str() else { break };
@@ -145,6 +140,8 @@ fn parse_run(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
             profile = utf8(value, "profile name")?;
         } else if let Some(value) = a.strip_prefix("--profile=") {
             profile = value.to_string();
+        } else if a == "--native" {
+            native = true;
         } else {
             return Err(format!("unknown option '{a}'"));
         }
@@ -166,6 +163,7 @@ fn parse_run(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
     };
     Ok(Cmd::Run {
         profile,
+        native,
         agent,
         args: args[i + 1..].to_vec(),
     })
@@ -247,6 +245,7 @@ mod tests {
     fn run_agent(agent: &str) -> Cmd {
         Cmd::Run {
             profile: "default".into(),
+            native: false,
             agent: agent.into(),
             args: vec![],
         }
@@ -255,6 +254,7 @@ mod tests {
     fn run(profile: &str, args: &[&str]) -> Cmd {
         Cmd::Run {
             profile: profile.into(),
+            native: false,
             agent: "shell".into(),
             args: os(args),
         }
@@ -319,6 +319,25 @@ mod tests {
         );
         assert_eq!(p(&["--profile", "work", "shell"]), Ok(run("work", &[])));
         assert_eq!(p(&["--profile=work", "shell"]), Ok(run("work", &[])));
+    }
+
+    #[test]
+    fn native_is_an_option_before_the_agent() {
+        let native = |profile: &str| Cmd::Run {
+            profile: profile.into(),
+            native: true,
+            agent: "shell".into(),
+            args: vec![],
+        };
+        assert_eq!(p(&["run", "--native", "shell"]), Ok(native("default")));
+        assert_eq!(p(&["--native", "shell"]), Ok(native("default")));
+        assert_eq!(p(&["--native", "-p", "work", "s"]), Ok(native("work")));
+        assert_eq!(p(&["-p", "work", "--native", "s"]), Ok(native("work")));
+        // After the agent it is the agent's argument.
+        assert_eq!(p(&["shell", "--native"]), Ok(run("default", &["--native"])));
+        // It is not shortened, and takes no value.
+        assert!(p(&["--nat", "shell"]).is_err());
+        assert!(p(&["--native=yes", "shell"]).is_err());
     }
 
     #[test]
@@ -428,6 +447,7 @@ mod tests {
             parse(&os(&["-p", "work", "p"]), agents),
             Ok(Cmd::Run {
                 profile: "work".into(),
+                native: false,
                 agent: "pi".into(),
                 args: vec![]
             })
@@ -470,15 +490,5 @@ mod tests {
             parse(&os(&["run", "remove"]), &["remove"]),
             Ok(run_agent("remove"))
         );
-    }
-
-    #[test]
-    fn agent_names() {
-        for ok in ["shell", "claude", "open-code", "0x"] {
-            assert!(valid_agent_name(ok), "{ok}");
-        }
-        for bad in ["", "-x", "Shell", "a_b", "a/b", "a.b", "a b"] {
-            assert!(!valid_agent_name(bad), "{bad:?}");
-        }
     }
 }

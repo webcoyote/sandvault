@@ -36,17 +36,53 @@ pub const FORWARDED: &[&str] = &[
 /// The guest launcher. See the file for what it does and what it is given.
 pub const LAUNCHER: &str = include_str!("../../../guest/launch.sh");
 
-/// What the launcher is asked to start.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
+/// What the launcher is asked to do. See the launcher for each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Kind<'a> {
     /// A login zsh, or the arguments as a command in its environment.
     Shell,
+    /// The first of `paths` that is a program. When none is and `native` is
+    /// set, `install_script` runs first.
+    Agent {
+        name: &'a str,
+        native: bool,
+        install_script: &'a str,
+        paths: &'a [String],
+    },
+    /// Whether one of `paths` is a program. Starts nothing.
+    Probe { paths: &'a [String] },
 }
 
-impl Kind {
-    fn word(self) -> &'static str {
+impl Kind<'_> {
+    /// The launcher's arguments between DIR and ARGS.
+    fn words(&self) -> Vec<OsString> {
+        let counted = |paths: &[String]| {
+            let mut v = vec![OsString::from(paths.len().to_string())];
+            v.extend(paths.iter().map(OsString::from));
+            v
+        };
         match self {
-            Kind::Shell => "shell",
+            Kind::Shell => vec!["shell".into()],
+            Kind::Agent {
+                name,
+                native,
+                install_script,
+                paths,
+            } => {
+                let mut v: Vec<OsString> = vec![
+                    "agent".into(),
+                    (*name).into(),
+                    if *native { "1" } else { "0" }.into(),
+                    (*install_script).into(),
+                ];
+                v.extend(counted(paths));
+                v
+            }
+            Kind::Probe { paths } => {
+                let mut v = vec![OsString::from("probe")];
+                v.extend(counted(paths));
+                v
+            }
         }
     }
 }
@@ -95,12 +131,12 @@ pub fn initial_dir(cwd: Option<&std::path::Path>, workspace: &str) -> OsString {
 ///
 /// `args` go to the launcher as positional parameters and from there to the
 /// program, unchanged.
-pub fn argv(env: &[OsString], dir: &OsStr, kind: Kind, args: &[OsString]) -> Vec<OsString> {
+pub fn argv(env: &[OsString], dir: &OsStr, kind: &Kind, args: &[OsString]) -> Vec<OsString> {
     let mut v: Vec<OsString> = vec!["/usr/bin/env".into()];
     v.extend(env.iter().cloned());
     v.extend(["/bin/bash", "-c", LAUNCHER, "sv2-launch"].map(OsString::from));
     v.push(dir.to_owned());
-    v.push(kind.word().into());
+    v.extend(kind.words());
     v.extend(args.iter().cloned());
     v
 }
@@ -173,7 +209,7 @@ mod tests {
     #[test]
     fn argv_shape() {
         let env = os(&["TERM=xterm"]);
-        let v = argv(&env, OsStr::new("/ws"), Kind::Shell, &os(&["tmux", "new"]));
+        let v = argv(&env, OsStr::new("/ws"), &Kind::Shell, &os(&["tmux", "new"]));
         assert_eq!(
             v,
             os(&[
@@ -226,7 +262,7 @@ mod tests {
 
         /// The launcher as a session gets it, with ARGS.
         fn run(&self, args: &[&str]) -> Output {
-            let v = argv(&[], self.dir.as_os_str(), Kind::Shell, &os(args));
+            let v = argv(&[], self.dir.as_os_str(), &Kind::Shell, &os(args));
             self.command(&v).stdin(Stdio::null()).output().unwrap()
         }
 
@@ -283,7 +319,7 @@ mod tests {
         let v = argv(
             &[],
             OsStr::new("/nonexistent/sv2"),
-            Kind::Shell,
+            &Kind::Shell,
             &os(&["/bin/pwd"]),
         );
         let out = s.command(&v).current_dir(&s.home).output().unwrap();
@@ -299,7 +335,7 @@ mod tests {
     fn a_shell_without_arguments_reads_piped_input() {
         use std::io::Write;
         let s = Scratch::new("pipe");
-        let v = argv(&[], s.dir.as_os_str(), Kind::Shell, &[]);
+        let v = argv(&[], s.dir.as_os_str(), &Kind::Shell, &[]);
         let mut child = s
             .command(&v)
             .stdin(Stdio::piped())
@@ -377,6 +413,145 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "ran\n");
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains("could not write"), "{err}");
+    }
+
+    impl Scratch {
+        /// The launcher asked for an agent whose candidates are `paths`.
+        fn agent(&self, native: bool, script: &str, paths: &[&str], args: &[&str]) -> Output {
+            let paths: Vec<String> = paths.iter().map(|p| (*p).to_string()).collect();
+            let kind = Kind::Agent {
+                name: "tool",
+                native,
+                install_script: script,
+                paths: &paths,
+            };
+            let v = argv(&[], self.dir.as_os_str(), &kind, &os(args));
+            self.command(&v).stdin(Stdio::null()).output().unwrap()
+        }
+
+        fn probe(&self, paths: &[&str]) -> Option<i32> {
+            let paths: Vec<String> = paths.iter().map(|p| (*p).to_string()).collect();
+            let v = argv(
+                &[],
+                self.dir.as_os_str(),
+                &Kind::Probe { paths: &paths },
+                &[],
+            );
+            self.command(&v).output().unwrap().status.code()
+        }
+    }
+
+    fn text(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    #[test]
+    fn an_agent_is_the_first_candidate_that_is_a_program() {
+        let s = Scratch::new("agent");
+        let home = s.home.to_str().unwrap();
+        // Not programs: missing, a directory, a file without the execute
+        // bit, a name that is not a path.
+        std::fs::create_dir_all(s.home.join("adir")).unwrap();
+        std::fs::write(s.home.join("plain"), "").unwrap();
+        let missing = format!("{home}/missing");
+        let adir = format!("{home}/adir");
+        let plain = format!("{home}/plain");
+        let out = s.agent(
+            false,
+            "",
+            &[&missing, &adir, &plain, "echo", "/bin/echo", "/bin/cat"],
+            &["a b", "$HOME", "--", "*"],
+        );
+        assert_eq!(text(&out.stdout), "a b $HOME -- *\n");
+        assert!(
+            text(&out.stderr).contains("sv2: running /bin/echo as"),
+            "{}",
+            text(&out.stderr)
+        );
+        // The agent's exit status is the session's.
+        let out = s.agent(false, "", &["/bin/sh"], &["-c", "exit 9"]);
+        assert_eq!(out.status.code(), Some(9));
+
+        assert_eq!(s.probe(&[&missing, "/bin/echo"]), Some(0));
+        assert_eq!(s.probe(&[&missing, &adir, &plain, "echo"]), Some(1));
+    }
+
+    #[test]
+    fn a_missing_agent_is_installed_only_when_asked() {
+        let s = Scratch::new("native");
+        let home = s.home.to_str().unwrap();
+        let tool = format!("{home}/.local/bin/tool");
+        let install = r#"mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\necho "tool ran: $*"\n' > "$HOME/.local/bin/tool"
+chmod +x "$HOME/.local/bin/tool"
+echo "installer says hello" >&2
+"#;
+
+        // Not asked: nothing is installed, and nothing runs.
+        let out = s.agent(false, install, &[&tool], &["x"]);
+        assert_eq!(out.status.code(), Some(127));
+        assert_eq!(text(&out.stdout), "");
+        assert!(text(&out.stderr).contains("tool is not installed in this sandbox"));
+        assert!(!Path::new(&tool).exists());
+        // Asked, with no installer: the same.
+        assert_eq!(s.agent(true, "", &[&tool], &[]).status.code(), Some(127));
+
+        // An installer that fails stops the session with its status.
+        let out = s.agent(true, "echo broken >&2; exit 3", &[&tool], &["x"]);
+        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(text(&out.stdout), "");
+        // One that succeeds without producing the program is reported.
+        let out = s.agent(true, "true", &[&tool], &["x"]);
+        assert_eq!(out.status.code(), Some(127));
+        assert!(text(&out.stderr).contains("none of these exists"));
+
+        // Asked: installed, then run with the arguments.
+        let out = s.agent(true, install, &[&tool], &["one", "two words"]);
+        assert_eq!(text(&out.stdout), "tool ran: one two words\n");
+        let err = text(&out.stderr);
+        assert!(err.contains("installing tool in the sandbox home"), "{err}");
+        assert!(err.contains("installer says hello"), "{err}");
+
+        // Present now: the installer is not run again.
+        let out = s.agent(true, "echo again >&2; exit 5", &[&tool], &["x"]);
+        assert_eq!(text(&out.stdout), "tool ran: x\n");
+        assert!(!text(&out.stderr).contains("again"));
+    }
+
+    #[test]
+    fn the_launcher_checks_its_list_of_paths() {
+        let s = Scratch::new("paths");
+        let bash = |args: &[&str]| {
+            Command::new("/bin/bash")
+                .args(["-c", LAUNCHER, "sv2-launch", "/"])
+                .args(args)
+                .env_clear()
+                .env("HOME", &s.home)
+                .output()
+                .unwrap()
+                .status
+                .code()
+        };
+        // A count that is not a number, is zero, or exceeds what follows.
+        assert_eq!(bash(&["probe"]), Some(2));
+        assert_eq!(bash(&["probe", "x", "/bin/echo"]), Some(2));
+        assert_eq!(bash(&["probe", "0"]), Some(2));
+        assert_eq!(bash(&["probe", "2", "/bin/echo"]), Some(2));
+        assert_eq!(bash(&["agent", "tool", "0", ""]), Some(2));
+        assert_eq!(
+            bash(&["agent", "tool", "0", "", "3", "/bin/echo", "x"]),
+            Some(2)
+        );
+        // The count separates paths from arguments: "/bin/cat" is an
+        // argument here, not a candidate.
+        let out = Command::new("/bin/bash")
+            .args(["-c", LAUNCHER, "sv2-launch", "/", "agent", "tool", "0", ""])
+            .args(["1", "/bin/echo", "/bin/cat"])
+            .env_clear()
+            .env("HOME", &s.home)
+            .output()
+            .unwrap();
+        assert_eq!(text(&out.stdout), "/bin/cat\n");
     }
 
     #[test]

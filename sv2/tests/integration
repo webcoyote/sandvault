@@ -498,6 +498,77 @@ else
         /usr/bin/sudo -k -n -- "$HELPER" stage2 "$SB_UID" "$HOST_USER" "$P" -- /usr/bin/true
 fi
 
+###############################################################################
+# agents
+###############################################################################
+# Built-in definitions are found beside sv2, and are refused where a sandbox
+# could write them, which includes a checkout in /Users/Shared. So the suite
+# runs agents from a copy of the build in host-only scratch, laid out as an
+# installed prefix, with a definition of its own: nothing is downloaded and
+# no package is installed.
+PREFIX="$SCRATCH/prefix"
+/bin/mkdir -p "$PREFIX/bin" "$PREFIX/share/sandvault2/agents/sv2test"
+/bin/cp "$SV2" "$BUILT_HELPER" "$PREFIX/bin/"
+/bin/cat > "$PREFIX/share/sandvault2/agents/sv2test/agent.toml" <<'TOML'
+schema = 1
+binary = ["~/.local/bin/sv2test", "/nonexistent/sv2test"]
+
+[install.guest]
+script = "install.sh"
+
+[run]
+bypass_flag = "--sv2-test-flag"
+no_inject = ["plain"]
+TOML
+/bin/cat > "$PREFIX/share/sandvault2/agents/sv2test/install.sh" <<'INSTALL'
+#!/bin/bash
+set -euo pipefail
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\nprintf "%%s|" "$(id -un)" "$@"\n' > "$HOME/.local/bin/sv2test"
+chmod +x "$HOME/.local/bin/sv2test"
+INSTALL
+agent() { "$PREFIX/bin/sv2" --profile "$P" "$@"; }
+
+if agent sv2test x >/dev/null 2>&1; then
+    fail "agent: one that is not installed does not run"
+else
+    pass "agent: one that is not installed does not run"
+fi
+check "agent: not installed without --native" "absent" \
+    "$(sb /bin/sh -c 'test -e ~/.local/bin/sv2test && echo present || echo absent')"
+check "agent: --native installs it in the sandbox home and runs it, as the sandbox account" \
+    "$ACCOUNT|--sv2-test-flag|a b|\$HOME|" "$(agent --native sv2test "a b" '$HOME' 2>/dev/null)"
+check "agent: once installed it needs no --native" "$ACCOUNT|--sv2-test-flag|again|" \
+    "$(agent sv2test again 2>/dev/null)"
+check "agent: a listed subcommand does not get the flag" "$ACCOUNT|plain|x|" \
+    "$(agent sv2test plain x 2>/dev/null)"
+OUT="$(agent sv2test x 2>&1 >/dev/null)"
+if [[ "$OUT" == *"runs with --sv2-test-flag"* && "$OUT" == *"$PREFIX/share/sandvault2/agents/sv2test"* ]]; then
+    pass "agent: the banner names the flag and the definition"
+else
+    fail "agent: the banner names the flag and the definition" "$OUT"
+fi
+OUT="$(agent sv2test plain 2>&1 >/dev/null)"
+if [[ "$OUT" == *"--sv2-test-flag"* ]]; then
+    fail "agent: the banner does not claim a flag that was not given" "$OUT"
+else
+    pass "agent: the banner does not claim a flag that was not given"
+fi
+check "agent: the exit status is the agent's" "7" \
+    "$(sb /bin/sh -c 'printf "#!/bin/sh\nexit 7\n" > ~/.local/bin/sv2test'; agent sv2test >/dev/null 2>&1; echo $?)"
+
+# The attack: a definition where the sandbox can write it. It names what sv2
+# installs with Homebrew as the host user, so the sandbox would choose code
+# that runs on the host. Here the whole prefix is in the workspace.
+/bin/cp -R "$PREFIX" "$WS/prefix"
+OUT="$("$WS/prefix/bin/sv2" --profile "$P" sv2test x 2>&1)" && RC=0 || RC=$?
+if [[ "$RC" -ne 0 && "$OUT" == *"refusing the agent definition"* && "$OUT" != *"$ACCOUNT|"* ]]; then
+    pass "agent: a definition inside the workspace is refused"
+else
+    fail "agent: a definition inside the workspace is refused" "$OUT"
+fi
+/bin/rm -rf "$WS/prefix"
+
 # The caller chooses the helper's standard output. A pipe that is already
 # full blocks the helper where it prints, for as long as the caller likes;
 # the registry lock must not be held there, or everybody else's sv2 waits.

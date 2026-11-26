@@ -21,11 +21,12 @@ QUIET=(--quiet)
 [[ "$VERBOSE" -ne 0 ]] && QUIET=()
 
 cd "$SV2_DIR"
-# The guest launcher is compiled into sv2 and run inside every session.
+# The guest launcher is compiled into sv2 and run inside every session; the
+# agents' scripts run inside the sandbox too.
 if command -v shellcheck >/dev/null; then
-    shellcheck guest/launch.sh
+    shellcheck guest/launch.sh agents/*/*.sh
 else
-    echo >&2 "sv2 tests: shellcheck not found; guest/launch.sh NOT LINTED"
+    echo >&2 "sv2 tests: shellcheck not found; the guest scripts were NOT LINTED"
     [[ "${SV_TESTS_FAIL_ON_SKIP:-0}" != "1" ]] || exit 1
 fi
 cargo fmt --all --check

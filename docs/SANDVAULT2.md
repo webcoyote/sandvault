@@ -544,7 +544,7 @@ unchanged.
 |---|---|---|---|
 | `crates/common` | (library) | both | none |
 | `crates/helper` | `sv2-helper` | root | `libc` |
-| `crates/cli` | `sv2` | host user | `libc` |
+| `crates/cli` | `sv2` | host user | `libc`, `serde`, `toml` |
 
 Build and test: `scripts/tests-sv2` (also run by `scripts/validate`). Unit
 tests need no privileges. `sv2/tests/integration` creates a throwaway profile
@@ -710,6 +710,50 @@ Decisions this milestone made:
   - *Not covered.* The registry has its own format number in its header.
     The two groups and the directories have none; `install` checks and
     repairs them each time it runs.
+- **Agent definitions (2026-11-26).** Built as designed under "Agents",
+  in `crates/cli/src/agent.rs`, with one built-in, `sv2/agents/claude`.
+  What the build decided or changed:
+  - *Schema 1* has `binary`, `install.host.brew` (one `formula` or one
+    `cask`; Claude Code is a cask), `install.guest.script`, `run.bypass_flag`
+    and `run.no_inject`. `system_prompt` and `wrapper` from the design's
+    example are not in it: nothing uses them until browser and iOS support
+    exist. A key sv2 does not know is an error, so adding them is a schema
+    change and not a silent difference between versions.
+  - *What a definition may say* is checked when it is read: binaries start
+    with `~/`, `{brew}/` or `/` and are plain paths; a package is a plain
+    name with no tap; the flag is one long option; the script is a `.sh`
+    file in the definition's directory, at most 64 KB.
+  - *Who can write it.* Before a definition is read its resolved directory
+    is refused if it is in a workspace or a sandbox home, or if any
+    directory on the way to it, or any file in it, is writable by everyone
+    (sticky or not, so `/tmp` and `/Users/Shared` are out), belongs to a
+    sandbox account, is writable by a sandbox group, or has an access list
+    that lets a sandbox account, a sandbox group or `everyone` write. A
+    symbolic link in the directory is refused too. Sandbox accounts and
+    groups are recognised by name, v2's (`sv2-`) and v1's (`sandvault-`):
+    a v1 sandbox is as hostile as a v2 one. A checkout in a v1 workspace is
+    therefore refused as a source of built-ins; the integration suite runs
+    agents from a copy of the build in host-only scratch, and
+    `scripts/sv2-dev-agents` copies the checkout's definitions into
+    `~/.config/sandvault2/agents` for a development build to use.
+  - *Where the agent is.* `sv2` cannot look into the sandbox home, so when
+    no candidate outside it exists it asks the sandbox (the launcher's
+    `probe`, one extra launch) before it decides to install. A sandbox that
+    lies gets the package the definition names installed, or a session that
+    finds no program.
+  - *Install.* Without `--native`: `brew install --formula|--cask NAME`, as
+    the host user, from `/`, shown before it runs, when the agent is
+    nowhere. With `--native`: only candidates in the sandbox home count,
+    and the launcher runs the definition's script when none exists.
+  - *The flag.* `sv2` puts `bypass_flag` before the user's arguments unless
+    the first is listed in `no_inject`; the banner says which happened.
+    Claude Code 2.1.326 accepts its flag before every subcommand (checked
+    against the real program), so its list is empty.
+  - *The launcher* gets the agent as arguments: name, whether to install,
+    the script's text, a counted list of paths, then the agent's arguments.
+  - *Measured on 2026-11-26:* Homebrew's `claude` runs in a session;
+    `--native claude` installed and ran 2.1.332 in a throwaway profile, and
+    the next run without the option used it.
 - **Guest launcher (2026-11-25; most of open item 5).** What a session needs
   done before its program starts is done by `sv2/guest/launch.sh`, a bash
   script run as the sandbox user under the sandbox profile.
@@ -733,9 +777,6 @@ Decisions this milestone made:
     and the bin directories) and an empty `~/.zshrc`, each only when nothing
     has that name. From then on the file is the user's: `sv2` never rewrites
     it, so a later change to the text does not reach an existing home.
-  - *Still open from item 5:* how an agent definition's data and guest
-    scripts are handed to the launcher. They are to travel the same way, as
-    further arguments; that comes with agent definitions.
 - **Holding the lock (2026-11-25).** The registry lock is shared by every
   user, and the caller controls a good deal about the helper that holds it.
   Three things keep one caller from making everyone else wait:
@@ -813,7 +854,7 @@ order to do them in.
    account's processes" and "A taken workspace root" under "Milestone 1").
    Closed as not a gap: `install` reading its own executable by path (see
    "Installing from a path" there).
-4. Done: the guest-side launcher. Next: agent definitions, then quarantine
+4. Done: the guest-side launcher and agent definitions. Next: quarantine
    handling.
 5. Everything else that is not the daemon, in this order: the planted
    `~/Library/LaunchAgents` measurement (open item 7); the items under "Not
@@ -855,6 +896,14 @@ order to do them in.
   session. Not covered by any test: `^Z` at a helper that holds the lock;
   an account that stops the kill child; `install` over a `sv2` directory
   another user made (the logic is unit-tested without root).
+- [ ] **Parts of agent definitions have not run.** Unit tests, the
+  integration suite (126 of 126, 2026-11-26, with a test agent) and the two
+  measurements with `claude` cover the rest. Not run: the Homebrew install
+  itself (`brew install` from `sv2`), since `claude` was already installed;
+  a Mac without Homebrew or with a prefix the user cannot write; a user
+  definition in `~/.config/sandvault2/agents` on a real machine (unit tests
+  cover the precedence); built-ins found in an installed `share/` directory
+  under a real Homebrew prefix, which does not exist until sv2 is packaged.
 - [ ] **`use_pty` has not been tested against its absence.** The terminal
   checks passed before the `use_pty` line existed, because this machine's sudo
   (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
@@ -889,7 +938,13 @@ order to do them in.
 
 ### Functional gaps
 
-None recorded.
+- [ ] **`uninstall` is too easy to regret.** It removes every profile of
+  every user on the Mac: the accounts, and the sandbox homes with whatever
+  the agents kept there (logins, caches, native installs). Only workspaces
+  with files in them survive. Nothing stands between the command and that
+  but the sudo password, which says nothing about what is about to go.
+  Make it less dangerous: say what will be removed and ask, or refuse while
+  profiles exist unless told otherwise.
 
 ### Features not in milestone 1
 
@@ -902,8 +957,14 @@ See "Priority order" above for the order.
   "SSH lockdown" under "Milestone 1").
 - [x] The guest-side launcher (open item 5); see "Guest launcher" under
   "Milestone 1". There is no unpacked payload.
-- [ ] Agent definitions: format, `install.sh`, Homebrew and native install,
-  `--native`.
+- [x] Agent definitions: format, `install.sh`, Homebrew and native install,
+  `--native`; see "Agent definitions" under "Milestone 1". One built-in so
+  far (`claude`). Not yet: definitions for the other agents v1 has (codex,
+  gemini, opencode, pi, muse, herdr), each to be checked against its real
+  program; `system_prompt` and `wrapper`.
+- [ ] A command that creates an agent definition from a template, in
+  `~/.config/sandvault2/agents`, so that adding an agent does not start
+  from an empty file.
 - [ ] Quarantine handling for installed agent binaries (open item 1).
 - [ ] Default deny, and per-profile capabilities (open item 8).
 - [ ] Repository credentials.
@@ -935,12 +996,11 @@ See "Priority order" above for the order.
    creation and deletion into the daemon; `launch` can stay on sudo if that
    keeps the session's terminal handling simple.
 4. **Terminal.** Decided in milestone 1; see "Milestone 1".
-5. **Guest-side launcher.** Mostly decided on 2026-11-25: a script compiled
-   into `sv2` and passed on the command line; see "Guest launcher" under
+5. **Guest-side launcher.** Decided: a script compiled into `sv2` and
+   passed on the command line, which gets an agent's data and install
+   script as arguments; see "Guest launcher" and "Agent definitions" under
    "Milestone 1". It was not to be the helper after it drops privileges:
    that would put definition parsing into the binary that runs as root.
-   Still open: the arguments by which an agent definition's data and guest
-   scripts reach the launcher.
 6. **Registry format.** Decided in milestone 1; see "Milestone 1".
 7. **launchd as a route around the profile.** Measure whether a session can
    start a job in its own launchd domain (`launchctl bootstrap` or `submit`,

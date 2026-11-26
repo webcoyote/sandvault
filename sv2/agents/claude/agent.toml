@@ -1,0 +1,19 @@
+# Claude Code (https://claude.com/claude-code)
+schema = 1
+
+# The native installer puts it in the sandbox home; Homebrew in its prefix.
+# A native install, once made, is the one that is used.
+binary = ["~/.local/bin/claude", "{brew}/bin/claude"]
+
+[install.host]
+# A cask: Homebrew has no formula for it.
+brew = { cask = "claude-code" }
+
+[install.guest]
+script = "install.sh"
+
+[run]
+# Checked against `claude --help` of 2.1.326: the flag is accepted before
+# every subcommand (mcp, auth, plugin, doctor, install, update, agents), so
+# no subcommand needs to be listed in no_inject.
+bypass_flag = "--dangerously-skip-permissions"

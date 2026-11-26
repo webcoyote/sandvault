@@ -62,6 +62,29 @@ extern "C" {
     fn acl_free(obj: *mut c_void) -> c_int;
 }
 
+/// The ACL of the file or directory at `path`, as text, without following a
+/// link at the last component; `None` when it has none.
+pub fn acl_text_of(path: &Path) -> io::Result<Option<String>> {
+    let c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))?;
+    // SAFETY: `c` is a valid C string for the call.
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fd is a fresh descriptor owned by nobody else.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    match Acl::of_fd(fd.as_raw_fd())? {
+        None => Ok(None),
+        Some(acl) => acl.text().map(Some).map_err(io::Error::other),
+    }
+}
+
 /// An ACL from the system library, freed on drop.
 struct Acl(*mut c_void);
 

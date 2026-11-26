@@ -5,6 +5,7 @@
 //! write anything inside a workspace or a sandbox home, with one exception:
 //! `sv2 repair` (see `repair.rs`).
 
+mod agent;
 mod args;
 mod repair;
 mod shell;
@@ -43,11 +44,8 @@ Usage:
 
 Options (before NAME):
   -p, --profile PROFILE             profile to use (default: default)
-
-Agents:
-  shell                             a login shell, or ARGS as a command:
-                                      sv2 run shell
-                                      sv2 run shell tmux new -A -s main
+      --native                      install the agent with its own installer,
+                                    inside the sandbox, instead of Homebrew
 
 Everything after NAME is passed to the agent unchanged.
 
@@ -56,9 +54,32 @@ A command or agent name may be shortened to any prefix that fits only one:
 several is refused. 'uninstall' and 'remove' must be written in full.
 ";
 
-/// The only agent in this milestone, built in. Agent definitions
-/// (`agent.toml`) come later; nothing is ever looked up on PATH.
-const AGENTS: &[&str] = &["shell"];
+/// The agent that needs no definition. It is part of sv2, so that
+/// `sv2 run shell` works whatever state the definitions are in; a
+/// definition of the same name is never used.
+const SHELL: &str = "shell";
+
+const HELP_SHELL: &str = concat!(
+    "  shell                             a login shell, or ARGS as a command:\n",
+    "                                      sv2 run shell\n",
+    "                                      sv2 run shell tmux new -A -s main\n",
+);
+
+/// Every name `sv2 run` accepts: `shell`, then the definitions found.
+/// Nothing is ever looked up on PATH.
+fn agent_names(sources: &agent::Sources) -> Vec<String> {
+    let mut names = vec![SHELL.to_string()];
+    names.extend(sources.names().into_iter().filter(|n| n != SHELL));
+    names
+}
+
+fn help(names: &[String]) -> String {
+    let mut text = format!("{HELP}\nAgents:\n{HELP_SHELL}");
+    for name in names.iter().filter(|n| *n != SHELL) {
+        text.push_str(&format!("  {name}\n"));
+    }
+    text
+}
 
 fn fail(msg: &str) -> ExitCode {
     eprintln!("sv2: {msg}");
@@ -242,9 +263,111 @@ fn profile_list() -> ExitCode {
     }
 }
 
-fn run(profile: &str, agent: &str, agent_args: &[OsString]) -> ExitCode {
-    // `shell` is the only agent; the parser has already refused the rest.
-    debug_assert!(AGENTS.contains(&agent));
+/// Whether the host user can see a program at `path`.
+fn is_program(path: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// " or run: sv2 run --native NAME", when the agent has an installer.
+fn native_hint(def: &agent::Definition) -> String {
+    if def.guest_install.is_some() {
+        format!(", or use its own installer: sv2 run --native {}", def.name)
+    } else {
+        String::new()
+    }
+}
+
+/// Make sure the agent is installed somewhere a session will find it,
+/// installing it with Homebrew, as the host user, when it is nowhere.
+///
+/// `probe` asks the sandbox whether the program is in its home, which the
+/// host user cannot look into. The answer only decides whether Homebrew is
+/// run for the package the definition names; a sandbox that lies gets a
+/// package installed that the user asked for, or a session that finds no
+/// program.
+fn ensure_installed(
+    def: &agent::Definition,
+    brew: Option<&str>,
+    probe: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    let name = &def.name;
+    let visible = def.host_visible_paths(brew);
+    if visible.iter().any(|p| is_program(p)) {
+        return Ok(());
+    }
+    if def.has_home_candidate() && probe() {
+        return Ok(());
+    }
+    let Some(package) = &def.brew else {
+        return Err(format!(
+            "{name} is not installed, and its definition names no Homebrew package{}",
+            native_hint(def)
+        ));
+    };
+    let Some(brew) = brew else {
+        return Err(format!(
+            "{name} is not installed and Homebrew was not found. Install Homebrew (https://brew.sh){}",
+            native_hint(def)
+        ));
+    };
+    let argv = agent::brew_install_argv(brew, package);
+    eprintln!(
+        "sv2: {name} is not installed; installing it with Homebrew: {}",
+        argv.join(" ")
+    );
+    // From `/`, not from a directory a sandbox may be able to write. The
+    // session's standard output is not Homebrew's to write to.
+    let status = Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir("/")
+        .stdout(Stdio::from(std::io::stderr()))
+        .status()
+        .map_err(|e| format!("cannot run {}: {e}", argv[0]))?;
+    if !status.success() {
+        return Err(format!(
+            "Homebrew could not install {name} ({status}). Fix that{}",
+            native_hint(def)
+        ));
+    }
+    if !visible.iter().any(|p| is_program(p)) {
+        return Err(format!(
+            "Homebrew ran, but {name} is still not at {}. {}",
+            visible.join(" or "),
+            sv2_common::Obelus("vanishing parsnip")
+        ));
+    }
+    Ok(())
+}
+
+fn run(
+    sources: &agent::Sources,
+    profile: &str,
+    native: bool,
+    agent: &str,
+    agent_args: &[OsString],
+) -> ExitCode {
+    // Read the definition first: a name that cannot be run should not
+    // create a profile on the way to saying so.
+    let def = if agent == SHELL {
+        None
+    } else {
+        match sources.load(agent) {
+            Ok(d) => Some(d),
+            Err(e) => return fail(&e),
+        }
+    };
+    if native {
+        match &def {
+            None => return fail("--native does not apply to shell: there is nothing to install"),
+            Some(d) if d.guest_install.is_none() => {
+                return fail(&format!(
+                    "{agent} has no installer of its own; run it without --native"
+                ))
+            }
+            Some(_) => {}
+        }
+    }
 
     let mut profiles = match list_profiles() {
         Ok(p) => p,
@@ -297,13 +420,56 @@ fn run(profile: &str, agent: &str, agent_args: &[OsString]) -> ExitCode {
     let dir = shell::initial_dir(cwd.as_deref(), &p.workspace);
     let home = std::env::var_os("HOME");
     let env = shell::forwarded_env(&|name| std::env::var_os(name), home.as_deref());
-    let argv = shell::argv(&env, OsStr::new(&dir), shell::Kind::Shell, agent_args);
+    let launch = |kind: &shell::Kind, args: &[OsString]| {
+        let mut cmd = call_command("launch");
+        cmd.arg(profile)
+            .arg("--")
+            .args(shell::argv(&env, OsStr::new(&dir), kind, args));
+        cmd
+    };
+    let Some(def) = def else {
+        let err = launch(&shell::Kind::Shell, agent_args).exec();
+        return fail(&format!("cannot run {SUDO}: {err}"));
+    };
 
-    let err = call_command("launch")
-        .arg(profile)
-        .arg("--")
-        .args(argv)
-        .exec();
+    let home = sv2_common::home_path(&p.account);
+    let brew = agent::brew_prefix();
+    if !native {
+        let in_home = def.candidate_paths(&home, brew, true);
+        let probe = || {
+            launch(&shell::Kind::Probe { paths: &in_home }, &[])
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(std::io::stderr()))
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if let Err(e) = ensure_installed(&def, brew, &probe) {
+            return fail(&e);
+        }
+    }
+    let paths = def.candidate_paths(&home, brew, native);
+    if paths.is_empty() {
+        return fail(&format!(
+            "the definition of {agent} names no place for it that exists on this Mac{}",
+            if native { " for a native install" } else { "" }
+        ));
+    }
+    let args = def.final_args(agent_args);
+    // What the session is trusted with, as it is on this code path.
+    match def.injected_flag(agent_args) {
+        Some(flag) => eprintln!(
+            "sv2: {agent} runs with {flag}: it acts without asking, inside the sandbox of profile '{profile}'"
+        ),
+        None => eprintln!("sv2: {agent} runs inside the sandbox of profile '{profile}'"),
+    }
+    eprintln!("sv2: definition: {}", def.dir.display());
+    let kind = shell::Kind::Agent {
+        name: agent,
+        native,
+        install_script: def.guest_install.as_deref().unwrap_or(""),
+        paths: &paths,
+    };
+    let err = launch(&kind, &args).exec();
     fail(&format!("cannot run {SUDO}: {err}"))
 }
 
@@ -313,7 +479,10 @@ fn main() -> ExitCode {
         return fail("do not run sv2 as root or with sudo; it asks for sudo itself when needed");
     }
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let cmd = match args::parse(&argv, AGENTS) {
+    let sources = agent::Sources::locate();
+    let names = agent_names(&sources);
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let cmd = match args::parse(&argv, &name_refs) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("sv2: {e}");
@@ -322,7 +491,7 @@ fn main() -> ExitCode {
     };
     match cmd {
         Cmd::Help => {
-            print!("{HELP}");
+            print!("{}", help(&names));
             ExitCode::SUCCESS
         }
         Cmd::Version => {
@@ -354,9 +523,10 @@ fn main() -> ExitCode {
         Cmd::ProfileList => profile_list(),
         Cmd::Run {
             profile,
+            native,
             agent,
             args,
-        } => run(&profile, &agent, &args),
+        } => run(&sources, &profile, native, &agent, &args),
         Cmd::Repair(path) => match repair::run(&path) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::FAILURE,
