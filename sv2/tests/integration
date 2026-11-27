@@ -19,6 +19,8 @@ BIN_DIR="${1:?usage: integration DIR}"
 # suite (~/.config/sandvault2/home): a .gitconfig or a .zshrc of theirs
 # would decide what the checks see.
 export SV2_NO_HOME_COPY=1
+# Nor a browser downloaded into it: --chrome is tested with Google Chrome.
+export SV2_NO_BROWSER_INSTALL=1
 # Absolute: some checks run sv2 from another directory.
 BIN_DIR="$(cd "$BIN_DIR" && pwd)"
 SV2="$BIN_DIR/sv2"
@@ -656,6 +658,50 @@ else
 fi
 check "agent: the exit status is the agent's" "7" \
     "$(sb /bin/sh -c 'printf "#!/bin/sh\nexit 7\n" > ~/.local/bin/sv2test'; agent --native sv2test >/dev/null 2>&1; echo $?)"
+
+###############################################################################
+# browsers
+###############################################################################
+# --lightpanda and --chrome: the launcher starts the browser in the sandbox,
+# the session finds it at SV_BROWSER_ENDPOINT, and nothing of it is left when
+# the session has ended. (That Chrome loads a page under the profile is the
+# probe "Google Chrome with a debugging port loads a page", above.)
+browser_session() { # OPTION WORD: a session with that browser, asked what answers at the endpoint
+    local option="$1" word="$2" answer n=0
+    # shellcheck disable=SC2016 # expanded in the session
+    answer="$("$SV2" --profile "$P" "$option" shell /bin/sh -c '/usr/bin/curl -s -m 10 "$SV_BROWSER_ENDPOINT/json/version"' 2>/dev/null || true)"
+    if [[ "$answer" == *"$word"* ]]; then
+        pass "browser: $option answers at SV_BROWSER_ENDPOINT in its session"
+    else
+        fail "browser: $option answers at SV_BROWSER_ENDPOINT in its session" "$answer"
+    fi
+    # The launcher's watcher looks once a second.
+    while /usr/bin/pgrep -u "$ACCOUNT" -f "sv2-browser|lightpanda serve" >/dev/null 2>&1 && [[ "$n" -lt 50 ]]; do
+        /bin/sleep 0.2
+        n=$((n + 1))
+    done
+    check "browser: $option is gone when its session has ended" "" \
+        "$(/usr/bin/pgrep -u "$ACCOUNT" -lf "sv2-browser|lightpanda serve" || true)"
+}
+LIGHTPANDA=""
+for BREW in /opt/homebrew /usr/local; do
+    [[ -x "$BREW/bin/brew" && -x "$BREW/bin/lightpanda" ]] && LIGHTPANDA="$BREW/bin/lightpanda" && break
+done
+if [[ -n "$LIGHTPANDA" ]]; then
+    browser_session --lightpanda Lightpanda
+else
+    echo "     skip browser: --lightpanda: Lightpanda is not installed"
+fi
+if [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+    browser_session --chrome Chrome
+else
+    echo "     skip browser: --chrome: no Google Chrome in /Applications"
+fi
+if "$SV2" --profile "$P" --chrome --lightpanda shell /usr/bin/true >/dev/null 2>&1; then
+    fail "browser: two browsers at once are refused"
+else
+    pass "browser: two browsers at once are refused"
+fi
 
 ###############################################################################
 # credentials

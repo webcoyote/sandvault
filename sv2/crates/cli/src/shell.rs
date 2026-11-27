@@ -84,6 +84,24 @@ impl Kind<'_> {
     }
 }
 
+/// A browser the launcher starts in the sandbox before the session's
+/// program, and stops after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Browser {
+    Chrome,
+    Lightpanda,
+}
+
+impl Browser {
+    /// The launcher's name for it, and the option's.
+    pub fn name(self) -> &'static str {
+        match self {
+            Browser::Chrome => "chrome",
+            Browser::Lightpanda => "lightpanda",
+        }
+    }
+}
+
 /// `NAME=value` pairs for `/usr/bin/env`, from the host environment.
 /// TERMINFO (set by terminals such as Ghostty to a directory in their app
 /// bundle) is forwarded unless it is in the host home, which the sandbox
@@ -129,10 +147,25 @@ pub fn initial_dir(cwd: Option<&std::path::Path>, workspace: &str) -> OsString {
 /// `args` go to the launcher as positional parameters and from there to the
 /// program, unchanged.
 pub fn argv(env: &[OsString], dir: &OsStr, kind: &Kind, args: &[OsString]) -> Vec<OsString> {
+    argv_with_browser(env, dir, None, kind, args)
+}
+
+/// The same, with a browser started first: the program at `path`, which
+/// the sandbox must be able to read.
+pub fn argv_with_browser(
+    env: &[OsString],
+    dir: &OsStr,
+    browser: Option<(Browser, &str)>,
+    kind: &Kind,
+    args: &[OsString],
+) -> Vec<OsString> {
     let mut v: Vec<OsString> = vec!["/usr/bin/env".into()];
     v.extend(env.iter().cloned());
     v.extend(["/bin/bash", "-c", LAUNCHER, "sv2-launch"].map(OsString::from));
     v.push(dir.to_owned());
+    if let Some((browser, path)) = browser {
+        v.extend(["browser", browser.name(), path].map(OsString::from));
+    }
     v.extend(kind.words());
     v.extend(args.iter().cloned());
     v
@@ -224,6 +257,25 @@ mod tests {
         );
         // The helper requires an absolute command.
         assert!(v[0].to_str().unwrap().starts_with('/'));
+        // A browser goes between the directory and the kind.
+        let b = argv_with_browser(
+            &env,
+            OsStr::new("/ws"),
+            Some((Browser::Lightpanda, "/opt/homebrew/bin/lightpanda")),
+            &Kind::Shell,
+            &os(&["tmux"]),
+        );
+        assert_eq!(
+            b[6..],
+            os(&[
+                "/ws",
+                "browser",
+                "lightpanda",
+                "/opt/homebrew/bin/lightpanda",
+                "shell",
+                "tmux"
+            ])
+        );
         // The launcher travels on every command line, and sudo logs it.
         assert!(LAUNCHER.len() < 16 * 1024, "the launcher has grown large");
     }
@@ -480,6 +532,175 @@ mod tests {
         );
         let out = s.command(&v).stdin(Stdio::null()).output().unwrap();
         assert_eq!(text(&out.stdout), r#"{"*":"allow"}|two words"#);
+    }
+
+    /// A stand-in for a browser: it says where it listens, as Chrome does,
+    /// writes its process ID where the test can read it, and stays.
+    fn stand_in_browser(s: &Scratch, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = s.root.join("browser");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn a_browser_is_started_for_the_session_and_stopped_after_it() {
+        let s = Scratch::new("browser");
+        let pid_file = s.root.join("pid");
+        let browser = stand_in_browser(
+            &s,
+            &format!(
+                "echo $$ > '{}'\necho 'DevTools listening on ws://127.0.0.1:4242/devtools/browser/x' >&2\nexec /bin/sleep 60",
+                pid_file.display()
+            ),
+        );
+        let v = argv_with_browser(
+            &[],
+            s.dir.as_os_str(),
+            Some((Browser::Chrome, &browser)),
+            &Kind::Shell,
+            &os(&["/bin/sh", "-c", r#"printf %s "$SV_BROWSER_ENDPOINT""#]),
+        );
+        let out = s
+            .command(&v)
+            .env("TMPDIR", &s.root)
+            .env("SV2_NO_BROWSER_INSTALL", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(text(&out.stdout), "http://127.0.0.1:4242");
+        assert!(
+            text(&out.stderr).contains("sv2: chrome listens at http://127.0.0.1:4242"),
+            "{}",
+            text(&out.stderr)
+        );
+        // Stopped, and its directory removed, soon after the session ends.
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let gone = |pid: &str| {
+            !Command::new("/bin/kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        let leftovers = || {
+            std::fs::read_dir(&s.root)
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with("sv2-browser."))
+        };
+        let mut waited = 0;
+        while (!gone(&pid) || leftovers()) && waited < 50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            waited += 1;
+        }
+        assert!(gone(&pid), "the browser is still running");
+        assert!(!leftovers(), "the browser's directory is still there");
+    }
+
+    /// For chrome, a headless shell of Playwright's in the home is used in
+    /// place of the program given: the newest, by number.
+    #[test]
+    fn chrome_prefers_a_headless_shell_in_the_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = Scratch::new("headless");
+        let shell_at = |revision: &str, port: &str| {
+            let dir = s.home.join(format!(
+                "Library/Caches/ms-playwright/chromium_headless_shell-{revision}/chrome-headless-shell-mac-arm64"
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("chrome-headless-shell");
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\necho 'DevTools listening on ws://127.0.0.1:{port}/devtools/browser/x' >&2\nexec /bin/sleep 60\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let run = |program: &str| {
+            let v = argv_with_browser(
+                &[],
+                s.dir.as_os_str(),
+                Some((Browser::Chrome, program)),
+                &Kind::Shell,
+                &os(&["/bin/sh", "-c", r#"printf %s "$SV_BROWSER_ENDPOINT""#]),
+            );
+            s.command(&v)
+                .env("TMPDIR", &s.root)
+                .env("SV2_NO_BROWSER_INSTALL", "1")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let chrome = stand_in_browser(
+            &s,
+            "echo 'DevTools listening on ws://127.0.0.1:1111/devtools/browser/x' >&2\nexec /bin/sleep 60",
+        );
+
+        // None in the home: the program given, and a word about its limit.
+        let out = run(&chrome);
+        assert_eq!(text(&out.stdout), "http://127.0.0.1:1111");
+        assert!(
+            text(&out.stderr).contains("using Google Chrome, which in a sandbox ends"),
+            "{}",
+            text(&out.stderr)
+        );
+        // Neither: the session does not start.
+        let out = run("/nonexistent/Google Chrome");
+        assert_eq!(out.status.code(), Some(127));
+        assert_eq!(text(&out.stdout), "");
+
+        // 1000 is newer than 999, though it sorts before it; a directory
+        // that is not a revision is not looked at.
+        shell_at("999", "2999");
+        shell_at("1000", "3000");
+        shell_at("zzz", "4000");
+        for program in [chrome.as_str(), "/nonexistent/Google Chrome"] {
+            let out = run(program);
+            assert_eq!(text(&out.stdout), "http://127.0.0.1:3000");
+            let err = text(&out.stderr);
+            assert!(
+                err.contains("chrome (Playwright's headless shell) listens"),
+                "{err}"
+            );
+            assert!(!err.contains("using Google Chrome"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_browser_that_does_not_start_stops_the_session() {
+        let s = Scratch::new("nobrowser");
+        let run = |browser: &str| {
+            let v = argv_with_browser(
+                &[],
+                s.dir.as_os_str(),
+                Some((Browser::Lightpanda, browser)),
+                &Kind::Shell,
+                &os(&["/bin/echo", "the session ran"]),
+            );
+            s.command(&v)
+                .env("TMPDIR", &s.root)
+                .env("SV2_NO_BROWSER_INSTALL", "1")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        // It ends without saying where it listens.
+        let out = run(&stand_in_browser(&s, "echo 'no display' >&2; exit 1"));
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(text(&out.stdout), "");
+        let err = text(&out.stderr);
+        assert!(
+            err.contains("the browser lightpanda did not start"),
+            "{err}"
+        );
+        assert!(err.contains("no display"), "{err}");
+        // It is not a program at all.
+        let out = run("lightpanda");
+        assert_eq!(out.status.code(), Some(127));
+        assert_eq!(text(&out.stdout), "");
     }
 
     #[test]

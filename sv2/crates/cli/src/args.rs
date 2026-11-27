@@ -27,6 +27,7 @@ use sv2_common::{valid_profile, DEFAULT_PROFILE};
 
 use crate::agent::valid_agent_name;
 use crate::credentials::TokenVerb;
+use crate::shell::Browser;
 
 pub const SUBCOMMANDS: &[&str] = &[
     "install",
@@ -60,6 +61,8 @@ pub enum Cmd {
         profile: String,
         /// Install the agent with its own installer, inside the sandbox.
         native: bool,
+        /// Start this browser in the sandbox for the session.
+        browser: Option<Browser>,
         agent: String,
         args: Vec<OsString>,
     },
@@ -159,6 +162,7 @@ fn resolve<'a>(word: &str, names: &[&'a str]) -> Result<Option<&'a str>, String>
 fn parse_run(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
     let mut profile = DEFAULT_PROFILE.to_string();
     let mut native = false;
+    let mut browser = None;
     let mut i = 0;
     while i < args.len() {
         let Some(a) = args[i].to_str() else { break };
@@ -175,6 +179,16 @@ fn parse_run(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
             profile = value.to_string();
         } else if a == "--native" {
             native = true;
+        } else if a == "--chrome" || a == "--lightpanda" {
+            let wanted = if a == "--chrome" {
+                Browser::Chrome
+            } else {
+                Browser::Lightpanda
+            };
+            if browser.is_some_and(|b| b != wanted) {
+                return Err("--chrome and --lightpanda are two browsers: use one".into());
+            }
+            browser = Some(wanted);
         } else {
             return Err(format!("unknown option '{a}'"));
         }
@@ -197,6 +211,7 @@ fn parse_run(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
     Ok(Cmd::Run {
         profile,
         native,
+        browser,
         agent,
         args: args[i + 1..].to_vec(),
     })
@@ -386,6 +401,7 @@ mod tests {
         Cmd::Run {
             profile: "default".into(),
             native: false,
+            browser: None,
             agent: agent.into(),
             args: vec![],
         }
@@ -395,6 +411,7 @@ mod tests {
         Cmd::Run {
             profile: profile.into(),
             native: false,
+            browser: None,
             agent: "shell".into(),
             args: os(args),
         }
@@ -602,10 +619,36 @@ mod tests {
     }
 
     #[test]
+    fn a_browser_is_an_option_before_the_agent() {
+        let with = |browser: Browser| Cmd::Run {
+            profile: "default".into(),
+            native: false,
+            browser: Some(browser),
+            agent: "shell".into(),
+            args: vec![],
+        };
+        assert_eq!(p(&["--chrome", "shell"]), Ok(with(Browser::Chrome)));
+        assert_eq!(
+            p(&["run", "--lightpanda", "s"]),
+            Ok(with(Browser::Lightpanda))
+        );
+        // The same one twice is still one.
+        assert_eq!(
+            p(&["--chrome", "--chrome", "shell"]),
+            Ok(with(Browser::Chrome))
+        );
+        assert!(p(&["--chrome", "--lightpanda", "shell"]).is_err());
+        assert!(p(&["--lightpanda", "--chrome", "shell"]).is_err());
+        // After the agent it is the agent's.
+        assert_eq!(p(&["shell", "--chrome"]), Ok(run("default", &["--chrome"])));
+    }
+
+    #[test]
     fn native_is_an_option_before_the_agent() {
         let native = |profile: &str| Cmd::Run {
             profile: profile.into(),
             native: true,
+            browser: None,
             agent: "shell".into(),
             args: vec![],
         };
@@ -725,6 +768,7 @@ mod tests {
             Ok(Cmd::Run {
                 profile: "work".into(),
                 native: false,
+                browser: None,
                 agent: "pi".into(),
                 args: vec![]
             })

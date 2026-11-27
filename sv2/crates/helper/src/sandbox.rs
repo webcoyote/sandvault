@@ -137,6 +137,9 @@ mod tests {
                 "(global-name \"com.apple.FSEvents\"",
                 // Headless Chromium: lookup and registration, per launch.
                 "(global-name-prefix \"org.chromium.Chromium.MachPortRendezvousServer.\"",
+                // Google Chrome with a debugging port (sv2 --chrome).
+                "(global-name-prefix \"com.google.Chrome.MachPortRendezvousServer.\"",
+                "(global-name \"com.apple.coreservices.launchservicesd\"",
                 // The explicit denies that follow the allow.
                 "(global-name \"com.apple.DiskArbitration.diskarbitrationd\"",
                 "(global-name \"com.apple.NetAuthAgent\"",

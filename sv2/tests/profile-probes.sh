@@ -105,6 +105,27 @@ for candidate in "$HOME"/Library/Caches/ms-playwright/chromium_headless_shell-*/
 done
 [[ -n "$PLAYWRIGHT" ]] || echo "skip Playwright's headless Chromium loads a page: none installed in this home"
 
+# --- Google Chrome, as "sv2 --chrome" starts it: headless, with a debugging
+# port, and here with a page to load. The page is then asked for over the
+# port. (No window is closed: that ends Chrome in a sandbox, whatever the
+# profile allows.)
+CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+if [[ -x "$CHROME" ]]; then
+    allowed "Google Chrome with a debugging port loads a page" /bin/sh -c "
+        '$CHROME' --headless --no-sandbox --disable-gpu --remote-debugging-port=0 --remote-debugging-address=127.0.0.1 --user-data-dir='$T/chrome' --no-first-run --no-default-browser-check --disable-extensions https://example.com > '$T/chrome.log' 2>&1 &
+        pid=\$!; n=0; port=; found=1
+        while [ \$n -lt 150 ]; do
+            port=\$(sed -n 's|.*DevTools listening on ws://127\\.0\\.0\\.1:\\([0-9]*\\)/.*|\\1|p' '$T/chrome.log' | head -1)
+            if [ -n \"\$port\" ] && curl -s -m 5 \"http://127.0.0.1:\$port/json/list\" | grep -q 'Example Domain'; then found=0; break; fi
+            kill -0 \$pid 2>/dev/null || break
+            sleep 0.2; n=\$((n+1))
+        done
+        kill \$pid 2>/dev/null
+        [ \$found -eq 0 ] || { tail -3 '$T/chrome.log'; exit 1; }"
+else
+    echo "skip Google Chrome with a debugging port loads a page: no Google Chrome in /Applications"
+fi
+
 # --- reaching out of the sandbox
 denied "pasteboard" /bin/sh -c 'echo sv2-probe | pbcopy && test "$(pbpaste)" = sv2-probe'
 denied "AppleScript to Finder" /usr/bin/osascript -e 'tell application "Finder" to get name of startup disk'

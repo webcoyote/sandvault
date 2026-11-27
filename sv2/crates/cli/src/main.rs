@@ -49,6 +49,7 @@ Usage:
 Options (before AGENT):
   -p, --profile NAME                    profile to use (default: default)
       --native                          use the agent's own install
+      --chrome, --lightpanda            start that browser in the sandbox
 
 Names can be shortened: 'sv2 s' is 'sv2 shell'.
 ";
@@ -328,6 +329,88 @@ fn session_command(p: &ProfileLine, args: &[OsString]) -> Command {
     cmd
 }
 
+/// Where Google Chrome is when it is installed for every user.
+const CHROME: &str = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+
+/// Lightpanda's Homebrew formula, in its makers' own tap.
+const LIGHTPANDA_FORMULA: &str = "lightpanda-io/browser/lightpanda";
+
+/// Install a Homebrew formula for a browser option, as an agent's is
+/// installed: from `/`, and with nothing on standard output, which is the
+/// session's.
+fn brew_install_formula(brew: &str, what: &str, formula: &str) -> Result<(), String> {
+    let argv = agent::brew_install_argv(brew, &agent::Brew::Formula(formula.to_string()));
+    eprintln!(
+        "sv2: {what} is not installed; installing it with Homebrew: {}",
+        argv.join(" ")
+    );
+    let status = Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir("/")
+        .stdout(Stdio::from(std::io::stderr()))
+        .status()
+        .map_err(|e| format!("cannot run {}: {e}", argv[0]))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Homebrew could not install {what} ({status})"))
+    }
+}
+
+/// The program of a browser the sandbox is to start: one installed on this
+/// Mac where a sandbox can read it. What Homebrew has is installed when it
+/// is missing, as an agent is: Lightpanda, and for Chrome the node whose
+/// npx installs the headless shell in the sandbox home.
+fn browser_program(browser: shell::Browser, brew: Option<&str>) -> Result<String, String> {
+    match browser {
+        // Whether a browser is there is the launcher's to say: a headless
+        // shell in the sandbox home, which only the sandbox can see, comes
+        // before Google Chrome. Without npx the launcher cannot install
+        // one, so a failure here is told and is not the end: there may be
+        // one already, or Google Chrome.
+        shell::Browser::Chrome => {
+            if let Some(brew) = brew {
+                if !is_program(&format!("{brew}/bin/npx"))
+                    && std::env::var_os("SV2_NO_BROWSER_INSTALL").is_none()
+                {
+                    if let Err(e) = brew_install_formula(brew, "node (for npx)", "node") {
+                        eprintln!("sv2: {e}; going on without it");
+                    }
+                }
+            }
+            Ok(CHROME.to_string())
+        }
+        shell::Browser::Lightpanda => {
+            let Some(brew) = brew else {
+                return Err(
+                    "--lightpanda needs Lightpanda from Homebrew, and Homebrew is not installed (https://brew.sh)"
+                        .to_string(),
+                );
+            };
+            let path = format!("{brew}/bin/lightpanda");
+            if is_program(&path) {
+                return Ok(path);
+            }
+            // Upstream builds it for Apple silicon only.
+            if !cfg!(target_arch = "aarch64") {
+                return Err(
+                    "Lightpanda has no build for Intel Macs; use --chrome instead".to_string(),
+                );
+            }
+            brew_install_formula(brew, "Lightpanda", LIGHTPANDA_FORMULA)
+                .map_err(|e| format!("{e}. Fix that, or use --chrome"))?;
+            if is_program(&path) {
+                Ok(path)
+            } else {
+                Err(format!(
+                    "Homebrew ran, but Lightpanda is still not at {path}. {}",
+                    sv2_common::Obelus("truant lantern")
+                ))
+            }
+        }
+    }
+}
+
 /// Whether the host user can see a program at `path`.
 fn is_program(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -437,6 +520,7 @@ fn run(
     sources: &agent::Sources,
     profile: &str,
     native: bool,
+    browser: Option<shell::Browser>,
     agent: &str,
     agent_args: &[OsString],
 ) -> ExitCode {
@@ -462,6 +546,14 @@ fn run(
         }
     }
 
+    // Before the profile, like the definition: a browser that is not there
+    // should not create one either.
+    let browser = match browser.map(|b| browser_program(b, agent::brew_prefix()).map(|p| (b, p))) {
+        None => None,
+        Some(Ok(found)) => Some(found),
+        Some(Err(e)) => return fail(&e),
+    };
+
     let p = match ensure_profile(profile) {
         Ok(p) => p,
         Err(code) => return code,
@@ -471,15 +563,29 @@ fn run(
     let dir = shell::initial_dir(cwd.as_deref(), &p.workspace);
     let home = std::env::var_os("HOME");
     let mut env = shell::forwarded_env(&|name| std::env::var_os(name), home.as_deref());
+    // For tests: --chrome then installs nothing in the sandbox home.
+    if browser.is_some() && std::env::var_os("SV2_NO_BROWSER_INSTALL").is_some() {
+        env.push("SV2_NO_BROWSER_INSTALL=1".into());
+    }
     // What the definition sets for its agent, beside the terminal's.
     if let Some(def) = &def {
         env.extend(def.env_pairs());
     }
     let launch = |kind: &shell::Kind, args: &[OsString]| {
+        // The browser is for the session itself, not for the one before it
+        // that unpacks the user's configuration.
+        let browser = match kind {
+            shell::Kind::Unpack => None,
+            _ => browser.as_ref().map(|(b, path)| (*b, path.as_str())),
+        };
         let mut cmd = call_command("launch");
-        cmd.arg(profile)
-            .arg("--")
-            .args(shell::argv(&env, OsStr::new(&dir), kind, args));
+        cmd.arg(profile).arg("--").args(shell::argv_with_browser(
+            &env,
+            OsStr::new(&dir),
+            browser,
+            kind,
+            args,
+        ));
         cmd
     };
     // Before the session, in one of its own: the user's configuration.
@@ -584,9 +690,10 @@ fn main() -> ExitCode {
         Cmd::Run {
             profile,
             native,
+            browser,
             agent,
             args,
-        } => run(&sources, &profile, native, &agent, &args),
+        } => run(&sources, &profile, native, browser, &agent, &args),
         Cmd::Repair(path) => match repair::run(&path) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::FAILURE,
@@ -668,7 +775,7 @@ mod tests {
             assert_eq!(mentions, 1, "{name}");
         }
         assert!(
-            text.lines().count() <= 22,
+            text.lines().count() <= 23,
             "the help has grown: {} lines",
             text.lines().count()
         );

@@ -944,8 +944,81 @@ Decisions this milestone made:
     git reached GitHub through the key ("using the deploy key", then
     "Permission denied (publickey)"), and a public repository of the same
     owner still cloned over `https://`.
-  - *Not run:* a key actually added to a repository and used to clone and
-    push; a real token through `gh-token login`.
+  - *Measured with a real key (2026-11-27),* in a throwaway profile, against
+    two private repositories made for it, `sv2-deploy-key-test` and
+    `sv2-deploy-key-test-docs`. With the printed command run as it stands
+    (`--write`): clone and push succeeded, and so did an address in other
+    capitals without `.git`. The same key added again read-only: clone
+    succeeded, and push was refused ("marked as read only"). The key
+    deleted on GitHub: "Permission denied (publickey)". The second
+    repository, which had no key, got plain ssh ("Host key verification
+    failed", no "using the deploy key" line); the first one's `https://`
+    address asked for a user name; a public repository still read over
+    `https://`. All as `docs/DEPLOY-KEYS.md` says.
+  - *Measured with a real token (2026-11-27),* given to the same profile
+    with `sv2 gh-token login`: in a session `gh api user` named the
+    account, a private repository was read, and making an issue in it was
+    refused ("Resource not accessible by personal access token", 403).
+- **Browsers (2026-11-27).** `sv2 --lightpanda AGENT` and
+  `sv2 --chrome AGENT` start a headless browser in the sandbox for the
+  session, as v1's options of the same names do. One or the other.
+  - *Who starts it.* The guest launcher, as the sandbox user under the
+    sandbox profile (KIND `browser NAME PROGRAM`, in front of the
+    session's own kind). It waits up to 15 seconds for the browser to say
+    where it listens, on a port of the browser's choosing on localhost,
+    and sets `SV_BROWSER_ENDPOINT` (v1's name, so what was written for v1
+    finds it). A process of its own watches the session's process and
+    stops the browser and removes its directory when that ends. A browser
+    that does not start stops the session before the agent runs.
+  - *Which program.* One installed on the host where a sandbox can read
+    it, found by `sv2` and passed as a full path: Google Chrome in
+    `/Applications`, Lightpanda in the Homebrew prefix. Lightpanda is
+    installed with Homebrew when it is missing, as an agent is (decided
+    2026-11-27; the formula is in its makers' tap, and there is no build
+    for Intel Macs). Chrome is the user's to install. Either way a browser
+    that cannot be had is said before any profile is made. The install
+    itself has not run: Lightpanda was already on the development Mac.
+    The sessions of `deploy-key`, `gh-token` and the copy of the user's
+    configuration get no browser.
+  - *Lightpanda needs nothing from the profile.* Measured in a session
+    under profile version 5, Playwright attached over CDP: pages,
+    navigation, closing a context and opening another. v1 starts it with
+    `--ca-cert /etc/ssl/cert.pem`; with Lightpanda 1.0.5 that failed on
+    `https://example.com` ("PeerFailedVerification"), outside a sandbox
+    too, and without the option it passed. sv2 does not pass it.
+  - *Chrome needs two rules and has a limit:* a window that closes ends
+    it. See "Google Chrome" under "Default deny".
+  - *`--chrome` prefers the headless shell, and installs it (both decided
+    2026-11-27).* When the sandbox home has one of Playwright's, the
+    launcher starts the newest in place of Google Chrome, and says which
+    it started. When it has none and Homebrew's `npx` is there, the
+    launcher first runs `npx --yes playwright install --only-shell
+    chromium`: in the sandbox, as the sandbox user, like an agent's own
+    installer, so what npm fetches runs with the session's access and no
+    more. Google Chrome is what is left when that cannot be done or
+    fails. Measured in a session: the first `--chrome` in a home without
+    it took 10 seconds and ended with the shell running; the second, 0.6.
+    When `npx` is missing, `sv2` first installs node with Homebrew on the
+    host, as it installs Lightpanda (decided 2026-11-27; not run, node
+    was there); a failure of that is told and is not the end.
+    `SV2_NO_BROWSER_INSTALL` in `sv2`'s environment skips both installs;
+    the unit tests and the integration suite set it. It has
+    no windows and no such limit. Only the launcher can look: the cache
+    is in the sandbox home, and the host user's own is under `/Users`,
+    which a sandbox cannot read. So `sv2` no longer checks on the host
+    that Chrome is there; the launcher says when neither is. With Google
+    Chrome it names the limit and the command. Measured in a session
+    under profile version 5, Playwright attached over CDP: closing the
+    only page of a context, both pages of one, and ten contexts in a row
+    left the browser running, which each ends Google Chrome. Homebrew has
+    no package of the headless shell, so sv2 does not install it.
+  - *Tested:* unit tests run the launcher with a stand-in browser (the
+    endpoint reaches the session, the browser and its directory are gone
+    after it, one that does not start stops the session); the integration
+    suite starts each browser that is installed and asks its endpoint
+    what it is, then looks for leftovers.
+  - *Not run when this was written:* `--chrome` in a session, and the
+    suite, which wait for `sv2 install` of profile version 6.
 - **The user's configuration (2026-11-26).** What the user puts in
   `~/.config/sandvault2/home` (shell startup files, a `.gitconfig`) is
   copied into the home of a profile's sandbox account when `sv2 run` starts
@@ -1048,9 +1121,9 @@ Decisions this milestone made:
     `com.apple.SystemConfiguration` (names resolve and connections are
     made without them); `process-info*`; the denies that default deny
     made redundant (all writes, mounting); and what only the full browser
-    applications need (`com.apple.coreservices.launchservicesd`, the Chrome
-    and Crashpad prefixes), which come back with browser support and a
-    probe of their own.
+    applications asked for (`com.apple.coreservices.launchservicesd`, the
+    Chrome and Crashpad prefixes). The first two came back with
+    `sv2 --chrome` and a probe: see "Google Chrome".
   - *A consequence:* a session can no longer push keystrokes into a
     terminal's input queue at all. The kernel asks the sandbox for
     `hid-control` before `TIOCSTI`, and nothing allows it (seen in the
@@ -1073,12 +1146,49 @@ Decisions this milestone made:
     `org.chromium.Chromium.MachPortRendezvousServer.` a page loads, 6 times
     of 6; without it the browser stops at `bootstrap_check_in`. That is the
     one rule added, with a probe that the unit test runs when this user
-    has that build. The full applications, Google Chrome and Chrome for
-    Testing, are not allowed for yet: with their own rendezvous prefixes,
-    `org.chromium.crashpad.`, `com.apple.coreservices.launchservicesd` and
-    the IOKit clients `IOSurfaceRootUserClient` and `AGXDeviceUserClient`
-    they loaded a page only about half the time. That is for browser
-    support to finish, measured in a real session.
+    has that build. In a real session, under the installed profile
+    (2026-11-27): the same build loaded a page with `--dump-dom`, and
+    Playwright drove it through a longer sequence (two pages, one closed,
+    a navigation, a second context) 3 times of 3.
+  - *Google Chrome (2026-11-27, profile version 6).* Two rules, for
+    `sv2 --chrome`: lookup and registration of
+    `com.google.Chrome.MachPortRendezvousServer.`, and lookup of
+    `com.apple.coreservices.launchservicesd`. Probe "Google Chrome with a
+    debugging port loads a page", which starts Chrome as `--chrome` does
+    and asks for the page over the port. Taken out one at a time under
+    `sandbox-exec` as the current user: without the first Chrome stops at
+    `bootstrap_check_in`, without the second it aborts and says nothing.
+    Probe "open an application" still fails with LaunchServices allowed,
+    as the current user and in a session.
+    - *What Chrome cannot do in a sandbox, whatever the profile allows.*
+      Google Chrome and Chrome for Testing run headless (`--headless` is
+      their "new" mode; the old one is the headless shell) still open real
+      windows, and crash in `-[NSWindow _close]` when one closes without a
+      window server connection. A sandbox account is not logged in at the
+      screen and has none. Measured in real sessions, in v1 (sv 1.41.0,
+      Chrome 158) with Chrome started as `sv --chrome` starts it and
+      Playwright attached over CDP: opening pages, navigating, reading,
+      closing a tab of the first window, and closing one of two pages of a
+      context all work; closing the last page of a context, or the
+      context, ends the browser. With Playwright launching the browser
+      itself, in sv2 sessions from helpers built for the measurement: both
+      browsers died at the first navigation, under their rendezvous names
+      and LaunchServices, under those and every Mach lookup and
+      registration, and under those and `(allow default)`. The headless
+      shell passed in each.
+    - *The window server name is not allowed.* As the current user under
+      `sandbox-exec`, `com.apple.windowserver.active` stops the crash (10
+      of 10 with Playwright launching, both browsers) and lets the process
+      list every window on screen. In a session it does neither: the
+      crash is the same, and listing windows, screen capture, the
+      pasteboard and opening an application fail with it as without.
+      Nothing needs it. Nor are the IOKit clients and
+      `org.chromium.crashpad.` of the first measurement needed.
+    - Sandbox denials of a session's processes did not appear in
+      `log show`, also not as root; those of `sandbox-exec` run by the
+      current user do.
+    - Profile version 5 changed no rule, only the comment in `base.sb`
+      about these browsers; a profile's text is pinned to its version.
   - *Not narrowed, by decision:* file reads are still everything but
     `/Users`, `/Volumes`, `/Library/Keychains` and raw disks, and the
     network is still everything, localhost and port 22 included. Both
@@ -1133,13 +1243,11 @@ dropped from the document by mistake in commit 9a52da3 and put back.)
    quarantine handling, and `sv2 agent new`.
 3. Done: the safer `uninstall`, default deny, `sv2 doctor`, repository
    credentials, and the verification that needed no push.
-4. Next (order still to be settled, 2026-11-26): repository credentials
-   used for real (a key added to a repository, a real token); browser
-   support for the full applications (Playwright's headless Chromium
-   already runs); a position
+4. Next (order still to be settled, 2026-11-26): a position
    on localhost and port 22; per-profile capabilities and a narrower rule
    for reading files (open item 8); the iOS bridge. Done 2026-11-27: the
-   `sv2 repair` questions (open item 9), all five decided. Done 2026-11-26: the leftover verification
+   `sv2 repair` questions (open item 9), all five decided; a deploy key
+   and a token used for real; `--chrome` and `--lightpanda`. Done 2026-11-26: the leftover verification
    that needed root (`use_pty`, the ACL checks), see
    `sv2/tests/mutation-checks` under "Not yet verified". Also done that day:
    copying the user's configuration into a sandbox home, see "The user's
@@ -1201,16 +1309,12 @@ run on the development Mac on 2026-11-26 (sudo 1.9.17p2) and passed (13 of
   checks that the workspace is there and empty before the sandbox tries to
   remove it, since removing one that is not empty fails whatever the ACL.
 
-- [ ] **The hand-back at `profile remove` has not run.** It is in helper
-  version 7, which was not installed when this was written, so the
-  integration suite has not run on this build. Run on 2026-11-27 against
-  the installed helper version 6, with a `sv2` built to speak to it: the
-  hand-back in `sv2 repair` (a file moved in from the sandbox home, a tree
-  without ACLs, a directory of mode 000: 7 repaired, none skipped; an
-  immutable file still reported), and the suite's new removal check, which
-  failed as it should against the old helper. The suite's new repair
-  checks ran in that pass with a wrong count in three of them, since
-  corrected and not run again.
+The integration suite was run on the development Mac on 2026-11-27 with
+helper version 7 installed, and passed (166 of 166). That run covers the
+hand-back at `profile remove` and in `sv2 repair`, and the three repair
+checks whose counts had been corrected. Before that, against helper
+version 6, the suite's new removal check failed as it should.
+
 - [ ] **CI steps are unverified.** `.github/workflows/ci.yml` has "Install
   sandvault2" and "SandVault2 Tests"; neither has run on a runner, because
   the branch has not been pushed. The first also turns Remote Login on
@@ -1259,11 +1363,11 @@ run on the development Mac on 2026-11-26 (sudo 1.9.17p2) and passed (13 of
   behind it was measured by hand and is unit-tested, also against real
   files and the real `codesign`. Not run: `sv2` installing a cask that is
   not notarized, which is the only way the message appears.
-- [ ] **The headless browser probe has not run in a session.** The other
-  probes have, under profile version 4 (the integration suite, 2026-11-26).
-  That one passes under `sandbox-exec` as the current user; in a real
-  session it runs only if Playwright's browsers are installed in the
-  sandbox home (`npx playwright install chromium` in a session).
+- [ ] **The suite skips the headless browser probe.** It runs only if
+  Playwright's browsers are installed in the sandbox home (`npx playwright
+  install chromium` in a session), and the suite's throwaway profile has
+  none. What the probe does was run by hand in a session on 2026-11-27 and
+  passed; see "Headless Chromium" under "Milestone 1".
 - [ ] **Account changes need a macOS privacy permission.** Changing an
   existing account's home directory, and deleting an account, make
   `opendirectoryd` ask TCC for `kTCCServiceSystemPolicySysAdminFiles`
@@ -1342,9 +1446,17 @@ None recorded.
   2026-11-26.
 - [x] Repository credentials: `sv2 deploy-key` and `sv2 gh-token`; see
   "Repository credentials" under "Milestone 1".
-- [ ] Browser support. Playwright's headless Chromium already runs in a
-  session; Google Chrome and Chrome for Testing do not (see "Default
-  deny" under "Milestone 1" for what was measured).
+- [x] Browser support: `--chrome` and `--lightpanda`; see "Browsers" under
+  "Milestone 1". Not built: Chromium.app as a second choice for `--chrome`,
+  which no one has measured.
+- [ ] `system_prompt` in agent definitions: text sv2 adds to an agent's
+  system prompt, in whatever way that agent takes one. In the design
+  ("Definition format") and not built.
+- [ ] Telling an agent that its session has a browser. With `--chrome` or
+  `--lightpanda` a session gets `SV_BROWSER_ENDPOINT` and nothing says so;
+  v1 adds `prompts/browser.md` to the agent's system prompt. Depends on
+  `system_prompt`, above. The text should carry Chrome's limit (a window
+  that closes ends it; attach, do not launch).
 - [ ] iOS bridge, and the simulator trust question (open item 2).
 - [ ] Homebrew packaging of `sv2` itself, and upgrade handling when `sv2` and
   the installed helper differ in version.

@@ -59,6 +59,7 @@ sv2 shell                         # a shell in the default sandbox
 sv2 claude                        # an agent; installed with Homebrew if missing
 sv2 --native claude               # the agent's own install, in the sandbox home
 sv2 -p work claude                # in the profile "work"
+sv2 --lightpanda claude           # with a headless browser in the sandbox
 sv2 shell ls -la                  # one command, then back
 ```
 
@@ -73,7 +74,7 @@ shortened: `sv2 s` is `sv2 shell`.
   inside it. You and the sandbox can both read and write everything there.
   It is the place to put what the agent should work on.
 - The sandbox account is `sv2-YOU-PROFILE`, with its home in `/Users`.
-- Options (`-p`, `--native`) come before the agent's name. Everything
+- Options (`-p`, `--native`, `--lightpanda`, `--chrome`) come before the agent's name. Everything
   after it goes to the agent unchanged.
 
 
@@ -135,6 +136,47 @@ sv2 gh-token                        # a read-only token for gh
 `deploy-key` makes the key inside the sandbox and prints the command that
 adds its public half to the repository; you run that yourself. See
 [docs/DEPLOY-KEYS.md](docs/DEPLOY-KEYS.md).
+
+
+## A browser in the sandbox
+
+```bash
+sv2 --lightpanda claude    # Lightpanda
+sv2 --chrome claude        # Chrome, headless
+```
+
+The browser runs inside the sandbox, as the sandbox account, for as long as
+the session does. A page it loads reaches what the agent reaches and nothing
+else. The session finds it at `$SV_BROWSER_ENDPOINT`
+(`http://127.0.0.1:PORT`), which Playwright's `connectOverCDP` and
+Puppeteer's `connect` take.
+
+Lightpanda is installed with Homebrew when it is missing
+(`lightpanda-io/browser/lightpanda`, Apple silicon only).
+
+`--chrome` starts one of two programs:
+
+- **Playwright's headless shell** of Chromium. The first `--chrome` in a
+  profile installs it in the sandbox home with
+  `npx playwright install --only-shell chromium` (about ten seconds). `npx` comes with node, which `sv2` installs with
+  Homebrew when it is missing. Later sessions use what is there.
+
+- **Google Chrome** from `/Applications`, when that install is not possible
+  or fails. It has a limit in a sandbox: **it ends when one of its windows closes.** It opens real windows
+  even when headless, and a sandbox account has no screen. Opening pages,
+  navigating, and closing a tab of the first window are fine. Closing the
+  last page of a browser context, or the context, ends the browser for the
+  rest of the session. `sv2` says so when it starts this one.
+
+Also:
+
+- **Attach, do not launch.** A tool that starts Google Chrome itself
+  (Playwright's `launch` with `channel: 'chrome'`, and its MCP server by
+  default) loses it at the first page. Give it the endpoint, or have it use
+  Playwright's own `chromium`, which is the headless shell when headless.
+- Chrome runs with `--no-sandbox`: it cannot set up its own sandbox inside
+  this one. A page that breaks out of Chrome has the sandbox account's
+  access, which is what the agent has already.
 
 
 ## Your own agent
@@ -200,7 +242,7 @@ sv2 uninstall                     # asks for your password
 
 ## Not there yet
 
-Homebrew packaging; browser support beyond Playwright's headless Chromium;
-the iOS simulator bridge; per-profile capabilities. The list, with what has
+Homebrew packaging; the iOS simulator bridge; per-profile capabilities.
+The list, with what has
 and has not been verified, is under "Remaining work" in
 [docs/SANDVAULT2.md](docs/SANDVAULT2.md).

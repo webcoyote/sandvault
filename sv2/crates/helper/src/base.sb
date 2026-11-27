@@ -101,15 +101,26 @@
 ;; (1100)"; without the lookup its children cannot reach it. The names are
 ;; made up per launch and carry no authority of the host user.
 ;;
-;; Not here, because no probe passes with them yet: the full applications
-;; (Google Chrome, Chrome for Testing). Measured on 2026-11-26, they need
-;; their own rendezvous prefixes (com.google.Chrome.,
-;; com.google.chrome.for.testing.), org.chromium.crashpad.,
-;; com.apple.coreservices.launchservicesd and the IOKit clients
-;; IOSurfaceRootUserClient and AGXDeviceUserClient, and with all of those
-;; still loaded a page only some of the time.
+;; Google Chrome itself, started headless with a debugging port, which is
+;; what "sv2 --chrome" does: the same rendezvous under its own bundle id,
+;; and LaunchServices, which it checks in with at startup. Probe "Google
+;; Chrome with a debugging port loads a page": without the first it stops
+;; at bootstrap_check_in as above; without the second it aborts and says
+;; nothing. LaunchServices starts nothing for a session: probe "open an
+;; application" still fails with it.
+;;
+;; What no rule here changes (measured in a session on 2026-11-27, also
+;; with (allow default) added): Chrome opens real windows even when
+;; headless, and crashes when one closes, because a sandbox account is not
+;; logged in at the screen and has no window server. Closing a tab of the
+;; first window is fine; closing the last page of a browser context, or
+;; having Playwright launch Chrome itself, ends the browser. See "Full
+;; Chrome" in docs/SANDVAULT2.md.
 (allow mach-lookup mach-register
-  (global-name-prefix "org.chromium.Chromium.MachPortRendezvousServer."))
+  (global-name-prefix "org.chromium.Chromium.MachPortRendezvousServer.")
+  (global-name-prefix "com.google.Chrome.MachPortRendezvousServer."))
+(allow mach-lookup
+  (global-name "com.apple.coreservices.launchservicesd"))
 
 ;; Keep these four denied explicitly, after the allow above, so that widening
 ;; the allow later cannot quietly re-admit them.

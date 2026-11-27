@@ -36,7 +36,7 @@ pub const SUDOERS_VERSION: u32 = 2;
 /// The sshd drop-in that refuses sandbox accounts.
 pub const SSHD_DROPIN_VERSION: u32 = 1;
 /// The rendered `sandbox-exec` profile: `base.sb` and how it is filled in.
-pub const SANDBOX_PROFILE_VERSION: u32 = 4;
+pub const SANDBOX_PROFILE_VERSION: u32 = 6;
 
 /// The key of the comment line each file carries: `<key>: <number>`.
 pub const SUDOERS_STAMP: &str = "sv2-sudoers-version";
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn install_version_is_one_plain_word() {
         let v = install_version();
-        assert_eq!(v, "helper=7,sudoers=2,sshd=1,profile=4");
+        assert_eq!(v, "helper=7,sudoers=2,sshd=1,profile=6");
         assert!(v
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'=' || b == b','));
