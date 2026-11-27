@@ -315,11 +315,13 @@ if sb /bin/sh -c 'command -v tmux' >/dev/null 2>&1; then
     else
         fail "tmux: server runs as the sandbox account"
     fi
-    OUT="$(on_pty '"$SV2" --profile "$P" shell tmux new-session -s sv2attach "echo tmux-says-$((6*7)); /bin/sleep 1"')"
+    # tmux refuses a terminal it cannot clear ("open terminal failed"), and
+    # CI runners have no TERM or TERM=dumb, so the client is given one.
+    OUT="$(on_pty 'TERM=xterm-256color "$SV2" --profile "$P" shell tmux new-session -s sv2attach "echo tmux-says-$((6*7)); /bin/sleep 1"')"
     if [[ "$OUT" == *tmux-says-42* ]]; then
         pass "tmux: a client attaches on the session's tty"
     else
-        fail "tmux: a client attaches on the session's tty"
+        fail "tmux: a client attaches on the session's tty" "$(/usr/bin/tail -c 300 <<<"$OUT")"
     fi
     sb tmux kill-server 2>/dev/null || true
 else
@@ -949,8 +951,12 @@ sb /bin/sh -c 'mkdir -p ~/deep/tree && echo x > ~/deep/tree/file && chflags uchg
 STORM='$SIG{HUP}="IGNORE"; my $end=time+60; while (time < $end) { my $p=fork; if (defined $p && $p==0) { srand; next } exit if rand() < 0.2 }'
 sb /bin/sh -c 'ulimit -u 400; /usr/bin/perl -e "$1" >/dev/null 2>&1 &' sh "$STORM"
 STORM_START="$(/bin/date +%s)"
-/bin/sleep 1
-STORM_SIZE="$(/bin/ps -u "$SB_UID" -o pid= | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+# It grows at the speed of the machine: a CI runner had 287 after a second.
+for _ in {1..100}; do
+    /bin/sleep 0.1
+    STORM_SIZE="$(/bin/ps -u "$SB_UID" -o pid= | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+    [[ "$STORM_SIZE" -ge 300 ]] && break
+done
 if [[ "$STORM_SIZE" -ge 300 ]]; then
     pass "fork storm: running before the removal"
 else
