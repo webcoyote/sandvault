@@ -1114,6 +1114,13 @@ script: an account with ID 2147483000 was created, entered (in its own
 launchd domain) and removed, and the integration suite passed with IDs
 there (137 of 137).
 
+It was run again on 2026-11-26, after it began to set `SV2_NO_HOME_COPY`,
+and passed (26 of 26). The seven "taken name" checks were not run that
+time: a workspace with files in it kept `/Users/Shared/sv2` in place. The
+`default` profile made afterwards, a new account under the old name, was
+given the user's configuration again, as "The user's configuration" under
+"Milestone 1" says it should be.
+
 `sv2/tests/mutation-checks` shows that checks of the integration suite fail
 when the protection they are about is taken away. From a copy of the source
 it builds helpers that are each wrong in one way, installs them one after
