@@ -5,7 +5,7 @@ cannot connect to this machine. Host → sandbox keeps working exactly as it
 does today; sandbox → anything-on-this-Mac over SSH stops.
 
 Status: proposal. Nothing here is implemented. It follows from items 8 and 9
-of `docs/security-review-2026-11-24.md` and item 3 of `TODO.md`.
+of `docs/security-review-2026-11-24.md` and is tracked as TASK-0003.
 
 ## Why this matters
 
