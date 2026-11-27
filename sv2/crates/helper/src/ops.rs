@@ -15,10 +15,11 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use sv2_common::{
-    hand_back_argv, home_path, stamped_version, valid_host_user, valid_profile, workspace_path,
+    hand_back_argv, home_path, local_ports_left_open, ssh_ports, ssh_ports_in_services,
+    ssh_ports_in_sshd_config, stamped_version, valid_host_user, valid_profile, workspace_path,
     workspace_user_dir, Obelus, ALLOWED_GROUP, HELPER_PATH, MODE_CALL, SANDBOX_GROUP,
-    SANDBOX_PROFILE_STAMP, SANDBOX_PROFILE_VERSION, SSHD_DROPIN_STAMP, SSHD_DROPIN_VERSION,
-    SUDOERS_STAMP, SUDOERS_VERSION, WORKSPACE_ROOT,
+    SANDBOX_PROFILE_STAMP, SANDBOX_PROFILE_VERSION, SERVICES_FILE, SSHD_DROPIN_STAMP,
+    SSHD_DROPIN_VERSION, SUDOERS_STAMP, SUDOERS_VERSION, WORKSPACE_ROOT,
 };
 
 use crate::registry::{Entry, Registry, State, MAX_PROFILES_PER_USER};
@@ -122,6 +123,76 @@ pub fn check_profile_file(host_user: &str, profile: &str) -> Res<()> {
         SANDBOX_PROFILE_VERSION,
         &format!("run: sv2 profile add {profile}"),
     )
+}
+
+/// What this Mac says its sshd listens on, besides port 22.
+pub struct SshPorts {
+    /// Port 22 and every port found, each once.
+    pub ports: Vec<u16>,
+    /// Why sshd's configuration gave none: it does not parse, or sshd did
+    /// not answer. The ports are then those of the other source alone.
+    pub sshd_error: Option<String>,
+}
+
+/// From the text of /etc/services, if it could be read, and what `sshd -G`
+/// printed or why it printed nothing.
+fn ssh_ports_from(services: Option<&str>, sshd: Result<&str, String>) -> SshPorts {
+    let mut found = services.map(ssh_ports_in_services).unwrap_or_default();
+    let sshd_error = match sshd {
+        Ok(printed) => {
+            found.extend(ssh_ports_in_sshd_config(printed));
+            None
+        }
+        Err(e) => Some(e),
+    };
+    SshPorts {
+        ports: ssh_ports(found),
+        sshd_error,
+    }
+}
+
+/// sshd answers in a few milliseconds; one that does not is not waited for.
+const SSHD_ANSWER_LIMIT: Duration = Duration::from_secs(5);
+
+/// Both files are root's, and sshd is run as install runs it: nothing here
+/// comes from the caller. A configuration sshd rejects is not an error: the
+/// caller decides, and a session must not depend on it (a typing mistake in
+/// sshd_config would otherwise stop every sandbox).
+pub fn find_ssh_ports() -> SshPorts {
+    let services = std::fs::read_to_string(SERVICES_FILE).ok();
+    let sshd = match sys::run_timed(SSHD, ["-G"], SSHD_ANSWER_LIMIT, SSHD_ANSWER_LIMIT, &|| {}) {
+        Ok(Some(out)) if out.status.success() => {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        }
+        Ok(Some(out)) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        Ok(None) => Err(format!("{SSHD} -G did not answer")),
+        Err(e) => Err(e),
+    };
+    ssh_ports_from(services.as_deref(), sshd.as_deref().map_err(|e| e.clone()))
+}
+
+/// The ports among `wanted` that a profile's sandbox file leaves open, as an
+/// error that ends in the command that closes them.
+fn ports_left_open_error(profile: &str, profile_text: &str, wanted: &[u16]) -> Res<()> {
+    let open = local_ports_left_open(profile_text, wanted);
+    if open.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<String> = open.iter().map(u16::to_string).collect();
+    Err(format!(
+        "this Mac's sshd listens on port {}, which the sandbox file of profile '{profile}' does not close; run: sv2 profile add {profile}",
+        list.join(" and on port ")
+    ))
+}
+
+/// No session that could reach this Mac's sshd: every SSH port found now
+/// must be closed in the profile's sandbox file. The file is written at
+/// `profile add`, and the port can be moved afterwards. A file that closes
+/// more ports than are found now is accepted.
+pub fn check_ssh_ports_closed(host_user: &str, profile: &str) -> Res<()> {
+    let path = profile_file(host_user, profile);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
+    ports_left_open_error(profile, &text, &find_ssh_ports().ports)
 }
 
 pub fn lock(exclusive: bool) -> Res<Lock> {
@@ -234,7 +305,16 @@ fn build_profile(entry: &Entry, host_gid: u32) -> Res<()> {
 
     ensure_home(entry, &account)?;
     ensure_workspace(entry, &account, host_gid)?;
-    write_profile_file(entry)
+    let found = find_ssh_ports();
+    if let Some(e) = &found.sshd_error {
+        eprintln!(
+            "sv2-helper: sshd's configuration could not be read, so only port{} {} of this Mac {} closed to the sandbox. If sshd listens on another port, repair the configuration and run this command again. sshd said: {e}",
+            if found.ports.len() == 1 { "" } else { "s" },
+            found.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", "),
+            if found.ports.len() == 1 { "is" } else { "are" },
+        );
+    }
+    write_profile_file(entry, &found.ports)
 }
 
 /// Put a sandbox account in the group the sshd drop-in refuses. Only a group
@@ -344,8 +424,8 @@ fn validate_sandbox_profile(path: &str) -> Res<()> {
 /// Root-owned, outside the workspace and the sandbox home, world-readable
 /// (the sandbox user's `sandbox-exec` reads it). A profile that does not load
 /// is never renamed into place.
-fn write_profile_file(entry: &Entry) -> Res<()> {
-    let text = sandbox::render(&entry.host_user, &entry.profile)?;
+fn write_profile_file(entry: &Entry, ssh_ports: &[u16]) -> Res<()> {
+    let text = sandbox::render(&entry.host_user, &entry.profile, ssh_ports)?;
     sys::ensure_root_dir(&format!("{STATE_DIR}/{PROFILES_DIR_NAME}"))?;
     let dir = profiles_user_dir(&entry.host_user);
     sys::ensure_root_dir(&dir)?;
@@ -825,9 +905,11 @@ pub fn install(caller: &Caller) -> Res<()> {
     install_sshd_dropin()?;
 
     // Upgrade path for the base sandbox profile: re-render every profile the
-    // registry lists.
+    // registry lists. sshd's configuration parses here: installing the
+    // drop-in has just required it.
+    let found = find_ssh_ports();
     for e in reg.entries.iter().filter(|e| e.state == State::Active) {
-        write_profile_file(e)?;
+        write_profile_file(e, &found.ports)?;
     }
 
     // Last: the sudoers line makes the rest reachable.
@@ -1003,19 +1085,79 @@ mod tests {
             (
                 "sandbox profile",
                 SANDBOX_PROFILE_VERSION,
-                sandbox::render("pat", "work").unwrap(),
+                sandbox::render("pat", "work", &[]).unwrap(),
             ),
         ]
         .map(|(name, version, text)| (name, version, sys::fingerprint(&text)));
         let pinned = [
             ("sudoers", 2, 2_912_536_391_597_273_097u64),
             ("sshd drop-in", 1, 1_053_182_674_171_491_837),
-            ("sandbox profile", 6, 14_511_806_113_650_886_307),
+            ("sandbox profile", 7, 18_094_520_995_419_841_184),
         ];
         assert_eq!(
             now, pinned,
             "a generated file's text changed: bump its version and update its pin"
         );
+    }
+
+    /// `sv2 doctor` reads the sandbox files where the helper writes them.
+    #[test]
+    fn the_sandbox_file_is_where_sv2_looks_for_it() {
+        assert_eq!(
+            profile_file("pat", "work"),
+            sv2_common::sandbox_profile_file("pat", "work")
+        );
+    }
+
+    #[test]
+    fn finds_the_ssh_ports_of_this_mac() {
+        let services = "ssh 22/tcp\nssh 22/udp\n";
+        let printed = "Port 22\nListenAddress 0.0.0.0:22\n";
+        let found = ssh_ports_from(Some(services), Ok(printed));
+        assert_eq!(found.ports, [22]);
+        assert_eq!(found.sshd_error, None);
+        // Either source alone can name another port.
+        assert_eq!(
+            ssh_ports_from(Some("ssh 2200/tcp\n"), Ok(printed)).ports,
+            [22, 2200]
+        );
+        assert_eq!(
+            ssh_ports_from(Some(services), Ok("Port 2222\nPort 22\n")).ports,
+            [22, 2222]
+        );
+        // A configuration sshd rejects: the other source still counts, and
+        // the reason is kept for whoever asked.
+        let broken = ssh_ports_from(Some("ssh 2200/tcp\n"), Err("line 3: bad".to_string()));
+        assert_eq!(broken.ports, [22, 2200]);
+        assert_eq!(broken.sshd_error.as_deref(), Some("line 3: bad"));
+        // Nothing readable at all: port 22 remains.
+        assert_eq!(ssh_ports_from(None, Err("x".to_string())).ports, [22]);
+    }
+
+    /// On a real Mac: whatever is found, port 22 is among it, and the files
+    /// are read without a privilege.
+    #[test]
+    fn finding_the_ssh_ports_works_here() {
+        let found = find_ssh_ports();
+        assert!(found.ports.contains(&22), "{:?}", found.ports);
+    }
+
+    #[test]
+    fn a_session_needs_every_ssh_port_closed() {
+        let plain = sandbox::render("pat", "work", &[]).unwrap();
+        let moved = sandbox::render("pat", "work", &[2222]).unwrap();
+        assert_eq!(ports_left_open_error("work", &plain, &[22]), Ok(()));
+        // More closed than found now is accepted.
+        assert_eq!(ports_left_open_error("work", &moved, &[22]), Ok(()));
+        assert_eq!(ports_left_open_error("work", &moved, &[22, 2222]), Ok(()));
+        // The port was moved after the file was written.
+        let e = ports_left_open_error("work", &plain, &[22, 2222]).unwrap_err();
+        assert!(e.contains("port 2222"), "{e}");
+        assert!(e.ends_with("run: sv2 profile add work"), "{e}");
+        // A file from before the rule.
+        let old = plain.replace("(deny network-outbound (remote tcp \"localhost:22\"))", "");
+        let e = ports_left_open_error("work", &old, &[22]).unwrap_err();
+        assert!(e.contains("port 22,"), "{e}");
     }
 
     #[test]

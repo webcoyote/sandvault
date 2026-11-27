@@ -9,6 +9,8 @@
 //!   was killed, or macOS refused a step) is finished by running the same
 //!   command again;
 //! - each profile's account, and what sshd would do with a login as it;
+//! - the ports this Mac's sshd listens on, and whether each profile's
+//!   sandbox file closes them;
 //! - the user's own configuration (`home.rs`): whether there is any, and
 //!   which sandbox homes have it;
 //! - every agent definition: whether it can be read, whether its name is
@@ -20,7 +22,11 @@
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
-use sv2_common::{ALLOWED_GROUP, EXIT_VERSION_MISMATCH, HELPER_PATH, SANDBOX_GROUP};
+use sv2_common::{
+    local_ports_left_open, sandbox_profile_file, ssh_ports, ssh_ports_in_services,
+    ssh_ports_in_sshd_config, ALLOWED_GROUP, EXIT_VERSION_MISMATCH, HELPER_PATH, SANDBOX_GROUP,
+    SERVICES_FILE,
+};
 
 use crate::agent::{self, Sources};
 use crate::{args, call_command, home, in_allowed_group, parse_profile_list, ProfileLine};
@@ -204,6 +210,90 @@ fn check_sshd(accounts: &[&str], report: &mut Report) {
 }
 
 // ---------------------------------------------------------------------------
+// This Mac's SSH ports
+// ---------------------------------------------------------------------------
+
+fn port_list(ports: &[u16]) -> String {
+    let words: Vec<String> = ports.iter().map(u16::to_string).collect();
+    words.join(", ")
+}
+
+/// Whether each profile's sandbox file closes the SSH ports found. The
+/// helper makes the same comparison before every session and refuses one
+/// that would fail it; here it is said without starting anything.
+/// `sandbox_file` gives a profile's sandbox file as text.
+fn check_ssh_ports(
+    profiles: &[&ProfileLine],
+    ports: &[u16],
+    sshd_error: Option<&str>,
+    sandbox_file: &dyn Fn(&ProfileLine) -> Result<String, String>,
+    report: &mut Report,
+) {
+    if let Some(e) = sshd_error {
+        report.problem(format!(
+            "sshd cannot read its configuration, so the ports it names are not known: only {} can be checked. Repair it (sudo sshd -G shows where). sshd said: {e}",
+            port_list(ports)
+        ));
+    }
+    let extra = if ports.len() > 1 {
+        format!(" (this Mac's sshd: {})", port_list(ports))
+    } else {
+        String::new()
+    };
+    for p in profiles {
+        match sandbox_file(p) {
+            Err(e) => report.problem(format!(
+                "the sandbox file of profile '{0}' cannot be read ({e}); run: sv2 profile add {0}",
+                p.name
+            )),
+            Ok(text) => {
+                let open = local_ports_left_open(&text, ports);
+                if open.is_empty() {
+                    report.ok(format!(
+                        "profile '{}' cannot connect to this Mac's SSH port{extra}",
+                        p.name
+                    ));
+                } else {
+                    report.problem(format!(
+                        "this Mac's sshd listens on port {1}, which profile '{0}' does not close, so no session starts in it; run: sv2 profile add {0}",
+                        p.name,
+                        port_list(&open)
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// The SSH ports of this Mac as the helper finds them (`find_ssh_ports`
+/// there), read here as the user: both sources are readable by everyone.
+fn find_ssh_ports() -> (Vec<u16>, Option<String>) {
+    let mut found = std::fs::read_to_string(SERVICES_FILE)
+        .map(|text| ssh_ports_in_services(&text))
+        .unwrap_or_default();
+    let out = Command::new(SSHD).arg("-G").stdin(Stdio::null()).output();
+    let error = match out {
+        Ok(o) if o.status.success() => {
+            found.extend(ssh_ports_in_sshd_config(&String::from_utf8_lossy(
+                &o.stdout,
+            )));
+            None
+        }
+        Ok(o) => Some(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Err(e) => Some(format!("cannot run {SSHD}: {e}")),
+    };
+    (ssh_ports(found), error)
+}
+
+/// The host user in an account's name: `sv2-<user>-<profile>`.
+fn host_user_of(p: &ProfileLine) -> Option<&str> {
+    p.account
+        .strip_prefix("sv2-")?
+        .strip_suffix(p.name.as_str())?
+        .strip_suffix('-')
+}
+
+// ---------------------------------------------------------------------------
 // Agents
 // ---------------------------------------------------------------------------
 
@@ -346,6 +436,18 @@ fn examine(sources: &Sources, report: &mut Report) {
             .iter()
             .filter(|p| accounts.contains(&p.account.as_str()))
             .collect();
+        let (ports, sshd_error) = find_ssh_ports();
+        check_ssh_ports(
+            &with_accounts,
+            &ports,
+            sshd_error.as_deref(),
+            &|p| {
+                let user = host_user_of(p).ok_or("its account has an unexpected name")?;
+                let path = sandbox_profile_file(user, &p.name);
+                std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
+            },
+            report,
+        );
         if home::disabled() {
             report.note(format!(
                 "SV2_NO_HOME_COPY is set: {} is not copied into sandbox homes",
@@ -438,6 +540,69 @@ mod tests {
             text.contains("cannot be copied") && text.contains("leads nowhere"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn ssh_ports_are_checked_against_each_sandbox_file() {
+        let (a, b) = (profile("default", "active"), profile("work", "active"));
+        let closes = |ports: &[u16]| -> String {
+            ports
+                .iter()
+                .map(|p| sv2_common::local_port_rule(*p) + "\n")
+                .collect()
+        };
+        let lines = |ports: &[u16],
+                     error: Option<&str>,
+                     file: &dyn Fn(&ProfileLine) -> Result<String, String>| {
+            let mut r = Report::default();
+            check_ssh_ports(&[&a, &b], ports, error, file, &mut r);
+            (r.problems(), r.text())
+        };
+        let (problems, text) = lines(&[22], None, &|_| Ok(closes(&[22])));
+        assert_eq!(problems, 0);
+        assert_eq!(
+            text,
+            "ok      profile 'default' cannot connect to this Mac's SSH port\n\
+             ok      profile 'work' cannot connect to this Mac's SSH port\n"
+        );
+        // sshd was moved after 'work' got its sandbox file.
+        let (problems, text) = lines(&[22, 2222], None, &|p| {
+            Ok(closes(if p.name == "work" { &[22] } else { &[22, 2222] }))
+        });
+        assert_eq!(problems, 1, "{text}");
+        assert!(
+            text.contains("ok      profile 'default' cannot connect to this Mac's SSH port (this Mac's sshd: 22, 2222)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("listens on port 2222, which profile 'work' does not close")
+                && text.contains("run: sv2 profile add work"),
+            "{text}"
+        );
+        // A sandbox file from before the rule, and one that is not there.
+        let (problems, text) = lines(&[22], None, &|p| {
+            if p.name == "work" {
+                Err("no such file".into())
+            } else {
+                Ok("(allow network*)\n".into())
+            }
+        });
+        assert_eq!(problems, 2, "{text}");
+        // sshd's configuration does not parse: said once, and the rest is
+        // still checked.
+        let (problems, text) = lines(&[22], Some("line 3: Bad option"), &|_| Ok(closes(&[22])));
+        assert_eq!((problems, text.lines().count()), (1, 3), "{text}");
+        assert!(text.contains("line 3: Bad option"), "{text}");
+    }
+
+    #[test]
+    fn the_host_user_is_read_from_the_account() {
+        assert_eq!(host_user_of(&profile("work", "active")), Some("pat"));
+        let mut dashed = profile("work", "active");
+        dashed.account = "sv2-pat-smith-work".into();
+        assert_eq!(host_user_of(&dashed), Some("pat-smith"));
+        dashed.account = "other".into();
+        assert_eq!(host_user_of(&dashed), None);
     }
 
     fn profile(name: &str, state: &str) -> ProfileLine {

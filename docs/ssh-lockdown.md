@@ -176,8 +176,10 @@ rely on it:
 - It binds only processes started under the profile. Anything the sandbox
   user gets running outside it is unaffected, and that is the case this
   proposal is about.
-- Whether a loopback filter also covers the machine's own LAN address has
-  not been measured.
+- Measured on 2026-11-27 for sv2 (macOS 26.7.3): a rule on
+  `localhost:22` covers every address of the machine, its LAN address
+  included, and no other host's. See "Local port 22" in
+  `docs/SANDVAULT2.md`.
 - Denying port 22 to all destinations would break git over SSH to remote
   hosts.
 

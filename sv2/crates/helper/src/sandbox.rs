@@ -6,8 +6,8 @@
 //! user, with no root: `cargo test -p sv2-helper -- --ignored profile_probes`.
 
 use sv2_common::{
-    account_name, home_path, valid_host_user, valid_profile, workspace_path, workspace_user_dir,
-    SANDBOX_PROFILE_VERSION, WORKSPACE_ROOT,
+    account_name, home_path, local_port_rule, ssh_ports, valid_host_user, valid_profile,
+    workspace_path, workspace_user_dir, SANDBOX_PROFILE_VERSION, WORKSPACE_ROOT,
 };
 
 const BASE: &str = include_str!("base.sb");
@@ -21,7 +21,9 @@ fn sbpl_safe(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'/'))
 }
 
-pub fn render(host_user: &str, profile: &str) -> Result<String, String> {
+/// `ssh_ports` are the ports of this Mac's sshd that were found; port 22 is
+/// closed whether or not it is among them.
+pub fn render(host_user: &str, profile: &str, ssh_ports: &[u16]) -> Result<String, String> {
     if !valid_host_user(host_user) || !valid_profile(profile) {
         return Err("cannot render a sandbox profile for an invalid name".to_string());
     }
@@ -31,6 +33,7 @@ pub fn render(host_user: &str, profile: &str) -> Result<String, String> {
         &workspace_user_dir(host_user),
         &workspace_path(host_user, profile),
         &home_path(&account),
+        ssh_ports,
     )
 }
 
@@ -40,6 +43,7 @@ fn render_paths(
     workspace_user_dir: &str,
     workspace: &str,
     home: &str,
+    found_ssh_ports: &[u16],
 ) -> Result<String, String> {
     let subs = [
         ("__PROFILE_VERSION__", SANDBOX_PROFILE_VERSION.to_string()),
@@ -58,6 +62,15 @@ fn render_paths(
         }
         out = out.replace(key, value);
     }
+    const RULES: &str = "__SSH_PORT_RULES__";
+    if out.matches(RULES).count() != 1 {
+        return Err(format!("base sandbox profile needs {RULES} once"));
+    }
+    let rules: Vec<String> = ssh_ports(found_ssh_ports.iter().copied())
+        .into_iter()
+        .map(local_port_rule)
+        .collect();
+    out = out.replace(RULES, &rules.join("\n"));
     if out.contains("__") {
         return Err("sandbox profile has an unfilled placeholder".to_string());
     }
@@ -71,7 +84,7 @@ mod tests {
 
     #[test]
     fn fills_every_placeholder() {
-        let text = render("pat", "work").unwrap();
+        let text = render("pat", "work", &[]).unwrap();
         assert!(!text.contains("__"));
         assert_eq!(
             sv2_common::stamped_version(&text, sv2_common::SANDBOX_PROFILE_STAMP),
@@ -88,8 +101,8 @@ mod tests {
 
     #[test]
     fn profiles_are_distinct_per_user_and_profile() {
-        let a = render("pat", "work").unwrap();
-        let b = render("pat-work", "default").unwrap();
+        let a = render("pat", "work", &[]).unwrap();
+        let b = render("pat-work", "default", &[]).unwrap();
         assert!(!a.contains("/Users/Shared/sv2/pat-work/"));
         assert!(!b.contains("\"/Users/Shared/sv2/pat/work\""));
         assert!(!b.contains("\"/Users/sv2-pat-work\""));
@@ -106,14 +119,67 @@ mod tests {
             ("", "work"),
             ("pat", ""),
         ] {
-            assert!(render(user, profile).is_err(), "{user:?} {profile:?}");
+            assert!(render(user, profile, &[]).is_err(), "{user:?} {profile:?}");
         }
+    }
+
+    /// One rule a port, port 22 always, and what the helper reads back
+    /// before a session is what was asked for.
+    #[test]
+    fn closes_port_22_and_the_ssh_ports_found() {
+        use sv2_common::{local_ports_closed, local_ports_left_open};
+        let plain = render("pat", "work", &[]).unwrap();
+        assert_eq!(local_ports_closed(&plain), [22]);
+        assert_eq!(plain, render("pat", "work", &[22, 22]).unwrap());
+        let moved = render("pat", "work", &[2222, 22, 2200, 2222]).unwrap();
+        assert_eq!(local_ports_closed(&moved), [22, 2200, 2222]);
+        assert_eq!(
+            local_ports_left_open(&moved, &[22, 2222]),
+            Vec::<u16>::new()
+        );
+        assert_eq!(local_ports_left_open(&plain, &[22, 2222]), [2222]);
+        // Each after the allow it cuts a piece out of: later rules win.
+        let allow = moved.find("(allow network*)").unwrap();
+        assert!(moved.find("localhost:22\"").unwrap() > allow);
+    }
+
+    /// A profile with the extra rules loads, and they do what they say: as
+    /// the current user, a listener of this test's own is refused under a
+    /// profile that closes its port, and reached under one that does not.
+    #[test]
+    fn a_closed_port_is_refused_and_another_is_not() {
+        use std::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dir = std::env::temp_dir().join(format!("sv2-port-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let connects = |ports: &[u16]| {
+            let path = dir.join(format!("p{}.sb", ports.len()));
+            std::fs::write(&path, render("pat", "work", ports).unwrap()).unwrap();
+            Command::new("/usr/bin/sandbox-exec")
+                .arg("-f")
+                .arg(&path)
+                .args(["/usr/bin/nc", "-z", "-G", "5", "127.0.0.1"])
+                .arg(port.to_string())
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        let open = connects(&[]);
+        let closed = connects(&[port]);
+        let _ = std::fs::remove_dir_all(&dir);
+        // Not vacuous: without the sandbox the listener is there.
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
+        assert!(open, "a port the profile does not name was refused");
+        assert!(!closed, "a port the profile closes was reached");
     }
 
     /// The profile is default deny, and says so once.
     #[test]
     fn the_profile_denies_by_default() {
-        let text = render("pat", "work").unwrap();
+        let text = render("pat", "work", &[]).unwrap();
         let rules: Vec<&str> = text
             .lines()
             .map(str::trim)
@@ -182,8 +248,14 @@ mod tests {
                 .unwrap();
             assert!(copied.success(), "could not copy {}", shell.display());
         }
-        let text = render_paths(&at("ws"), &at("ws/user"), &at("ws/user/work"), &at("home"))
-            .expect("the scratch paths do not fit in a profile");
+        let text = render_paths(
+            &at("ws"),
+            &at("ws/user"),
+            &at("ws/user/work"),
+            &at("home"),
+            &[],
+        )
+        .expect("the scratch paths do not fit in a profile");
         std::fs::write(root.join("profile.sb"), text).unwrap();
         let user = std::env::var("USER").unwrap_or_else(|_| "nobody".into());
         let out = Command::new("/usr/bin/sandbox-exec")
@@ -243,7 +315,7 @@ mod tests {
     /// the rendered text must load. Needs no privileges.
     #[test]
     fn rendered_profile_loads() {
-        let text = render("first.last", "work").unwrap();
+        let text = render("first.last", "work", &[]).unwrap();
         let path = std::env::temp_dir().join(format!("sv2-profile-test-{}.sb", std::process::id()));
         std::fs::write(&path, text).unwrap();
         let out = Command::new("/usr/bin/sandbox-exec")
@@ -263,7 +335,7 @@ mod tests {
     /// The load test must be able to fail: a broken profile is rejected.
     #[test]
     fn broken_profile_does_not_load() {
-        let text = render("pat", "work").unwrap() + "\n(allow file-read*";
+        let text = render("pat", "work", &[]).unwrap() + "\n(allow file-read*";
         let path = std::env::temp_dir().join(format!("sv2-profile-bad-{}.sb", std::process::id()));
         std::fs::write(&path, text).unwrap();
         let out = Command::new("/usr/bin/sandbox-exec")

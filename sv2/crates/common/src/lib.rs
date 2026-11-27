@@ -30,13 +30,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The helper itself: bump on any change to its code that an installed
 /// machine must get (a fix, a new check, a new verb or argument). Nothing
 /// can detect a forgotten bump here.
-pub const HELPER_VERSION: u32 = 7;
+pub const HELPER_VERSION: u32 = 8;
 /// `/etc/sudoers.d/sandvault2`.
 pub const SUDOERS_VERSION: u32 = 2;
 /// The sshd drop-in that refuses sandbox accounts.
 pub const SSHD_DROPIN_VERSION: u32 = 1;
 /// The rendered `sandbox-exec` profile: `base.sb` and how it is filled in.
-pub const SANDBOX_PROFILE_VERSION: u32 = 6;
+pub const SANDBOX_PROFILE_VERSION: u32 = 7;
 
 /// The key of the comment line each file carries: `<key>: <number>`.
 pub const SUDOERS_STAMP: &str = "sv2-sudoers-version";
@@ -193,6 +193,218 @@ fn hand_back_argv_in(dir: &str, host_user: &str, owner_uid: u32) -> Vec<String> 
 
 pub fn home_path(account: &str) -> String {
     format!("/Users/{account}")
+}
+
+// ---------------------------------------------------------------------------
+// This Mac's SSH ports
+//
+// A sandbox profile closes this Mac's SSH port to a session (see base.sb).
+// Port 22 always; and whatever else this Mac says its sshd listens on. Two
+// places say: /etc/services, where launchd looks up the `ssh` service whose
+// socket it hands to sshd, and sshd's own configuration, which counts for an
+// sshd that is started by hand. Neither shows an sshd started with `-p`, or
+// a launchd job of the user's own with a port number in it.
+//
+// The helper asks when it writes a profile and again before every session;
+// `sv2 doctor` asks too. The parsing is here so that both read alike.
+// ---------------------------------------------------------------------------
+
+/// Where the helper keeps each profile's sandbox file. Root's, and readable
+/// by everyone: the sandbox user's `sandbox-exec` reads it.
+pub const SANDBOX_PROFILES_DIR: &str = "/Library/Application Support/sandvault2/profiles";
+
+pub fn sandbox_profile_file(host_user: &str, profile: &str) -> String {
+    format!("{SANDBOX_PROFILES_DIR}/{host_user}/{profile}.sb")
+}
+
+pub const DEFAULT_SSH_PORT: u16 = 22;
+pub const SERVICES_FILE: &str = "/etc/services";
+
+fn port_number(text: &str) -> Option<u16> {
+    if text.is_empty() || text.len() > 5 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok().filter(|p| *p != 0)
+}
+
+/// The TCP ports /etc/services gives the name `ssh`, as a service's name or
+/// as one of its aliases: `ssh 22/tcp`, `other 2222/tcp ssh`.
+pub fn ssh_ports_in_services(text: &str) -> Vec<u16> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("");
+        let mut words = line.split_whitespace();
+        let (Some(name), Some(port)) = (words.next(), words.next()) else {
+            continue;
+        };
+        let Some(port) = port.strip_suffix("/tcp").and_then(port_number) else {
+            continue;
+        };
+        if name == "ssh" || words.any(|alias| alias == "ssh") {
+            found.push(port);
+        }
+    }
+    found
+}
+
+/// The ports in a configuration as `sshd -G` prints it: `Port N`, and
+/// `ListenAddress` with a port (`host:N`, `[address]:N`). The keywords'
+/// case has changed between versions.
+pub fn ssh_ports_in_sshd_config(printed: &str) -> Vec<u16> {
+    let mut found = Vec::new();
+    for line in printed.lines() {
+        let mut words = line.split_whitespace();
+        let (Some(key), Some(value)) = (words.next(), words.next()) else {
+            continue;
+        };
+        let port = if key.eq_ignore_ascii_case("port") {
+            port_number(value)
+        } else if key.eq_ignore_ascii_case("listenaddress") {
+            if value.starts_with('[') {
+                value.rsplit_once("]:").and_then(|(_, p)| port_number(p))
+            } else if value.matches(':').count() == 1 {
+                // More colons and no brackets is an IPv6 address alone.
+                value.rsplit_once(':').and_then(|(_, p)| port_number(p))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        found.extend(port);
+    }
+    found
+}
+
+/// Port 22 and the ports found, each once, in order.
+pub fn ssh_ports(found: impl IntoIterator<Item = u16>) -> Vec<u16> {
+    let mut ports: Vec<u16> = found.into_iter().filter(|p| *p != 0).collect();
+    ports.push(DEFAULT_SSH_PORT);
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+const LOCAL_PORT_RULE: (&str, &str) = ("(deny network-outbound (remote tcp \"localhost:", "\"))");
+
+/// The profile rule that closes one port of this Mac to a session.
+pub fn local_port_rule(port: u16) -> String {
+    format!("{}{port}{}", LOCAL_PORT_RULE.0, LOCAL_PORT_RULE.1)
+}
+
+/// The ports of this Mac a rendered profile closes: its rules, read back.
+/// Only a rule that is a whole line counts, so not one inside a comment.
+pub fn local_ports_closed(profile_text: &str) -> Vec<u16> {
+    profile_text
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix(LOCAL_PORT_RULE.0)?
+                .strip_suffix(LOCAL_PORT_RULE.1)
+                .and_then(port_number)
+        })
+        .collect()
+}
+
+/// The ports among `wanted` that a rendered profile does not close.
+pub fn local_ports_left_open(profile_text: &str, wanted: &[u16]) -> Vec<u16> {
+    let closed = local_ports_closed(profile_text);
+    wanted
+        .iter()
+        .copied()
+        .filter(|p| !closed.contains(p))
+        .collect()
+}
+
+#[cfg(test)]
+mod ssh_port_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_ssh_port_from_services() {
+        let macos = "#\n# Network services, Internet style\n#\n\
+            ftp              21/tcp     # File Transfer [Control]\n\
+            ssh              22/udp     # SSH Remote Login Protocol\n\
+            ssh              22/tcp     # SSH Remote Login Protocol\n\
+            telnet           23/tcp     # Telnet\n\
+            sftp-ssh        115/tcp     # not the name ssh\n";
+        assert_eq!(ssh_ports_in_services(macos), [22]);
+        // Moved, as an alias of another name, and tabs.
+        assert_eq!(ssh_ports_in_services("ssh\t2222/tcp\n"), [2222]);
+        assert_eq!(ssh_ports_in_services("mine 2200/tcp ssh x\n"), [2200]);
+        assert_eq!(
+            ssh_ports_in_services("ssh 22/tcp\nssh 2222/tcp\n"),
+            [22, 2222]
+        );
+        // Not ssh over TCP, commented out, or no port at all.
+        for none in [
+            "",
+            "ssh 22/udp\n",
+            "# ssh 2222/tcp\n",
+            "sshd 2222/tcp\n",
+            "ssh\n",
+            "ssh tcp\n",
+            "ssh 0/tcp\n",
+            "ssh 70000/tcp\n",
+            "ssh -22/tcp\n",
+            "x 22/tcp # ssh\n",
+        ] {
+            assert_eq!(ssh_ports_in_services(none), Vec::<u16>::new(), "{none:?}");
+        }
+    }
+
+    #[test]
+    fn reads_the_ports_sshd_prints() {
+        // As `sshd -G` prints a default macOS configuration.
+        let printed = "Port 22\nAddressFamily any\nListenAddress 0.0.0.0:22\nListenAddress [::]:22\nUsePAM yes\n";
+        assert_eq!(ssh_ports_in_sshd_config(printed), [22, 22, 22]);
+        // Older versions print the keywords in lower case.
+        assert_eq!(
+            ssh_ports_in_sshd_config(
+                "port 2222\nlistenaddress [::1]:2022\nlistenaddress 10.0.0.5:2023\n"
+            ),
+            [2222, 2022, 2023]
+        );
+        // An address without a port, and lines that only look alike.
+        for none in [
+            "ListenAddress ::1\n",
+            "ListenAddress 10.0.0.5\n",
+            "ListenAddress [::1]\n",
+            "Port\n",
+            "Port ssh\n",
+            "Port 0\n",
+            "GatewayPorts 2222\n",
+            "PermitOpen any:2222\n",
+        ] {
+            assert_eq!(
+                ssh_ports_in_sshd_config(none),
+                Vec::<u16>::new(),
+                "{none:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn port_22_is_always_among_them() {
+        assert_eq!(ssh_ports([]), [22]);
+        assert_eq!(ssh_ports([22, 22]), [22]);
+        assert_eq!(ssh_ports([2222, 0, 21, 2222]), [21, 22, 2222]);
+    }
+
+    #[test]
+    fn reads_back_the_ports_a_profile_closes() {
+        let text = format!(
+            "(version 1)\n(allow network*)\n;; {}\n{}\n  {}\n(deny network-outbound (remote tcp \"*:25\"))\n",
+            local_port_rule(9),
+            local_port_rule(22),
+            local_port_rule(2222)
+        );
+        assert_eq!(local_ports_closed(&text), [22, 2222]);
+        assert_eq!(local_ports_left_open(&text, &[22]), Vec::<u16>::new());
+        assert_eq!(local_ports_left_open(&text, &[22, 2200, 9]), [2200, 9]);
+        // A profile from before the rule closes nothing.
+        assert_eq!(local_ports_left_open("(allow network*)\n", &[22]), [22]);
+    }
 }
 
 #[cfg(test)]
@@ -410,7 +622,7 @@ mod tests {
     #[test]
     fn install_version_is_one_plain_word() {
         let v = install_version();
-        assert_eq!(v, "helper=7,sudoers=2,sshd=1,profile=6");
+        assert_eq!(v, "helper=8,sudoers=2,sshd=1,profile=7");
         assert!(v
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'=' || b == b','));

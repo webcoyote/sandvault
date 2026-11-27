@@ -9,7 +9,8 @@
 ;;
 ;; Two things are still as wide as they were, by decision and not by
 ;; measurement: reading files (everything but the places denied below) and
-;; the network (everything). Narrowing either is separate work.
+;; the network (everything but this Mac's own SSH port). Narrowing either
+;; further is separate work.
 (version 1)
 ;; sv2-profile-version: __PROFILE_VERSION__
 (deny default)
@@ -18,9 +19,22 @@
 ;; cannot read a program.
 (allow file-read*)
 
-;; The network, unrestricted. Probes: DNS, https with curl, git over https,
-;; listen on localhost.
+;; The network, unrestricted but for the rule after this one. Probes: DNS,
+;; https with curl, git over https, listen on localhost, "own listener on
+;; localhost".
 (allow network*)
+
+;; Not this Mac's own SSH port. sshd refuses the sandbox accounts whoever
+;; connects; this keeps a session from reaching sshd at all, so from trying
+;; any other account of this Mac. "localhost" is every address of this Mac,
+;; not only the loopback ones (measured: 127.0.0.1, ::1, fe80::1, the LAN
+;; address and the link-local ones of every other interface are refused
+;; with EPERM), and no address of another host: probe "port 22 of a remote
+;; host answers", which is git over ssh. Probe "this Mac's SSH port".
+;; One rule a port: 22 always, and the ports the helper finds this Mac's
+;; sshd to have (sv2-common, "This Mac's SSH ports"). The helper reads
+;; these rules back before every session.
+__SSH_PORT_RULES__
 
 ;; kill and the shell's job control. Probe "signals to own processes": kill
 ;; fails with "Operation not permitted". Whom a signal may go to is the

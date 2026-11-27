@@ -78,9 +78,11 @@ pub fn stage1(caller: &Caller, args: &[OsString]) -> Res<()> {
     }
     // No session on files that are missing or that another version wrote:
     // the sudoers file and sshd drop-in from `install`, and this profile's
-    // sandbox file.
+    // sandbox file. Nor on a sandbox file that leaves a port of this Mac's
+    // sshd open.
     ops::check_installed_files()?;
     ops::check_profile_file(&entry.host_user, &entry.profile)?;
+    ops::check_ssh_ports_closed(&entry.host_user, &entry.profile)?;
     lock.keep_across_exec()?;
 
     let err = Command::new("/bin/launchctl")

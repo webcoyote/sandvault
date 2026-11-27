@@ -265,7 +265,15 @@ separates user from profile unambiguously.
   user under the rendered profile (§3). The probes are kept as tests.
 - The Mach service allow list stays short, and each entry is re-measured in
   the sandbox user's own domain.
-- A stated position on localhost networking. At minimum, deny local port 22.
+- **Decided (2026-11-27), localhost networking:** a session may connect to
+  every port of this Mac except TCP port 22, at any of the Mac's addresses.
+  The rest of localhost stays open because a session's own servers are
+  there, on ports chosen when they start (a development server, the browser
+  of `--chrome` and `--lightpanda`), and a profile rule can name a port but
+  not who listens on it. What follows: a service of the host user, or of
+  another session, that listens on this Mac and asks for no credentials is
+  open to every sandbox. Besides 22, the ports this Mac's sshd is found
+  to listen on are closed too. See "Local port 22" under "Milestone 1".
 
 ## Closing other routes out of the sandbox
 
@@ -1192,10 +1200,83 @@ Decisions this milestone made:
       current user do.
     - Profile version 5 changed no rule, only the comment in `base.sb`
       about these browsers; a profile's text is pinned to its version.
+  - *Local port 22 (2026-11-27, profile version 7).* One rule after the
+    network allow: `(deny network-outbound (remote tcp "localhost:22"))`.
+    The sshd drop-in refuses a login as a sandbox account whoever
+    connects; this rule keeps a session from reaching sshd at all, so from
+    trying any other account of this Mac.
+    - *Measured* as the current user under `sandbox-exec` (macOS 26.7.3,
+      Remote Login on): with the rule, a connection to port 22 fails with
+      EPERM at 127.0.0.1, `::1`, `fe80::1` and the Mac's address on the
+      network (192.168.1.67 that day), also by its `.local` name;
+      `github.com` port 22 and another port on 127.0.0.1 connect.
+      "localhost" in a rule is therefore every address of this Mac and no
+      other host's. Without the rule all the local ones connect. Tried
+      then at every address `ifconfig` listed, 14 on 11 interfaces (the
+      link-local ones of `awdl0`, `llw0` and eight `utun` interfaces
+      besides those above): EPERM at each. Not tried: a second routable
+      address, as a second network card or a VPN with IPv4 gives.
+    - *Probes.* "this Mac's SSH port" requires EPERM at the two loopback
+      addresses and at the address on the network, so it also means
+      something where Remote Login is off; "port 22 of a remote host
+      answers" (git over ssh) and "own listener on localhost" are the
+      controls. With the rule taken out, the first fails and names the
+      three addresses.
+    - *The integration suite's login attempt moved to the host side.* It
+      had the sandbox log in to its own account from a session, which the
+      rule now stops before sshd. The suite makes a key, has the sandbox
+      authorize its public half, and tries the login itself: sshd cannot
+      tell who connects, so the drop-in is tested as before.
+    - *Other ports (helper version 8).* One rule a port: 22 always, and
+      the ports this Mac says its sshd has. Two places say. The first is
+      the `ssh` line of `/etc/services`: on macOS launchd holds the
+      listening socket (`ssh.plist`, `SockServiceName` `ssh`) and hands
+      it to sshd, so this is the port Remote Login is on. The second is
+      the `Port` and `ListenAddress` lines `sshd -G` prints, which count
+      for an sshd started by hand. Both are root's files; the parsing is
+      in `sv2-common` ("This Mac's SSH ports"). On the development Mac
+      both give 22.
+      - *When.* The helper looks at `profile add` and at `install`,
+        which write the sandbox files, and again before every session:
+        `launch` reads the rules back from the profile's file and refuses
+        when a port found now is not among them, with
+        `sv2 profile add NAME` as the fix. A file that closes more ports
+        than are found now is accepted. The look costs about 6 ms
+        (measured as the user: `sshd -G` 5.4 ms, the file under 1 ms).
+      - *An sshd configuration that does not parse* is not an error at
+        `launch` or `profile add`: a typing mistake in `sshd_config`
+        would otherwise stop every sandbox. Port 22 and what
+        `/etc/services` gives are used; `profile add` says so, and
+        `sv2 doctor` reports it as a problem. `sshd -G` is given 5
+        seconds.
+      - *`sv2 doctor`* makes the same comparison for each of the caller's
+        profiles, as the user: the sandbox files are readable by all.
+      - *Tests.* Unit tests for the parsing, the rules as rendered and
+        read back, the refusal's message, and doctor's lines; one starts
+        a listener and shows, under `sandbox-exec`, that a profile which
+        names its port refuses it and one which does not reaches it. No
+        test moves the SSH port of the Mac it runs on: that means
+        editing `/etc/services` or `sshd_config`. So the refusal at
+        `launch` has not been seen with a real moved port.
+    - *Limits.* Not found: an sshd started with `-p`, and a launchd job
+      of the user's own with a port number in it; the drop-in is then the
+      only defence. The rules bind processes under the profile, like
+      every rule. They do not stop a session from reaching this Mac's
+      sshd by way of another host that forwards to it.
+    - *In a session (2026-11-27, helper version 8 installed).* The
+      integration suite passed (174 of 174), with the probes, the
+      host-side login attempt, both browsers at their endpoints, and
+      doctor's new line. By hand in a session of the `default` profile:
+      port 22 gave EPERM at 127.0.0.1, `::1` and 192.168.1.67, and
+      `github.com` port 22 answered `SSH-`. Before the install, the same
+      suite against helper version 7 and profile version 6 failed in one
+      check, the probe "this Mac's SSH port", which named all three
+      addresses as connecting.
   - *Not narrowed, by decision:* file reads are still everything but
     `/Users`, `/Volumes`, `/Library/Keychains` and raw disks, and the
-    network is still everything, localhost and port 22 included. Both
-    were deferred, with per-profile capabilities (open item 8).
+    network is still everything but this Mac's port 22: every other port
+    of localhost is open (see "Sandbox profile" for why). Narrowing file
+    reads was deferred, with per-profile capabilities (open item 8).
   - *How it was measured.* As the current user under `sandbox-exec`, in
     the host user's launchd domain, with a scratch home. The probes
     themselves were run in a real session under the old profile and all
@@ -1246,9 +1327,10 @@ dropped from the document by mistake in commit 9a52da3 and put back.)
    quarantine handling, and `sv2 agent new`.
 3. Done: the safer `uninstall`, default deny, `sv2 doctor`, repository
    credentials, and the verification that needed no push.
-4. Next (order still to be settled, 2026-11-26): a position
-   on localhost and port 22; per-profile capabilities and a narrower rule
-   for reading files (open item 8); the iOS bridge. Done 2026-11-27: the
+4. Next (order still to be settled, 2026-11-26): per-profile capabilities
+   and a narrower rule for reading files (open item 8); the iOS bridge.
+   Done 2026-11-27: a position on localhost and port 22 (see "Local port
+   22" under "Milestone 1"); the
    `sv2 repair` questions (open item 9), all five decided; a deploy key
    and a token used for real; `--chrome` and `--lightpanda`. Done 2026-11-26: the leftover verification
    that needed root (`use_pty`, the ACL checks), see
@@ -1444,9 +1526,10 @@ None recorded.
 - [x] Quarantine handling for installed agent binaries (open item 1); see
   "Quarantine" under "Milestone 1".
 - [x] Default deny; see "Default deny" under "Milestone 1".
-- [ ] Per-profile capabilities (open item 8), a position on localhost and
-  port 22, and a narrower rule for reading files. All deferred on
-  2026-11-26.
+- [x] A position on localhost and port 22; see "Sandbox profile" and
+  "Local port 22" under "Milestone 1".
+- [ ] Per-profile capabilities (open item 8) and a narrower rule for
+  reading files. Both deferred on 2026-11-26.
 - [x] Repository credentials: `sv2 deploy-key` and `sv2 gh-token`; see
   "Repository credentials" under "Milestone 1".
 - [x] Browser support: `--chrome` and `--lightpanda`; see "Browsers" under

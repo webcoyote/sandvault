@@ -65,6 +65,34 @@ allowed "DNS" /usr/bin/python3 -c 'import socket; socket.getaddrinfo("example.co
 allowed "https with curl (TLS trust)" /usr/bin/curl -fsS -o /dev/null --max-time 20 https://example.com
 allowed "https with python (TLS trust)" /usr/bin/python3 -c 'import urllib.request; urllib.request.urlopen("https://example.com", timeout=20).read(1)'
 allowed "listen on localhost" /usr/bin/python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen(1)'
+# A session's own servers are on localhost, on ports chosen when they start:
+# a development server, the browser of --chrome and --lightpanda.
+allowed "own listener on localhost" /usr/bin/python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen(1); c=socket.create_connection(s.getsockname(), 5); s.accept()'
+# This Mac's SSH port, at each of its addresses: the loopback ones, and the
+# one it has on the network (found without sending anything, and left out
+# when there is no network). The sandbox's refusal is EPERM whether or not
+# anything listens; "connection refused" would mean only that Remote Login
+# is off, and is a failure here.
+allowed "this Mac's SSH port" /usr/bin/python3 -c '
+import socket, sys
+targets = [(socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")]
+try:
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); u.connect(("192.0.2.1", 9))
+    targets.append((socket.AF_INET, u.getsockname()[0]))
+except OSError:
+    pass
+bad = []
+for family, address in targets:
+    s = socket.socket(family); s.settimeout(5)
+    try:
+        s.connect((address, 22)); bad.append(address + " connects")
+    except PermissionError:
+        pass
+    except OSError as e:
+        bad.append(address + ": " + str(e))
+if bad: sys.exit("not refused by the sandbox: " + "; ".join(bad))'
+# git over ssh: the rule above must not reach another host's port 22.
+allowed "port 22 of a remote host answers" /usr/bin/python3 -c 'import socket; s=socket.create_connection(("github.com", 22), 20); assert s.recv(4) == b"SSH-"'
 
 # --- developer tools
 allowed "git init and commit" /bin/sh -c "cd '$T' && git init -q r && cd r && git -c user.name=p -c user.email=p@p commit -q --allow-empty -m x"

@@ -129,6 +129,13 @@ check "sshd drop-in: carries its version" "# sv2-sshd-version: $(artifact_versio
     "$(/usr/bin/grep -m1 '^# sv2-sshd-version: ' "$SSHD_DROPIN")"
 check "sandbox profile: carries its version" ";; sv2-profile-version: $(artifact_version profile)" \
     "$(/usr/bin/grep -m1 '^;; sv2-profile-version: ' "$SB")"
+# The sandbox file closes this Mac's SSH port to a session; the helper reads
+# these rules back before it starts one. (What the rule does is a probe.)
+if /usr/bin/grep -qxF '(deny network-outbound (remote tcp "localhost:22"))' "$SB"; then
+    pass "sandbox profile: closes this Mac's port 22"
+else
+    fail "sandbox profile: closes this Mac's port 22" "$(/usr/bin/grep -n 'localhost' "$SB")"
+fi
 # What sshd itself would apply to a login as USER, read from the system's
 # configuration as a whole (so a drop-in that is not included, or is
 # overridden, shows). -T needs a host key; a throwaway one will do.
@@ -345,31 +352,37 @@ else
     fail "sandbox: cannot move the workspace away"
 fi
 
-# The attack the sshd drop-in exists for: the sandbox authorizes a key of its
-# own for its own account and logs in to this Mac, which would give it a
-# process outside the sandbox profile. Judged by whether the command ran.
+# The attack the sshd drop-in exists for: the sandbox authorizes a key for
+# its own account, and a login with that key would be a process outside the
+# sandbox profile. A session cannot reach this Mac's SSH port itself (the
+# profile; probe "this Mac's SSH port"), so the login is tried from here:
+# sshd cannot tell who connects, and the drop-in is what stands between that
+# file and whatever does reach the port. The key is made here and the sandbox
+# is given its public half to authorize. Judged by whether the command ran.
 # Needs Remote Login to be on; what sshd would decide is checked above either
 # way. Where Remote Login is limited to certain users, sshd refuses the
 # account for that reason too, and this check cannot tell the two apart.
 if /usr/bin/nc -z -G 2 127.0.0.1 22 >/dev/null 2>&1; then
-    OUT="$(sb /bin/sh -c '
-        mkdir -p ~/.ssh && chmod 700 ~/.ssh && rm -f ~/.ssh/sv2test ~/.ssh/sv2test.pub
-        /usr/bin/ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/sv2test
-        cat ~/.ssh/sv2test.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
-        /usr/bin/ssh -F /dev/null -i ~/.ssh/sv2test -o IdentitiesOnly=yes -o IdentityAgent=none \
-            -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=10 "$USER@127.0.0.1" /usr/bin/touch "/private/tmp/$1"
-    ' sv2 "$MARK-ssh" 2>&1 || true)"
+    /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$SCRATCH/loginkey"
+    LOGIN_PUB="$(/bin/cat "$SCRATCH/loginkey.pub")"
+    check "ssh: precondition, the sandbox authorized the key" "$LOGIN_PUB" "$(sb /bin/sh -c '
+        mkdir -p ~/.ssh && chmod 700 ~/.ssh
+        printf "%s\n" "$1" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+        /usr/bin/tail -1 ~/.ssh/authorized_keys
+    ' sv2 "$LOGIN_PUB" 2>/dev/null || true)"
+    OUT="$(/usr/bin/ssh -F /dev/null -i "$SCRATCH/loginkey" -o IdentitiesOnly=yes -o IdentityAgent=none \
+        -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 "$ACCOUNT@127.0.0.1" /usr/bin/touch "/private/tmp/$MARK-ssh" 2>&1 || true)"
     if [[ "$OUT" == *"Permission denied"* ]]; then
-        pass "ssh: precondition, the sandbox's login attempt reached sshd"
+        pass "ssh: precondition, the login attempt reached sshd"
     else
-        fail "ssh: precondition, the sandbox's login attempt reached sshd" "$OUT"
+        fail "ssh: precondition, the login attempt reached sshd" "$OUT"
     fi
     if [[ -e "/private/tmp/$MARK-ssh" ]]; then
-        fail "ssh: sandbox cannot log in to its own account" "/private/tmp/$MARK-ssh was created"
+        fail "ssh: a key the sandbox authorized does not log in to its account" "/private/tmp/$MARK-ssh was created"
         /usr/bin/sudo -n -- "$HELPER" call "$VERSION" launch "$P" -- /bin/rm -f "/private/tmp/$MARK-ssh" || true
     else
-        pass "ssh: sandbox cannot log in to its own account"
+        pass "ssh: a key the sandbox authorized does not log in to its account"
     fi
 else
     echo -e "${ORANGE}     Remote Login is off: the SSH login attempt was NOT RUN${NC}"
@@ -769,6 +782,7 @@ OUT="$("$PREFIX/bin/sv2" doctor 2>&1 || true)"
 for want in "ok      installed, and the helper matches this sv2" \
     "ok      profile '$P' ($ACCOUNT)" \
     "ok      sshd refuses a login as $ACCOUNT" \
+    "ok      profile '$P' cannot connect to this Mac's SSH port" \
     "note    agent 'sv2test' is not installed on this Mac"; do
     if [[ "$OUT" == *"$want"* ]]; then
         pass "doctor: ${want#* }"

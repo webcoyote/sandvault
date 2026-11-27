@@ -83,9 +83,14 @@ shortened: `sv2 s` is `sv2 shell`.
 - It can write in its workspace, its own home and the temporary
   directories, and nowhere else.
 - It cannot read your home directory.
-- It has the network, unrestricted. An agent that is talked into it can send
-  anything it can read to anywhere.
-- It cannot log in to its own account over SSH, or use your pasteboard.
+- It has the network, unrestricted but for this Mac's own SSH port: 22, and
+  another one if `/etc/services` or sshd's configuration names it. An agent
+  that is talked into it can send anything it can read to anywhere.
+- It can connect to every other port of this Mac, because its own servers
+  are there. A service of yours that listens on this Mac and asks for no
+  password is open to it.
+- It cannot connect to this Mac's SSH port, and sshd refuses a login as a
+  sandbox account from anywhere. It cannot use your pasteboard.
 - It runs on a terminal of its own, so it cannot type into yours.
 
 The sandbox is a separate account under a `sandbox-exec` profile. It is not
