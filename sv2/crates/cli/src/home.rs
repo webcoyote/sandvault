@@ -174,19 +174,39 @@ fn copy(dir: &Path, names: &[String], mut unpack: Command) -> Result<(), String>
     }
 }
 
-fn sync_from(
+/// How a profile's sandbox home stands against the user's directory.
+#[derive(Debug, PartialEq, Eq)]
+pub enum State {
+    /// There is no directory.
+    Absent,
+    /// There is one, with nothing in it.
+    Empty,
+    /// What is in it has been copied to this account.
+    Current,
+    /// It changed since, or was never copied here: the next session copies.
+    Pending,
+}
+
+/// A copy that is due: what to pack, and what to record afterwards.
+struct Due {
+    dir: PathBuf,
+    names: Vec<String>,
+    stamp: PathBuf,
+    wanted: String,
+}
+
+fn examine(
     home: &Path,
     profile: &str,
     sandbox_home: &Path,
-    unpack: &dyn Fn() -> Command,
-) -> Result<bool, String> {
+) -> Result<(State, Option<Due>), String> {
     let Some(dir) = source(home)? else {
-        return Ok(false);
+        return Ok((State::Absent, None));
     };
     let listing = listing(&dir)?;
     let names = top_level(&listing);
     if names.is_empty() {
-        return Ok(false);
+        return Ok((State::Empty, None));
     }
     // Only the directory's owner is asked for, by path: nothing in a
     // sandbox home is opened. A profile made again has a new ID.
@@ -196,30 +216,62 @@ fn sync_from(
     let wanted = stamp_text(uid, &listing);
     let stamp = home.join(STATE).join(profile);
     if std::fs::read_to_string(&stamp).is_ok_and(|have| have == wanted) {
-        return Ok(false);
+        return Ok((State::Current, None));
     }
-    copy(&dir, &names, unpack())?;
+    let due = Due {
+        dir,
+        names,
+        stamp,
+        wanted,
+    };
+    Ok((State::Pending, Some(due)))
+}
+
+fn sync_from(
+    home: &Path,
+    profile: &str,
+    sandbox_home: &Path,
+    unpack: &dyn Fn() -> Command,
+) -> Result<bool, String> {
+    let (_, Some(due)) = examine(home, profile, sandbox_home)? else {
+        return Ok(false);
+    };
+    copy(&due.dir, &due.names, unpack())?;
     // After the copy: a stamp that could not be written means another copy
     // next time, never a copy that is skipped.
     let write = || -> std::io::Result<()> {
-        if let Some(parent) = stamp.parent() {
+        if let Some(parent) = due.stamp.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&stamp, &wanted)
+        std::fs::write(&due.stamp, &due.wanted)
     };
     if let Err(e) = write() {
-        eprintln!("sv2: cannot write {}: {e}", stamp.display());
+        eprintln!("sv2: cannot write {}: {e}", due.stamp.display());
     }
     Ok(true)
+}
+
+/// For `sv2 doctor`: how `profile` stands, without copying anything. An
+/// error is a directory that cannot be copied as it is.
+pub fn state(profile: &str, account: &str) -> Result<State, String> {
+    let home = crate::passwd_home().ok_or("cannot find your home directory")?;
+    let sandbox_home = PathBuf::from(sv2_common::home_path(account));
+    examine(&home, profile, &sandbox_home).map(|(state, _)| state)
+}
+
+/// The directory as the user would write it.
+pub const SOURCE_SHOWN: &str = "~/.config/sandvault2/home";
+
+/// Whether the environment says to copy nothing.
+pub fn disabled() -> bool {
+    std::env::var_os(DISABLE).is_some_and(|v| !v.is_empty())
 }
 
 /// Bring the sandbox home of `profile` up to date with the user's
 /// directory. `unpack` builds the session that unpacks an archive from its
 /// standard input. Never fails the caller: a session starts either way.
 pub fn sync(profile: &str, account: &str, unpack: &dyn Fn() -> Command) {
-    if !sv2_common::valid_profile(profile)
-        || std::env::var_os(DISABLE).is_some_and(|v| !v.is_empty())
-    {
+    if !sv2_common::valid_profile(profile) || disabled() {
         return;
     }
     let Some(home) = crate::passwd_home() else {
@@ -286,6 +338,9 @@ mod tests {
                 cmd
             }
         }
+        fn state(&self) -> Result<State, String> {
+            examine(&self.host(), "work", &self.sandbox()).map(|(state, _)| state)
+        }
         fn sync(&self) -> Result<bool, String> {
             sync_from(&self.host(), "work", &self.sandbox(), &self.unpack())
         }
@@ -301,8 +356,10 @@ mod tests {
     fn nothing_to_copy_is_not_an_error() {
         let f = Fixture::new("empty");
         assert_eq!(f.sync(), Ok(false));
+        assert_eq!(f.state(), Ok(State::Empty));
         std::fs::remove_dir_all(f.source()).unwrap();
         assert_eq!(f.sync(), Ok(false));
+        assert_eq!(f.state(), Ok(State::Absent));
         assert!(!f.host().join(STATE).exists());
     }
 
@@ -312,7 +369,9 @@ mod tests {
         std::fs::write(f.source().join(".zshrc"), "one\n").unwrap();
         std::fs::create_dir_all(f.source().join(".config/tool")).unwrap();
         std::fs::write(f.source().join(".config/tool/conf"), "deep\n").unwrap();
+        assert_eq!(f.state(), Ok(State::Pending));
         assert_eq!(f.sync(), Ok(true));
+        assert_eq!(f.state(), Ok(State::Current));
         let read = |name: &str| std::fs::read_to_string(f.sandbox().join(name)).unwrap();
         assert_eq!(read(".zshrc"), "one\n");
         assert_eq!(read(".config/tool/conf"), "deep\n");
@@ -325,6 +384,7 @@ mod tests {
 
         // Changed, even with the same size: copied again, over the other.
         std::fs::write(f.source().join(".zshrc"), "two\n").unwrap();
+        assert_eq!(f.state(), Ok(State::Pending));
         assert_eq!(f.sync(), Ok(true));
         assert_eq!(read(".zshrc"), "two\n");
         assert_eq!(f.sync(), Ok(false));

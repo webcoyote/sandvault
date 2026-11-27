@@ -466,13 +466,6 @@ sv build
 ```
 
 
-### sv2: git cannot reach a repository after `sv2 deploy-key`
-
-See [docs/DEPLOY-KEYS.md](docs/DEPLOY-KEYS.md): how a deploy key is chosen for
-each repository in an sv2 sandbox, what is stored where, and a table of
-symptoms and causes.
-
-
 ### Fix the security popup
 
 ![macOS security keychain login dialog](https://webcoyote.github.io/images/shared/sandvault/security-keychain.jpg)

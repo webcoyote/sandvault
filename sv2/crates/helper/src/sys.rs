@@ -148,6 +148,58 @@ where
         .map_err(|e| format!("cannot run {program}: {e}"))
 }
 
+/// Run a system tool that may not come back, for at most `limit`. `None`
+/// when it had not finished by then: it has been killed and reaped. After
+/// `notice_after`, `notice` is called once, to say what is being waited for.
+///
+/// For tools that print little: the output is read after the tool exits,
+/// so one that fills a pipe waits until `limit` and is killed.
+pub fn run_timed<I, S>(
+    program: &str,
+    args: I,
+    limit: Duration,
+    notice_after: Duration,
+    notice: &dyn Fn(),
+) -> Res<Option<Output>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut child = Command::new(program)
+        .args(args)
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run {program}: {e}"))?;
+    let start = Instant::now();
+    let mut noticed = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(e) => return Err(format!("cannot wait for {program}: {e}")),
+        }
+        let waited = start.elapsed();
+        if waited >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        if !noticed && waited >= notice_after {
+            noticed = true;
+            notice();
+        }
+        sleep(Duration::from_millis(20));
+    }
+    child
+        .wait_with_output()
+        .map(Some)
+        .map_err(|e| format!("cannot read the output of {program}: {e}"))
+}
+
 /// Run a system tool; a non-zero exit is an error carrying its stderr.
 pub fn run_ok<I, S>(program: &str, args: I) -> Res<()>
 where
@@ -761,6 +813,36 @@ pub fn fingerprint(text: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_timed_run_gives_up_and_says_what_it_waits_for() {
+        use std::cell::Cell;
+        let noticed = Cell::new(0);
+        let notice = || noticed.set(noticed.get() + 1);
+        let ms = Duration::from_millis;
+        // Finishes in time: its output and status, and no notice.
+        let out = run_timed(
+            "/bin/sh",
+            ["-c", "echo out; echo err >&2; exit 3"],
+            ms(5000),
+            ms(4000),
+            &notice,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(
+            (out.stdout.as_slice(), out.stderr.as_slice()),
+            (&b"out\n"[..], &b"err\n"[..])
+        );
+        assert_eq!(noticed.get(), 0);
+        // Does not: killed, after one notice, well before it would end.
+        let start = Instant::now();
+        let out = run_timed("/bin/sleep", ["30"], ms(400), ms(100), &notice).unwrap();
+        assert!(out.is_none());
+        assert_eq!(noticed.get(), 1);
+        assert!(start.elapsed() < Duration::from_secs(10));
+    }
 
     fn scratch(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("sv2-sys-test-{tag}-{}", std::process::id()));

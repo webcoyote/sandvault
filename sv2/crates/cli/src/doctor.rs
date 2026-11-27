@@ -9,6 +9,8 @@
 //!   was killed, or macOS refused a step) is finished by running the same
 //!   command again;
 //! - each profile's account, and what sshd would do with a login as it;
+//! - the user's own configuration (`home.rs`): whether there is any, and
+//!   which sandbox homes have it;
 //! - every agent definition: whether it can be read, whether its name is
 //!   also a command, and whether macOS will let its program start.
 //!
@@ -21,7 +23,7 @@ use std::process::{Command, ExitCode, Stdio};
 use sv2_common::{ALLOWED_GROUP, EXIT_VERSION_MISMATCH, HELPER_PATH, SANDBOX_GROUP};
 
 use crate::agent::{self, Sources};
-use crate::{args, call_command, in_allowed_group, parse_profile_list, ProfileLine};
+use crate::{args, call_command, home, in_allowed_group, parse_profile_list, ProfileLine};
 
 const SSHD: &str = "/usr/sbin/sshd";
 const SSHD_DROPIN: &str = "/etc/ssh/sshd_config.d/000-sandvault2.conf";
@@ -340,13 +342,103 @@ fn examine(sources: &Sources, report: &mut Report) {
             }
         }
         check_sshd(&accounts, report);
+        let with_accounts: Vec<&ProfileLine> = profiles
+            .iter()
+            .filter(|p| accounts.contains(&p.account.as_str()))
+            .collect();
+        if home::disabled() {
+            report.note(format!(
+                "SV2_NO_HOME_COPY is set: {} is not copied into sandbox homes",
+                home::SOURCE_SHOWN
+            ));
+        } else {
+            check_home(
+                &with_accounts,
+                &|p| home::state(&p.name, &p.account),
+                report,
+            );
+        }
     }
     check_agents(sources, brew, report);
+}
+
+/// The user's own configuration (`home.rs`): whether there is any, and
+/// which sandbox homes have it. Nothing is copied here.
+fn check_home(
+    profiles: &[&ProfileLine],
+    state: &dyn Fn(&ProfileLine) -> Result<home::State, String>,
+    report: &mut Report,
+) {
+    let dir = home::SOURCE_SHOWN;
+    for p in profiles {
+        match state(p) {
+            // The same for every profile: said once.
+            Ok(home::State::Absent) => {
+                report.note(format!(
+                    "no {dir}: files you put there (.zshrc, .gitconfig) are copied into every sandbox home"
+                ));
+                return;
+            }
+            Ok(home::State::Empty) => {
+                report.note(format!("{dir} is empty: nothing is copied into sandbox homes"));
+                return;
+            }
+            Err(e) => {
+                report.problem(format!("{dir} cannot be copied into sandbox homes: {e}"));
+                return;
+            }
+            Ok(home::State::Current) => {
+                report.ok(format!("{} home synced from {dir}", p.account))
+            }
+            Ok(home::State::Pending) => report.note(format!(
+                "{dir} has changed, or is new to profile '{0}': the next 'sv2 run' in '{0}' copies it",
+                p.name
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_users_configuration_is_reported_for_each_profile() {
+        let (a, b) = (profile("default", "active"), profile("work", "active"));
+        let lines = |state: &dyn Fn(&ProfileLine) -> Result<home::State, String>| {
+            let mut r = Report::default();
+            check_home(&[&a, &b], state, &mut r);
+            (r.problems(), r.text())
+        };
+        let (problems, text) = lines(&|p| {
+            Ok(if p.name == "work" {
+                home::State::Pending
+            } else {
+                home::State::Current
+            })
+        });
+        assert_eq!(problems, 0);
+        assert_eq!(
+            text,
+            "ok      sv2-pat-default home synced from ~/.config/sandvault2/home\n\
+             note    ~/.config/sandvault2/home has changed, or is new to profile 'work': the next 'sv2 run' in 'work' copies it\n"
+        );
+        // What is true of the directory is said once, not for each profile.
+        let (problems, text) = lines(&|_| Ok(home::State::Absent));
+        assert_eq!((problems, text.lines().count()), (0, 1), "{text}");
+        assert!(
+            text.starts_with("note    no ~/.config/sandvault2/home"),
+            "{text}"
+        );
+        let (problems, text) = lines(&|_| Ok(home::State::Empty));
+        assert_eq!((problems, text.lines().count()), (0, 1), "{text}");
+        let (problems, text) = lines(&|_| Err("a link in it leads nowhere".into()));
+        assert_eq!((problems, text.lines().count()), (1, 1), "{text}");
+        assert!(
+            text.contains("cannot be copied") && text.contains("leads nowhere"),
+            "{text}"
+        );
+    }
 
     fn profile(name: &str, state: &str) -> ProfileLine {
         ProfileLine {

@@ -970,6 +970,12 @@ Decisions this milestone made:
     command gets a note; an installed program that is quarantined and not
     notarized is a problem, with the `xattr` command (see "Quarantine");
     one that is not installed gets a note.
+  - *The user's configuration (2026-11-26):* whether
+    `~/.config/sandvault2/home` exists and has anything in it, and for each
+    profile whether its sandbox home has what is there now or the next
+    `sv2 run` will copy it. A directory that cannot be copied (a link that
+    leads nowhere, a place outside the user's home) is a problem. It is
+    also the only place `sv2` itself tells a user the directory exists.
   - *Not looked at:* whether a session actually starts; the sandbox
     profile files; other users.
 - **Default deny (2026-11-26; finding 11).** The base profile starts with
@@ -1186,6 +1192,9 @@ run on the development Mac on 2026-11-26 (sudo 1.9.17p2) and passed (13 of
   more than a minute, with the helper holding the lock, so that removal
   and the next one failed. Which removal meets it is chance. The `^Z`
   check's watchdog prints the processes when it happens and says so.
+  Since helper version 6 such a removal fails after 60 seconds and names
+  the permission. The suite still fails when it happens, since nobody
+  answers the prompt; it fails sooner, and says why.
 - [ ] **Parts of agent definitions have not run.** Unit tests, the
   integration suite (126 of 126, 2026-11-26, with a test agent) and the two
   measurements with `claude` cover the rest. Not run: the Homebrew install
@@ -1198,23 +1207,49 @@ run on the development Mac on 2026-11-26 (sudo 1.9.17p2) and passed (13 of
   behind it was measured by hand and is unit-tested, also against real
   files and the real `codesign`. Not run: `sv2` installing a cask that is
   not notarized, which is the only way the message appears.
-- [ ] **Profile version 3 has not run in a session.** The probes pass under
-  it as the current user, the headless browser included. In a real session
-  that probe runs only if Playwright's browsers are installed in the
+- [ ] **The headless browser probe has not run in a session.** The other
+  probes have, under profile version 4 (the integration suite, 2026-11-26).
+  That one passes under `sandbox-exec` as the current user; in a real
+  session it runs only if Playwright's browsers are installed in the
   sandbox home (`npx playwright install chromium` in a session).
 - [ ] **Account changes need a macOS privacy permission.** Changing an
   existing account's home directory, and deleting an account, make
   `opendirectoryd` ask TCC for `kTCCServiceSystemPolicySysAdminFiles`
   ("would like to administer your computer"). The permission belongs to the
   app the command was started from (the terminal), not to `sv2`, the helper
-  or root. While the prompt waits, the `dscl` call hangs (about 290 seconds,
-  then `eUndefinedError`); if the answer is no, it fails at once with
-  `eDSPermissionError`. This affects `profile remove` and `uninstall`. A
-  repeated `profile add` no longer asks: the helper does not write an
-  attribute that already has the wanted value. The helper stays consistent (the verb can
-  be run again), but it holds the registry lock for the whole wait, has no
-  timeout of its own on `dscl`, and passes the raw `dscl` error to the user
-  with no hint about the cause. See open item 10.
+  or root. This affects `profile remove` and `uninstall`. A repeated
+  `profile add` no longer asks: the helper does not write an attribute that
+  already has the wanted value.
+
+  Since 2026-11-26 (helper version 6) the helper no longer waits as long as
+  macOS would, about 290 seconds with the registry lock held. Every write
+  to the directory (`dscl` and `dseditgroup`) is given 60 seconds. After 3
+  the helper says what it is waiting for and to answer "Allow". At 60 it
+  kills the tool and fails, naming the permission. A refusal
+  (`eDSPermissionError`) fails at once with the permission's name and
+  `tccutil reset SystemPolicySysAdminFiles`, which makes macOS ask again
+  (the service name was checked against `tccutil`). Either way the verb can
+  be run again. Unit tests cover the time limit, the notice, and telling a
+  refusal from other failures, against stand-ins for the tools.
+
+  Verified by hand on 2026-11-27, on the development Mac, with a throwaway
+  profile and `sv2 profile remove`:
+  - after `tccutil reset SystemPolicySysAdminFiles` macOS asked, and the
+    helper said what it was waiting for after about 3 seconds;
+  - "Don't Allow" failed the command at once with the refusal message, and
+    so did the next attempt, with no prompt;
+  - a second `tccutil reset` brought the prompt back, which is what the
+    refusal message promises;
+  - left unanswered, the command failed after about 60 seconds with the
+    other message;
+  - after "Allow", the removal run again succeeded.
+
+  Not verified: which tool met the prompt in that run, so what
+  `dseditgroup` prints when refused has still not been seen (if it words a
+  refusal differently, the helper reports an ordinary failure without the
+  hint); what the request does inside `opendirectoryd` after its `dscl` is
+  killed. The lock is still held for the 60 seconds. The rest is open
+  item 10.
 
 ### Security gaps
 
@@ -1230,9 +1265,12 @@ None recorded.
 
 ### Features not in milestone 1
 
-- [ ] remove "--all-profiles" uninstall as a capability; too dangerous
-- [ ] the path search list for each agent includes both native and homebrew paths. That creates a problem where the binary could be out-of-date because the wrong one is being executed. Create separate entries for native vs. homebrew.
-- [ ] Shorten usage: doesn't need to be exhaustive (e.g. remove "refuses while..."), no newlines for agents, repair PATH shorter help, single-line help strings for commands, shorter explanation of shortening
+- [x] `uninstall --all-profiles` stays. Removing it was considered and
+  decided against on 2026-11-26.
+- [x] Each install of an agent has its own list of paths (commit 1db821c),
+  and the help is one line a command (commit 0be3f72).
+- [x] The user's configuration in sandbox homes; see "The user's
+  configuration" under "Milestone 1".
 - [x] `sv2 doctor`; see "Doctor" under "Milestone 1".
 - [x] The guest-side launcher (open item 5); see "Guest launcher" under
   "Milestone 1". There is no unpacked payload.
@@ -1352,9 +1390,10 @@ None recorded.
       still asks, and that cannot be skipped;
     - whether a launchd daemon is asked at all, since it has no responsible
       app. This is now the main reason to do open item 3;
-    - what the user is told: detect `eDSPermissionError` and the long wait,
-      name the permission and where to grant it, and document it in the
-      README. v1 creates and deletes accounts the same way, so check whether
-      it has the same dependency;
-    - a timeout on `dscl` shorter than the daemon's, and whether to release
-      the registry lock while waiting.
+    - done 2026-11-26: the user is told. The helper detects
+      `eDSPermissionError` and the long wait and names the permission (see
+      "Account changes need a macOS privacy permission"), and
+      `README-SV2.md` documents it. Still to check: whether v1, which
+      creates and deletes accounts the same way, has the same dependency;
+    - done 2026-11-26: a limit of 60 seconds on each write. Still open:
+      whether to release the registry lock while waiting.
