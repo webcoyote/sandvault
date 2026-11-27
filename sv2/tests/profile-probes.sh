@@ -49,6 +49,9 @@ denied "read a raw disk" /bin/sh -c 'head -c 1 /dev/rdisk0'
 allowed "fork and exec, pipes" /bin/sh -c 'echo a | tr a b | grep -q b'
 allowed "id shows names" /bin/sh -c 'test "$(id -un)" != "$(id -u)" && id -gn >/dev/null'
 allowed "ps shows this process" /bin/sh -c '/bin/ps -o pid= -p $$ | grep -q .'
+# nice exits with the command's status either way; what it could not do is
+# only in what it prints.
+allowed "lower own priority" /bin/sh -c 'out="$(/usr/bin/nice -n 5 /usr/bin/true 2>&1)"; echo "$out"; test -z "$out"'
 allowed "signals to own processes" /bin/sh -c 'sleep 30 & p=$!; kill $p && ! wait $p'
 allowed "sysctl reads" /bin/sh -c 'sysctl -n hw.ncpu kern.ostype >/dev/null'
 allowed "date, hostname, uname" /bin/sh -c 'date >/dev/null && uname -a >/dev/null'

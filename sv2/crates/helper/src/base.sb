@@ -27,6 +27,12 @@
 ;; kernel's ordinary rule: processes of the same user.
 (allow signal)
 
+;; Scheduling priority: nice, renice, and zsh, which lowers the priority of
+;; every background job and says "nice(5) failed" at each one when it may
+;; not. Probe "lower own priority". Whose priority, and that it only goes
+;; down, is the kernel's ordinary rule.
+(allow system-sched)
+
 ;; Terminals: tmux, script, an editor's terminal, an agent's shell tool.
 ;; Probes "open a pty" and "tmux server" (forkpty fails without it).
 (allow pseudo-tty)

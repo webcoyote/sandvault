@@ -962,6 +962,13 @@ Decisions this milestone made:
     `hid-control` before `TIOCSTI`, and nothing allows it (seen in the
     first installed run: the ioctl fails with "Operation not permitted").
     The session's own pty is still there as the second defence.
+  - *Scheduling priority (2026-11-26, profile version 4).* `system-sched`
+    is allowed. Without it `nice` and `renice` fail, and zsh, which lowers
+    the priority of every background job, prints "nice(5) failed: operation
+    not permitted" at each one. It was found when a `.zshrc` of the user's
+    own, copied into a sandbox home, started a background job. Probe "lower
+    own priority". Passes under `sandbox-exec` as the current user; not yet
+    run in a session, which needs `sv2 install` for the new version.
   - *Headless Chromium (2026-11-26, profile version 3).* v1 gained two
     Mach name prefixes on `main` (285dd0e) so that Playwright's Chromium
     builds start. Under default deny the same builds need more: the
