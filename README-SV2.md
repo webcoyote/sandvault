@@ -100,7 +100,8 @@ shortened: `sv2 s` is `sv2 shell`.
 
 The sandbox is a separate account under a `sandbox-exec` profile. It is not
 a virtual machine. One way around the profile is known and not yet closed:
-see "Security gaps" in the design document.
+see open item 7, "launchd as a route around the profile", in the design
+document.
 
 
 ## Your configuration in the sandbox

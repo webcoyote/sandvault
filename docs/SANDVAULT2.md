@@ -291,9 +291,6 @@ on for all users, the sandbox user can connect to its own account, because
 
 This is built; see "SSH lockdown" under "Milestone 1".
 
-Other routes to audit before release: cron, `at`, launchd agents, Screen
-Sharing.
-
 ## Command line
 
 ```
@@ -1381,7 +1378,7 @@ items" below.
 
 ### Priority order
 
-**Decided 2026-11-25, brought up to date 2026-11-26.** The sections below
+**Decided 2026-11-25, brought up to date 2026-11-27.** The sections below
 group items by kind; this is the order to do them in. (This section was
 dropped from the document by mistake in commit 9a52da3 and put back.)
 
@@ -1391,21 +1388,16 @@ dropped from the document by mistake in commit 9a52da3 and put back.)
    quarantine handling, and `sv2 agent new`.
 3. Done: the safer `uninstall`, default deny, `sv2 doctor`, repository
    credentials, and the verification that needed no push.
-4. Next (order still to be settled, 2026-11-26): per-profile capabilities
-   and a narrower rule for reading files (open item 8); the iOS bridge.
-   Done 2026-11-27: a position on localhost and port 22 (see "Local port
-   22" under "Milestone 1"); the
-   `sv2 repair` questions (open item 9), all five decided; a deploy key
-   and a token used for real; `--chrome` and `--lightpanda`. Done 2026-11-26: the leftover verification
-   that needed root (`use_pty`, the ACL checks), see
-   `sv2/tests/mutation-checks` under "Not yet verified". Also done that day:
-   copying the user's configuration into a sandbox home, see "The user's
-   configuration" under "Milestone 1".
-5. Put off on 2026-11-26, until asked for: Homebrew packaging; the daemon
-   (open items 3 and 10); the planted `~/Library/LaunchAgents` measurement
-   (open item 7); CI on a runner; checking codex, gemini, opencode and pi
-   against their programs. (Definitions for muse and herdr, and wrapper
-   scripts, done 2026-11-27.)
+4. Done 2026-11-27: a position on localhost and port 22 (see "Local port
+   22" under "Milestone 1"); the `sv2 repair` questions (open item 9), all
+   five decided; a deploy key and a token used for real; `--chrome` and
+   `--lightpanda`; definitions for muse and herdr, and wrapper scripts.
+   Done 2026-11-26: the leftover verification that needed root
+   (`use_pty`, the ACL checks), see `sv2/tests/mutation-checks` under "Not
+   yet verified"; copying the user's configuration into a sandbox home,
+   see "The user's configuration" under "Milestone 1".
+5. What is left is in the backlog, ordered by its priority. The move to a
+   launchd daemon (TASK-0022) is done last.
 
 ### Not yet verified
 
@@ -1465,59 +1457,6 @@ hand-back at `profile remove` and in `sv2 repair`, and the three repair
 checks whose counts had been corrected. Before that, against helper
 version 6, the suite's new removal check failed as it should.
 
-- [ ] **CI steps are unverified.** `.github/workflows/ci.yml` has "Install
-  sandvault2" and "SandVault2 Tests"; neither has run on a runner, because
-  the branch has not been pushed. The first also turns Remote Login on
-  (`launchctl load -w .../ssh.plist`) so that the suite's SSH login attempt
-  runs; whether that works on a runner is unknown. Read against the code on
-  2026-11-26: the step now installs `shellcheck` and `tmux`, which the
-  tests need and fail without under `SV_TESTS_FAIL_ON_SKIP`.
-- [ ] **The SSH lockdown is partly verified.** `sv2 install` with it, the
-  integration suite, and `sv2 uninstall` (root-checks: the drop-in and the
-  group go, and sshd's configuration still parses) have run. Still
-  unverified: whether adding to or removing from the group raises the
-  "administer your computer" prompt (open item 10); and, on a Mac where
-  Remote Login is open to all users, that the suite's login attempt
-  succeeds against a build without the drop-in. On the development Mac
-  Remote Login is limited to listed users, so that attempt is refused
-  either way.
-- [ ] **Parts of the kill and workspace-root changes are untested.** The
-  integration suite covers the full pipe, the fork storm, stop signals in
-  a session, and (since 2026-11-26) `^Z` typed at a helper that holds the
-  lock, with a control that the same keystrokes suspend a session. Not
-  covered: an account that stops the kill child on purpose (the path that
-  continues it runs on every removal, because on macOS the child stops
-  itself); `install` over a `sv2` directory that really belongs to
-  another user (root-checks makes the directory as the user who runs it,
-  which exercises the same code). Seen while writing the `^Z` check and not pursued: `^Z` typed
-  while sudo is still starting, before the helper runs, can leave that one
-  sudo waiting for good. Nothing is locked at that point.
-- [ ] **The integration suite fails now and then for a known reason.** In
-  9 runs in a row on 2026-11-26, one failed: `dscl . -delete` of an account
-  waited on the "administer your computer" permission (open item 10) for
-  more than a minute, with the helper holding the lock, so that removal
-  and the next one failed. Which removal meets it is chance. The `^Z`
-  check's watchdog prints the processes when it happens and says so.
-  Since helper version 6 such a removal fails after 60 seconds and names
-  the permission. The suite still fails when it happens, since nobody
-  answers the prompt; it fails sooner, and says why.
-- [ ] **Parts of agent definitions have not run.** Unit tests, the
-  integration suite (126 of 126, 2026-11-26, with a test agent) and the two
-  measurements with `claude` cover the rest. Not run: the Homebrew install
-  itself (`brew install` from `sv2`), since `claude` was already installed;
-  a Mac without Homebrew or with a prefix the user cannot write; a user
-  definition in `~/.config/sandvault2/agents` on a real machine (unit tests
-  cover the precedence); built-ins found in an installed `share/` directory
-  under a real Homebrew prefix, which does not exist until sv2 is packaged.
-- [ ] **The quarantine message has not been seen for real.** The rule
-  behind it was measured by hand and is unit-tested, also against real
-  files and the real `codesign`. Not run: `sv2` installing a cask that is
-  not notarized, which is the only way the message appears.
-- [ ] **The suite skips the headless browser probe.** It runs only if
-  Playwright's browsers are installed in the sandbox home (`npx playwright
-  install chromium` in a session), and the suite's throwaway profile has
-  none. What the probe does was run by hand in a session on 2026-11-27 and
-  passed; see "Headless Chromium" under "Milestone 1".
 - [ ] **Account changes need a macOS privacy permission.** Changing an
   existing account's home directory, and deleting an account, make
   `opendirectoryd` ask TCC for `kTCCServiceSystemPolicySysAdminFiles`
@@ -1550,20 +1489,11 @@ version 6, the suite's new removal check failed as it should.
     other message;
   - after "Allow", the removal run again succeeded.
 
-  Not verified: which tool met the prompt in that run, so what
-  `dseditgroup` prints when refused has still not been seen (if it words a
-  refusal differently, the helper reports an ordinary failure without the
-  hint); what the request does inside `opendirectoryd` after its `dscl` is
-  killed. The lock is still held for the 60 seconds. The rest is open
-  item 10.
+  The rest is open item 10.
 
 ### Security gaps
 
-- [ ] **launchd as a route around the profile** (open item 7). The direct
-  routes are refused (measured, not yet a test). Still open: a plist the
-  sandbox plants in `~/Library/LaunchAgents` may load when the account's
-  launchd domain is next created, and would run unconfined as the sandbox
-  user.
+None recorded.
 
 ### Functional gaps
 
@@ -1593,48 +1523,25 @@ None recorded.
 - [x] Default deny; see "Default deny" under "Milestone 1".
 - [x] A position on localhost and port 22; see "Sandbox profile" and
   "Local port 22" under "Milestone 1".
-- [ ] Per-profile capabilities (open item 8) and a narrower rule for
-  reading files. Both deferred on 2026-11-26.
 - [x] Repository credentials: `sv2 deploy-key` and `sv2 gh-token`; see
   "Repository credentials" under "Milestone 1".
 - [x] Browser support: `--chrome` and `--lightpanda`; see "Browsers" under
-  "Milestone 1". Not built: Chromium.app as a second choice for `--chrome`,
-  which no one has measured.
+  "Milestone 1".
 - [x] `system_prompt` in agent definitions: how an agent takes text for
   its system prompt; see "Text for the system prompt" under "Agent
   definitions". A flag only, and `claude` and `pi` have it. `sv2` has no text
-  to give yet (next item).
-- [ ] Telling an agent that its session has a browser. With `--chrome` or
-  `--lightpanda` a session gets `SV_BROWSER_ENDPOINT` and nothing says so;
-  v1 adds `prompts/browser.md` to the agent's system prompt. Depends on
-  `system_prompt`, above. The text should carry Chrome's limit (a window
-  that closes ends it; attach, do not launch).
-- [ ] iOS bridge, and the simulator trust question (open item 2).
-- [ ] Homebrew packaging of `sv2` itself, and upgrade handling when `sv2` and
-  the installed helper differ in version.
-- [ ] Move from the sudoers helper to a launchd daemon (open item 3). Done
-  last: see "Priority order".
+  to give yet (TASK-0009).
 
 ## Open items
 
 1. **Quarantine.** Decided on 2026-11-26; see "Quarantine" under
    "Milestone 1". sv2 neither runs a fresh program on the host, as v1 did,
    nor removes the attribute.
-2. **Simulator trust.** Confirm from the host side whether simulator apps run
-   unconfined as the host user, then document what `--ios` grants.
+2. **Simulator trust.** In TASK-0006.
 3. **Daemon follow-up.** Scope and timing of the move from the sudoers helper
    to a launchd daemon.
 
-   **Noted 2026-11-25; scheduled last, see "Priority order":** the daemon is the likely fix for the
-   "administer your computer" prompt (open item 10). Under sudo, macOS
-   charges the helper's account changes to the terminal app the user ran
-   `sv2` from, prompts for it again every few minutes, and blocks the helper
-   for about 290 seconds when nobody answers. A daemon started by launchd has
-   no such app behind it. Before building it, measure with a throwaway
-   LaunchDaemon that deletes a test account: is the request granted, refused,
-   or still shown to someone? If it is granted, move at least account
-   creation and deletion into the daemon; `launch` can stay on sudo if that
-   keeps the session's terminal handling simple.
+   In TASK-0022, scheduled last, after the measurement in TASK-0015.
 4. **Terminal.** Decided in milestone 1; see "Milestone 1".
 5. **Guest-side launcher.** Decided: a script compiled into `sv2` and
    passed on the command line, which gets an agent's data and install
@@ -1642,26 +1549,11 @@ None recorded.
    "Milestone 1". It was not to be the helper after it drops privileges:
    that would put definition parsing into the binary that runs as root.
 6. **Registry format.** Decided in milestone 1; see "Milestone 1".
-7. **launchd as a route around the profile.** Measure whether a session can
-   start a job in its own launchd domain (`launchctl bootstrap` or `submit`,
-   or a plist in `~/Library/LaunchAgents`). Such a job would run as the
-   sandbox user without the `sandbox-exec` profile.
-
-   Measured on macOS 26.7 from inside a session: `launchctl submit`,
-   `bootstrap user/<uid>`, `bootstrap gui/<uid>` and `load` all fail, and no
-   job ran. Not measured: whether a planted `~/Library/LaunchAgents` plist
-   (with `LimitLoadToSessionType` `Background`, the domain's session type)
-   loads when the domain is created. The domain outlives the session, because
-   launchd starts system agents in it (`distnoted`) that keep running, so the
-   test needs `launchctl bootout user/<uid>` as root, or a reboot, before the
-   next session. Those system agents also run as the sandbox user outside the
-   profile; they are Apple's code, reachable only through what the profile
-   allows.
-8. **Per-profile capabilities.** The format the host user uses to define a
-   profile's capabilities: a fixed set of named capabilities the helper maps
-   to rules it already contains, or raw SBPL rules added to the base profile.
-   Named capabilities keep root's parser small and every rule reviewed. Raw
-   SBPL is more flexible, but the helper then has to parse and validate it.
+7. **launchd as a route around the profile.** In TASK-0013, with what has
+   been measured. Apple's system agents (`distnoted`) that launchd starts
+   in the domain run as the sandbox user outside the profile; they are
+   Apple's code, reachable only through what the profile allows.
+8. **Per-profile capabilities.** In TASK-0005.
 9. **What `sv2 repair` should do.** Decided. On 2026-11-25: it runs
    automatically after `profile add` and `profile remove`, and it makes the
    host user the owner (see "Workspace permissions" and "`sv2 repair`" under
@@ -1703,19 +1595,11 @@ None recorded.
     - `opendirectoryd` did not restart. Creating an account, and reads, were
       never affected.
 
-    To find out and decide:
-    - why requests were granted silently before 19:26 and prompted after;
-    - exactly which operations ask: the home directory attribute and record
-      deletion were seen; check `IsHidden`, group membership and the rest;
-    - done: the helper no longer re-sets an attribute that already has the
-      right value, which spares a repeated `profile add`. Deleting an account
-      still asks, and that cannot be skipped;
-    - whether a launchd daemon is asked at all, since it has no responsible
-      app. This is now the main reason to do open item 3;
-    - done 2026-11-26: the user is told. The helper detects
-      `eDSPermissionError` and the long wait and names the permission (see
-      "Account changes need a macOS privacy permission"), and
-      `README-SV2.md` documents it. Still to check: whether v1, which
-      creates and deletes accounts the same way, has the same dependency;
-    - done 2026-11-26: a limit of 60 seconds on each write. Still open:
-      whether to release the registry lock while waiting.
+    Done: the helper no longer re-sets an attribute that already has the
+    right value, which spares a repeated `profile add` (deleting an
+    account still asks, and that cannot be skipped); since 2026-11-26 the
+    helper detects `eDSPermissionError` and the long wait, names the
+    permission, and gives each write 60 seconds (see "Account changes need
+    a macOS privacy permission"), and `README-SV2.md` documents it. What is
+    left is in TASK-0015 (what asks, and whether a daemon is asked) and
+    TASK-0018 (the suite's failures, and the lock held while waiting).
