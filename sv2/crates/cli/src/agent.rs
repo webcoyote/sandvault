@@ -20,6 +20,7 @@
 //! no_inject = ["update"]      # subcommands that do not get the flag
 //! inject_last = ["config"]    # subcommands that get it after their arguments
 //! system_prompt = { flag = "--append-system-prompt" }   # how it takes text
+//! # or: system_prompt = { config = { flag = "--config", key = "run.x" } }
 //! env = { NAME = "value" }    # set for the agent
 //! wrapper = "run.sh"          # runs in the sandbox, and runs the agent
 //! ```
@@ -118,12 +119,21 @@ struct RunFile {
     wrapper: Option<String>,
 }
 
-/// How the agent takes text for its system prompt. A table, so that a way
-/// other than a flag is a new key here and not a new shape.
+/// How the agent takes text for its system prompt: exactly one of the keys.
+/// A table, so that another way is a new key here and not a new shape.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SystemPromptFile {
+    flag: Option<String>,
+    config: Option<SettingFile>,
+}
+
+/// A setting given on the command line: `--config KEY=VALUE` (muse).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettingFile {
     flag: String,
+    key: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -170,13 +180,70 @@ pub struct Definition {
     pub inject_last: Vec<String>,
     /// Set for the agent, in name order.
     pub env: Vec<(String, String)>,
-    /// The option whose value the agent adds to its system prompt. sv2
-    /// tells the agent about its session this way.
-    pub prompt_flag: Option<String>,
+    /// How the agent takes text for its system prompt. sv2 tells the agent
+    /// about its session this way.
+    pub prompt: Option<Prompt>,
     /// The name and text of the wrapper script: it runs in the sandbox in
     /// place of the agent, is given the agent's path and its arguments,
     /// and is expected to run it.
     pub wrapper: Option<(String, String)>,
+}
+
+/// How an agent takes text for its system prompt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Prompt {
+    /// An option whose value is the text: `--append-system-prompt TEXT`.
+    Flag(String),
+    /// An option whose value sets one setting, the text as a JSON string:
+    /// `--config KEY="TEXT"`.
+    Setting { flag: String, key: String },
+}
+
+impl Prompt {
+    /// The option that comes before the value.
+    pub fn flag(&self) -> &str {
+        match self {
+            Prompt::Flag(flag) | Prompt::Setting { flag, .. } => flag,
+        }
+    }
+
+    /// The option's value that carries `text`.
+    fn value(&self, text: &str) -> String {
+        match self {
+            Prompt::Flag(_) => text.to_string(),
+            Prompt::Setting { key, .. } => format!("{key}={}", json_string(text)),
+        }
+    }
+}
+
+/// `text` as a JSON string. Every control character is escaped, so the
+/// result is also a valid TOML basic string.
+fn json_string(text: &str) -> String {
+    let mut s = String::with_capacity(text.len() + 2);
+    s.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => s.push_str("\\\""),
+            '\\' => s.push_str("\\\\"),
+            '\n' => s.push_str("\\n"),
+            '\r' => s.push_str("\\r"),
+            '\t' => s.push_str("\\t"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                s.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => s.push(c),
+        }
+    }
+    s.push('"');
+    s
+}
+
+/// A setting's name: lower case words joined by `.`, `_` or `-`.
+fn valid_setting_key(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.starts_with(|c: char| c.is_ascii_lowercase())
+        && s.bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(&c))
 }
 
 /// Where the flag goes on one command line.
@@ -386,12 +453,32 @@ impl Definition {
         if !file.run.inject_last.is_empty() && file.run.bypass_flag.is_none() {
             return Err("inject_last needs a bypass_flag to place".to_string());
         }
-        let prompt_flag = file.run.system_prompt.map(|p| p.flag);
-        if let Some(flag) = &prompt_flag {
+        let prompt = match file.run.system_prompt {
+            None => None,
+            Some(SystemPromptFile {
+                flag: Some(flag),
+                config: None,
+            }) => Some(Prompt::Flag(flag)),
+            Some(SystemPromptFile {
+                flag: None,
+                config: Some(SettingFile { flag, key }),
+            }) => {
+                if !valid_setting_key(&key) {
+                    return Err(format!(
+                        "system_prompt config key '{key}' must be lower case words joined by '.', '_' or '-'"
+                    ));
+                }
+                Some(Prompt::Setting { flag, key })
+            }
+            Some(_) => {
+                return Err("system_prompt needs one of flag or config".to_string());
+            }
+        };
+        if let Some(flag) = prompt.as_ref().map(Prompt::flag) {
             if !valid_flag(flag) {
                 return Err(format!("system_prompt flag '{flag}' is not a long option"));
             }
-            if file.run.bypass_flag.as_ref() == Some(flag) {
+            if file.run.bypass_flag.as_deref() == Some(flag) {
                 return Err(format!(
                     "'{flag}' is both bypass_flag and the system_prompt flag"
                 ));
@@ -427,7 +514,7 @@ impl Definition {
             no_inject: file.run.no_inject,
             inject_last: file.run.inject_last,
             env: file.run.env.into_iter().collect(),
-            prompt_flag,
+            prompt,
             wrapper,
         })
     }
@@ -455,31 +542,32 @@ impl Definition {
         }
     }
 
-    /// The option that carries text for the agent's system prompt on this
-    /// command line. None when the definition names no way to give it, and
-    /// for a subcommand in either list: those lists name commands that
-    /// manage the program, which have no system prompt, and a subcommand
-    /// that takes the bypass flag only after its arguments would not know
-    /// this one in front of them.
-    pub fn prompt_flag_for(&self, args: &[OsString]) -> Option<&str> {
-        let flag = self.prompt_flag.as_deref()?;
+    /// How text for the agent's system prompt goes on this command line.
+    /// None when the definition names no way to give it, and for a
+    /// subcommand in either list: those lists name commands that manage the
+    /// program, which have no system prompt, and a subcommand that takes the
+    /// bypass flag only after its arguments would not know this one in
+    /// front of them.
+    pub fn prompt_for(&self, args: &[OsString]) -> Option<&Prompt> {
+        let prompt = self.prompt.as_ref()?;
         let listed =
             Self::first_is_in(&self.no_inject, args) || Self::first_is_in(&self.inject_last, args);
-        (!listed).then_some(flag)
+        (!listed).then_some(prompt)
     }
 
     /// The agent's arguments as they are run. `told` is what sv2 has to say
-    /// to the agent about its session; it travels as one argument, after
-    /// the option that takes it, whatever is in it.
+    /// to the agent about its session; it travels as one argument after the
+    /// option that takes it, as the definition says (as it is, or as a
+    /// setting's JSON value), whatever is in it.
     pub fn final_args(&self, args: &[OsString], told: Option<&str>) -> Vec<OsString> {
         let mut v: Vec<OsString> = Vec::new();
         let bypass = self.flag_for(args);
         if let Flag::First(flag) = bypass {
             v.push(flag.into());
         }
-        if let (Some(flag), Some(text)) = (self.prompt_flag_for(args), told) {
+        if let (Some(prompt), Some(text)) = (self.prompt_for(args), told) {
             if !text.is_empty() {
-                v.extend([flag.into(), text.into()]);
+                v.extend([prompt.flag().into(), prompt.value(text).into()]);
             }
         }
         v.extend(args.iter().cloned());
@@ -1016,7 +1104,7 @@ no_inject = ["update"]
                 no_inject: vec!["update".into()],
                 inject_last: vec![],
                 env: vec![],
-                prompt_flag: None,
+                prompt: None,
                 wrapper: None,
             }
         );
@@ -1242,6 +1330,62 @@ no_inject = ["update"]
                     "system_prompt = { flag = \"--dangerously-skip-permissions\" }\nno_inject",
                 ),
             ),
+            (
+                "a system prompt both ways",
+                with(
+                    "no_inject",
+                    "system_prompt = { flag = \"--a\", config = { flag = \"--config\", key = \"k\" } }\nno_inject",
+                ),
+            ),
+            (
+                "a setting with no key",
+                with(
+                    "no_inject",
+                    "system_prompt = { config = { flag = \"--config\" } }\nno_inject",
+                ),
+            ),
+            (
+                "a setting with a short option",
+                with(
+                    "no_inject",
+                    "system_prompt = { config = { flag = \"-c\", key = \"k\" } }\nno_inject",
+                ),
+            ),
+            (
+                "a setting key with an equals sign",
+                with(
+                    "no_inject",
+                    "system_prompt = { config = { flag = \"--config\", key = \"k=x\" } }\nno_inject",
+                ),
+            ),
+            (
+                "a setting key with a space",
+                with(
+                    "no_inject",
+                    "system_prompt = { config = { flag = \"--config\", key = \"a b\" } }\nno_inject",
+                ),
+            ),
+            (
+                "an empty setting key",
+                with(
+                    "no_inject",
+                    "system_prompt = { config = { flag = \"--config\", key = \"\" } }\nno_inject",
+                ),
+            ),
+            (
+                "a setting with something else",
+                with(
+                    "no_inject",
+                    "system_prompt = { config = { flag = \"--config\", key = \"k\", x = 1 } }\nno_inject",
+                ),
+            ),
+            (
+                "a setting by the bypass flag",
+                with(
+                    "no_inject",
+                    "system_prompt = { config = { flag = \"--dangerously-skip-permissions\", key = \"k\" } }\nno_inject",
+                ),
+            ),
         ];
         for (why, text) in cases {
             assert!(parse(&text).is_err(), "accepted: {why}");
@@ -1353,7 +1497,10 @@ no_inject = ["update"]
             .unwrap()
         };
         let d = with_prompt(CLAUDE);
-        assert_eq!(d.prompt_flag.as_deref(), Some("--append-system-prompt"));
+        assert_eq!(
+            d.prompt.as_ref().map(Prompt::flag),
+            Some("--append-system-prompt")
+        );
         let bypass = "--dangerously-skip-permissions";
         let flag = "--append-system-prompt";
         // One argument, whatever is in it: lines, quotes, a leading dash.
@@ -1370,8 +1517,11 @@ no_inject = ["update"]
         );
         // Listed in no_inject: neither flag, and nothing of the text.
         assert_eq!(d.final_args(&os(&["update"]), Some(text)), os(&["update"]));
-        assert_eq!(d.prompt_flag_for(&os(&["update"])), None);
-        assert_eq!(d.prompt_flag_for(&os(&["-p", "update"])), Some(flag));
+        assert_eq!(d.prompt_for(&os(&["update"])).map(Prompt::flag), None);
+        assert_eq!(
+            d.prompt_for(&os(&["-p", "update"])).map(Prompt::flag),
+            Some(flag)
+        );
         // Nothing to say: the command line is what it was without the key.
         let without = parse(CLAUDE).unwrap();
         for args in [os(&[]), os(&["-p", "hi"]), os(&["update"])] {
@@ -1382,7 +1532,7 @@ no_inject = ["update"]
             );
         }
         // A definition without the key is not told, and runs as before.
-        assert_eq!(without.prompt_flag_for(&[]), None);
+        assert_eq!(without.prompt_for(&[]), None);
         assert_eq!(
             without.final_args(&os(&["-p", "hi"]), Some(text)),
             os(&[bypass, "-p", "hi"])
@@ -1414,6 +1564,64 @@ no_inject = ["update"]
         assert_eq!(plain.trust_line(&[]), None);
     }
 
+    /// muse's shape: the text is a setting, `--config KEY=<JSON string>`,
+    /// in one argument after the option, and only where a chat could start.
+    #[test]
+    fn text_for_the_system_prompt_as_a_setting() {
+        let d = parse(
+            "schema = 1\n[install.host]\nbinary = [\"/bin/echo\"]\n[run]\nbypass_flag = \"--yolo\"\n\
+             no_inject = [\"mcp\"]\ninject_last = [\"exec\"]\n\
+             system_prompt = { config = { flag = \"--config\", key = \"run.system_prompt_append\" } }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            d.prompt,
+            Some(Prompt::Setting {
+                flag: "--config".into(),
+                key: "run.system_prompt_append".into()
+            })
+        );
+        let text =
+            "--not an option\nA \"second\" line\twith $HOME, \\ and 'quotes'.\u{1b}\u{7f}é\n";
+        let value = "run.system_prompt_append=\
+                     \"--not an option\\nA \\\"second\\\" line\\twith $HOME, \\\\ and 'quotes'.\\u001b\\u007fé\\n\"";
+        assert_eq!(
+            d.final_args(&os(&["hi"]), Some(text)),
+            os(&["--yolo", "--config", value, "hi"])
+        );
+        assert_eq!(
+            d.final_args(&[], Some("t")),
+            os(&["--yolo", "--config", "run.system_prompt_append=\"t\""])
+        );
+        // Neither list gets it, whatever the first argument's place.
+        assert_eq!(
+            d.final_args(&os(&["exec", "hi"]), Some("t")),
+            os(&["exec", "hi", "--yolo"])
+        );
+        assert_eq!(d.final_args(&os(&["mcp"]), Some("t")), os(&["mcp"]));
+        // Nothing to say, nothing added.
+        assert_eq!(d.final_args(&os(&["hi"]), Some("")), os(&["--yolo", "hi"]));
+        assert_eq!(d.final_args(&os(&["hi"]), None), os(&["--yolo", "hi"]));
+    }
+
+    /// The value is a JSON string: every control character escaped, and
+    /// the rest as it is.
+    #[test]
+    fn a_json_string() {
+        assert_eq!(json_string(""), "\"\"");
+        assert_eq!(json_string("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        assert_eq!(json_string("\n\r\t"), "\"\\n\\r\\t\"");
+        assert_eq!(
+            json_string("\u{0}\u{1f}\u{7f}"),
+            "\"\\u0000\\u001f\\u007f\""
+        );
+        assert_eq!(json_string("${X} é 日本 / '"), "\"${X} é 日本 / '\"");
+        // Every character of the first 256 that is not printable is escaped.
+        let all: String = (0u8..=255).map(char::from).collect();
+        let out = json_string(&all);
+        assert!(!out.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}'));
+    }
+
     /// Every definition that ships parses, has its script, and says what
     /// its flag or variables grant.
     #[test]
@@ -1442,7 +1650,10 @@ no_inject = ["update"]
             if name == "claude" {
                 // Measured against the real program: its commands for
                 // background sessions must be the first word.
-                assert_eq!(d.prompt_flag.as_deref(), Some("--append-system-prompt"));
+                assert_eq!(
+                    d.prompt.as_ref().map(Prompt::flag),
+                    Some("--append-system-prompt")
+                );
                 assert_eq!(
                     d.final_args(&os(&["stop", "1"]), Some("t")),
                     os(&["stop", "1"])
@@ -1466,8 +1677,53 @@ no_inject = ["update"]
                     "auth",
                     "mcp",
                 ] {
-                    assert_eq!(d.prompt_flag_for(&os(&[sub])), None, "{sub}");
+                    assert_eq!(d.prompt_for(&os(&[sub])).map(Prompt::flag), None, "{sub}");
                 }
+            }
+            if name == "muse" {
+                // Measured against muse 1.4.25: a subcommand must be the
+                // first word, and none takes an option in front. exec,
+                // resume and attach take --yolo after their arguments; the
+                // others refuse it either side.
+                assert_eq!(
+                    d.final_args(&os(&["hi"]), Some("t")),
+                    os(&["--yolo", "--config", "run.system_prompt_append=\"t\"", "hi"])
+                );
+                for sub in ["exec", "resume", "attach"] {
+                    assert_eq!(d.flag_for(&os(&[sub])), Flag::Last("--yolo"), "{sub}");
+                }
+                for sub in [
+                    "resume",
+                    "exec",
+                    "config",
+                    "export",
+                    "trace",
+                    "model-profile",
+                    "skills",
+                    "voice",
+                    "plugins",
+                    "sandbox",
+                    "schema",
+                    "serve",
+                    "mxp",
+                    "attach",
+                    "acp",
+                    "session-message",
+                    "sessions",
+                    "mcp",
+                    "auth",
+                    "login",
+                    "logout",
+                    "usage",
+                    "init",
+                    "help",
+                ] {
+                    assert_eq!(d.final_args(&os(&[sub]), Some("t"))[0], sub, "{sub}");
+                }
+            }
+            if name == "herdr" {
+                // A multiplexer: no system prompt of its own to add to.
+                assert_eq!(d.prompt, None);
             }
             seen.push(name);
         }
@@ -1764,7 +2020,10 @@ no_inject = ["update"]
             d.env,
             [("EXAMPLE_VARIABLE".to_string(), "value".to_string())]
         );
-        assert_eq!(d.prompt_flag.as_deref(), Some("--append-system-prompt"));
+        assert_eq!(
+            d.prompt.as_ref().map(Prompt::flag),
+            Some("--append-system-prompt")
+        );
         assert!(d.guest_install.is_some());
         assert_eq!(d.wrapper.map(|(file, _)| file).as_deref(), Some("run.sh"));
         assert_eq!(

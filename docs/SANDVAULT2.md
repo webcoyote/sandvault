@@ -796,12 +796,12 @@ Decisions this milestone made:
     wrappers included, are linted by `scripts/tests-sv2`; a user's own
     are not.
   - *muse and herdr (2026-11-27)* are built-ins, taken from v1's wrappers
-    and install steps. muse is data only (`--yolo`; muse 1.0.2 had no way
-    to add to its system prompt, so it will not get `system_prompt`
-    either). herdr has no flag (it is a multiplexer, not an agent) and a
-    wrapper that refuses a session with a browser: its server outlives
-    the session, as a tmux server does (see "Terminal multiplexers"), and
-    its panes would keep `SV_BROWSER_ENDPOINT` after the browser has
+    and install steps. muse is data only (`--yolo`, and its text for the
+    system prompt as a setting: see "Text as a setting"). herdr has no
+    flag and no text for a system prompt (it is a multiplexer, not an
+    agent), and a wrapper that refuses a session with a browser: its
+    server outlives the session, as a tmux server does (see "Terminal
+    multiplexers"), and its panes would keep `SV_BROWSER_ENDPOINT` after the browser has
     stopped. v1 refused `--chrome` for this; in sv2 Lightpanda is stopped
     with the session too, so both are refused. v1's other refusal, of
     `--no-sandbox`, has nothing to apply to. Neither has been run under
@@ -879,6 +879,30 @@ Decisions this milestone made:
     that names an existing file as that file's contents. pi had no
     provider signed in, so no text was seen to reach a model. `codex`,
     `gemini` and `opencode` take text another way than a flag.
+  - *Text as a setting (2026-11-27).* muse 1.4.25 has no option for the
+    text; it takes it as a setting, `--config run.system_prompt_append=V`
+    with V a JSON value. A definition says so with
+    `system_prompt = { config = { flag = "--config", key = "KEY" } }`, and
+    `sv2` passes the option and `KEY="TEXT"` as two arguments, the text
+    as a JSON string with every control character escaped (so also a TOML
+    basic string, which codex's `--config` would read). A table holds
+    either `flag` or `config`, never both; both name a long option, not the
+    bypass flag. Measured against muse 1.4.25: the key with a value of two
+    lines, quotes, `${...}` and `\u` escapes is accepted, and is not
+    substituted as a secret; a misspelt key is refused ("unknown key: no
+    such setting"), and so is a value that is not JSON. Its echo provider
+    refuses a run that has the setting ("provider does not support base
+    instructions"), which shows the text goes to the system prompt; no
+    provider was signed in, so no text was seen to reach a model, and a
+    provider other than Meta's may refuse the run in the same way. Found
+    on the way: muse knows a subcommand only as the first word, and
+    refuses any option in front of one, so until then `sv2 muse exec` and
+    every other subcommand failed with `--yolo` in front (v1 had the same
+    fault). `exec`, `resume` and `attach` take `--yolo` after their
+    arguments and are in `inject_last`; the other 21 refuse it on either
+    side and are in `no_inject`. None of them gets the text. herdr is a
+    multiplexer, has no system prompt, and has no key: the agents in its
+    panes get their own text.
   - *The launcher* gets the agent as arguments: name, whether to install,
     the script's text, the wrapper's text (empty for none), a counted list
     of paths, then the agent's arguments.
@@ -1529,8 +1553,8 @@ None recorded.
   "Milestone 1".
 - [x] `system_prompt` in agent definitions: how an agent takes text for
   its system prompt; see "Text for the system prompt" under "Agent
-  definitions". A flag only, and `claude` and `pi` have it. `sv2` has no text
-  to give yet (TASK-0009).
+  definitions". A flag (`claude`, `pi`) or a setting (`muse`; "Text as a
+  setting"). `sv2` has no text to give yet (TASK-0009).
 
 ## Open items
 

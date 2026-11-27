@@ -60,6 +60,9 @@ binary = ["{brew}/bin/{name}"]
 # your arguments. Subcommands in no_inject or inject_last do not get it.
 # Check the flag against the program's --help, and that the subcommands
 # still work with it in front. Leave it out and the agent is not told.
+# A program that takes the text as a setting instead names the option and
+# the setting, and is given KEY="TEXT" with the text as a JSON string:
+#   system_prompt = { config = { flag = "--config", key = "run.system_prompt_append" } }
 #system_prompt = { flag = "--append-system-prompt" }
 
 # A shell script beside this file that runs, inside the sandbox, in the
