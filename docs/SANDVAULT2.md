@@ -936,7 +936,10 @@ Decisions this milestone made:
     too, and they lived in the two files above.
   - *`sv2 gh-token [login|status|logout]`* is v1's `sv-gh-token`: it opens
     GitHub's fine-grained token form filled in with read-only permissions,
-    reads the token without echo (or from a pipe), refuses classic and app
+    tells the user to choose "Only select repositories" and names the
+    repository of the directory it was run in (the form cannot be given
+    one; the name is read from the checkout's git config without running
+    git, since a sandbox may write there), reads the token without echo (or from a pipe), refuses classic and app
     tokens, and hands it to the sandbox's `gh auth login --with-token` on
     standard input, never on a command line.
   - `profile remove` forgets the host's copies of that profile's keys.

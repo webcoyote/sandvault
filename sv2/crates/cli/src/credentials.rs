@@ -15,8 +15,8 @@
 //!   own `gh` on standard input. It is never an argument.
 
 use std::ffi::OsString;
-use std::io::{BufRead, IsTerminal, Write};
-use std::path::PathBuf;
+use std::io::{BufRead, IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use sv2_common::Obelus;
@@ -280,6 +280,80 @@ pub fn token_url(name: &str, days: u32, owner: Option<&str>) -> String {
     url
 }
 
+/// The text of a small regular file. The directory may be one a sandbox
+/// writes to, so a FIFO under the name must not block (`O_NONBLOCK`), and
+/// nothing but a regular file is read.
+fn small_file(path: &Path) -> Option<String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(1 << 20).read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// The address of the remote `origin` in the text of a git config file.
+fn origin_url(config: &str) -> Option<&str> {
+    let mut in_origin = false;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_origin = line == "[remote \"origin\"]";
+        } else if in_origin {
+            if let Some((key, value)) = line.split_once('=') {
+                if key.trim().eq_ignore_ascii_case("url") {
+                    return Some(value.trim());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The repository a git address names, if it is on github.com.
+fn github_repo(url: &str) -> Option<Repo> {
+    let path = [
+        "git@github.com:",
+        "ssh://git@github.com/",
+        "https://github.com/",
+        "git://github.com/",
+    ]
+    .iter()
+    .find_map(|prefix| url.strip_prefix(prefix))?;
+    Repo::parse(path.strip_suffix('/').unwrap_or(path)).ok()
+}
+
+/// The GitHub repository that the checkout around `dir` was cloned from.
+///
+/// The config file is read here and git is not run: the checkout may be one
+/// a sandbox writes to, and a git config can name programs for git to run.
+/// What is read is only ever shown to the user as a suggestion, and names
+/// the owner on GitHub's form; the user chooses the repositories there.
+pub fn repo_around(dir: &Path) -> Option<Repo> {
+    let (top, dot_git) = dir
+        .ancestors()
+        .map(|d| (d, d.join(".git")))
+        .find(|(_, g)| g.symlink_metadata().is_ok())?;
+    // A worktree's `.git` is a file that names its directory, which in turn
+    // names the directory that has the config.
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let text = small_file(&dot_git)?;
+        top.join(text.strip_prefix("gitdir:")?.trim())
+    };
+    let common = match small_file(&git_dir.join("commondir")) {
+        Some(text) => git_dir.join(text.trim()),
+        None => git_dir,
+    };
+    github_repo(origin_url(&small_file(&common.join("config"))?)?)
+}
+
 /// The token in what was typed or piped in, if it is a fine-grained one.
 /// A classic token is refused: its `repo` scope writes to every repository
 /// its owner can reach.
@@ -337,11 +411,52 @@ fn read_hidden(prompt: &str) -> std::io::Result<String> {
     read.map(|_| line)
 }
 
+/// Whether to color what is printed: on a terminal, unless `NO_COLOR` is set.
+fn paint(terminal: bool) -> bool {
+    terminal && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+}
+
+/// What `gh-token login` says before it asks for the token. GitHub's form
+/// cannot be given the repositories, so the user is told which to choose.
+fn token_steps(url: &str, repo: Option<&Repo>, opening: bool, color: bool) -> String {
+    let style = |code: &str, text: &str| match color {
+        true => format!("\x1b[{code}m{text}\x1b[0m"),
+        false => text.to_string(),
+    };
+    let bold = |text: &str| style("1", text);
+    let select = match repo {
+        Some(repo) => format!("select {}", style("1;35", &repo.slug())),
+        None => "select the repositories the agent needs".to_string(),
+    };
+    let open = match opening {
+        true => "This page is opening in your browser:",
+        false => "Open this page in your browser:",
+    };
+    format!(
+        "\n{title}\n\n  \
+         {one} {open}\n\n     {link}\n\n  \
+         {two} Under {access}, choose {only}\n     and {select}. \
+         The agent can read those\n     \
+         repositories and no others.\n\n  \
+         {three} Press {generate} and copy the token.\n\n",
+        title = bold("Make a read-only GitHub token for the sandbox"),
+        one = bold("1."),
+        two = bold("2."),
+        three = bold("3."),
+        link = style("36", url),
+        access = bold("Repository access"),
+        only = bold("Only select repositories"),
+        generate = bold("Generate token"),
+    )
+}
+
 const GH_STATUS: [&str; 5] = ["gh", "auth", "status", "--hostname", "github.com"];
 
 pub struct TokenOptions {
     pub verb: TokenVerb,
     pub owner: Option<String>,
+    /// The repository of the directory `sv2` was run in, to suggest.
+    pub repo: Option<Repo>,
     pub days: u32,
     pub open_browser: bool,
 }
@@ -389,16 +504,20 @@ pub fn gh_token(
 
     let input = if std::io::stdin().is_terminal() {
         let name: String = format!("sv2-{}", p.account).chars().take(40).collect();
-        let url = token_url(&name, opts.days, opts.owner.as_deref());
-        eprintln!("Make a fine-grained token on GitHub. The form is filled in with read-only");
-        eprintln!("permissions: {}", TOKEN_PERMISSIONS.join(" "));
-        eprintln!("Choose 'Repository access' yourself; 'Only select repositories' is safest.");
-        eprintln!(
-            "Whatever the token can read, an agent that is talked into it can send elsewhere."
+        let owner = opts
+            .owner
+            .as_deref()
+            .or(opts.repo.as_ref().map(|r| r.owner.as_str()));
+        let url = token_url(&name, opts.days, owner);
+        eprint!(
+            "{}",
+            token_steps(
+                &url,
+                opts.repo.as_ref(),
+                opts.open_browser,
+                paint(std::io::stderr().is_terminal())
+            )
         );
-        eprintln!();
-        eprintln!("  {url}");
-        eprintln!();
         if opts.open_browser {
             let _ = Command::new("/usr/bin/open")
                 .arg(&url)
@@ -408,7 +527,7 @@ pub fn gh_token(
                 .stderr(Stdio::null())
                 .status();
         }
-        read_hidden("Paste the token (it is not shown): ")
+        read_hidden("Paste the token here (not shown): ")
     } else {
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line).map(|_| line)
@@ -708,5 +827,106 @@ mod tests {
         assert!(!url.contains("write"));
         assert!(!token_url("n", 30, None).contains("target_name"));
         assert!(valid_owner("octo-org") && !valid_owner("octo org") && !valid_owner("a/b"));
+    }
+
+    #[test]
+    fn the_steps_name_the_repository_to_select() {
+        let repo = Repo::parse("acme/api").unwrap();
+        let plain = token_steps("https://x/new", Some(&repo), true, false);
+        assert!(!plain.contains('\x1b'), "{plain:?}");
+        assert!(plain.contains("\n     https://x/new\n"), "{plain}");
+        assert!(plain.contains("opening in your browser"), "{plain}");
+        assert!(
+            plain.contains(
+                "choose Only select repositories\n     and select acme/api. The agent can read"
+            ),
+            "{plain}"
+        );
+        // The permissions are on the form; they are not listed again.
+        assert!(!plain.contains("=read"), "{plain}");
+
+        let none = token_steps("https://x/new", None, false, false);
+        assert!(none.contains("Open this page in your browser:"), "{none}");
+        assert!(
+            none.contains("and select the repositories the agent needs. The agent"),
+            "{none}"
+        );
+
+        let colored = token_steps("https://x/new", Some(&repo), true, true);
+        assert!(
+            colored.contains("\x1b[36mhttps://x/new\x1b[0m"),
+            "{colored:?}"
+        );
+        assert!(colored.contains("\x1b[1;35macme/api\x1b[0m"), "{colored:?}");
+    }
+
+    #[test]
+    fn origin_on_github_is_a_repository() {
+        let r = |url: &str| github_repo(url).map(|r| r.slug());
+        for url in [
+            "git@github.com:acme/api.git",
+            "git@github.com:acme/api",
+            "ssh://git@github.com/acme/api.git",
+            "https://github.com/acme/api.git",
+            "https://github.com/acme/api/",
+            "git://github.com/acme/api",
+        ] {
+            assert_eq!(r(url), Some("acme/api".into()), "{url}");
+        }
+        for url in [
+            "",
+            "git@gitlab.com:acme/api.git",
+            "https://github.com.evil.example/acme/api",
+            "https://github.com/acme",
+            "https://github.com/acme/api/tree/main",
+            "git@github.com:acme/api;id",
+            "/Users/Shared/acme/api",
+        ] {
+            assert_eq!(r(url), None, "{url}");
+        }
+
+        let config = "[core]\n\turl = git@github.com:not/this.git\n\
+                      [remote \"upstream\"]\n\turl = git@github.com:nor/this.git\n\
+                      [remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n\
+                      \tURL = git@github.com:acme/api.git\n\
+                      [branch \"main\"]\n\turl = git@github.com:nor/that.git\n";
+        assert_eq!(origin_url(config), Some("git@github.com:acme/api.git"));
+        assert_eq!(origin_url("[remote \"upstream\"]\n\turl = x\n"), None);
+    }
+
+    #[test]
+    fn the_repository_around_a_directory() {
+        let root = std::env::temp_dir().join(format!("sv2-repo-around-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = "[remote \"origin\"]\n\turl = git@github.com:acme/api.git\n";
+
+        // A checkout, from a directory inside it.
+        let clone = root.join("clone");
+        std::fs::create_dir_all(clone.join(".git")).unwrap();
+        std::fs::create_dir_all(clone.join("src/deep")).unwrap();
+        std::fs::write(clone.join(".git/config"), config).unwrap();
+        let slug = |d: &Path| repo_around(d).map(|r| r.slug());
+        assert_eq!(slug(&clone.join("src/deep")), Some("acme/api".into()));
+
+        // A worktree of it, whose `.git` is a file.
+        let tree = root.join("tree");
+        let admin = clone.join(".git/worktrees/tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        std::fs::write(tree.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        assert_eq!(slug(&tree), Some("acme/api".into()));
+
+        // No checkout, and a config that is not a file: a FIFO there would
+        // block a plain open for good.
+        assert_eq!(slug(&root), None);
+        let fifo = root.join("fifo");
+        std::fs::create_dir_all(fifo.join(".git")).unwrap();
+        let name = std::ffi::CString::new(fifo.join(".git/config").to_str().unwrap()).unwrap();
+        // SAFETY: `name` is a C string that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert_eq!(slug(&fifo), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

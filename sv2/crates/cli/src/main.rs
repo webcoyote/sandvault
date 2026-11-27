@@ -739,9 +739,20 @@ fn main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
+            // Not when --owner names someone else: the form would then
+            // not have the repository to select.
+            let repo = std::env::current_dir()
+                .ok()
+                .and_then(|dir| credentials::repo_around(&dir))
+                .filter(|r| {
+                    owner
+                        .as_deref()
+                        .is_none_or(|o| o.eq_ignore_ascii_case(&r.owner))
+                });
             let opts = credentials::TokenOptions {
                 verb,
                 owner,
+                repo,
                 days,
                 open_browser,
             };
