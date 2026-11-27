@@ -61,3 +61,9 @@ binary = ["{brew}/bin/{name}"]
 # Check the flag against the program's --help, and that the subcommands
 # still work with it in front. Leave it out and the agent is not told.
 #system_prompt = { flag = "--append-system-prompt" }
+
+# A shell script beside this file that runs, inside the sandbox, in the
+# program's place, for a program that needs more than the keys above. It
+# is given the program's path and the arguments (the flag already placed)
+# as "$@", and normally ends with: exec "$@"
+#wrapper = "run.sh"

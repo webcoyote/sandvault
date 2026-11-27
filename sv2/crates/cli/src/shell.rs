@@ -43,11 +43,13 @@ pub enum Kind<'a> {
     Shell,
     /// The first of `paths` that is a program: the places one install of
     /// the agent leaves it. When none is and `native` is set,
-    /// `install_script` runs first.
+    /// `install_script` runs first. A `wrapper` that is not empty runs in
+    /// the program's place, given its path and the arguments.
     Agent {
         name: &'a str,
         native: bool,
         install_script: &'a str,
+        wrapper: &'a str,
         paths: &'a [String],
     },
     /// Unpack the archive on standard input into the sandbox home.
@@ -69,6 +71,7 @@ impl Kind<'_> {
                 name,
                 native,
                 install_script,
+                wrapper,
                 paths,
             } => {
                 let mut v: Vec<OsString> = vec![
@@ -76,6 +79,7 @@ impl Kind<'_> {
                     (*name).into(),
                     if *native { "1" } else { "0" }.into(),
                     (*install_script).into(),
+                    (*wrapper).into(),
                 ];
                 v.extend(counted(paths));
                 v
@@ -472,6 +476,7 @@ mod tests {
                 name: "tool",
                 native,
                 install_script: script,
+                wrapper: "",
                 paths: &paths,
             };
             let v = argv(&[], self.dir.as_os_str(), &kind, &os(args));
@@ -511,6 +516,51 @@ mod tests {
         assert_eq!(out.status.code(), Some(9));
     }
 
+    /// With a wrapper the wrapper runs, in the login shell's environment,
+    /// and is given the program and the arguments unchanged; it decides
+    /// what happens next. Without one the program runs itself.
+    #[test]
+    fn a_wrapper_runs_in_the_programs_place() {
+        let s = Scratch::new("wrapper");
+        let paths = vec!["/bin/echo".to_string()];
+        let run = |wrapper: &str, args: &[&str]| {
+            let kind = Kind::Agent {
+                name: "tool",
+                native: false,
+                install_script: "",
+                wrapper,
+                paths: &paths,
+            };
+            let v = argv(&[], s.dir.as_os_str(), &kind, &os(args));
+            s.command(&v).stdin(Stdio::null()).output().unwrap()
+        };
+        let wrapper = r#"set -euo pipefail
+printf '%s|' "$0" "$PWD" "${PATH%%:*}" >&2
+printf '[%s]' "$@" >&2
+exec "$@"
+"#;
+        let out = run(wrapper, &["a b", "$HOME", "*", ""]);
+        assert_eq!(text(&out.stdout), "a b $HOME * \n");
+        let err = text(&out.stderr);
+        assert!(err.contains("through the wrapper of tool"), "{err}");
+        let home = s.home.to_str().unwrap();
+        let dir = s.dir.to_str().unwrap();
+        assert!(
+            err.contains(&format!(
+                "sv2-wrapper-tool|{dir}|{home}/.local/bin|[/bin/echo][a b][$HOME][*][]"
+            )),
+            "{err}"
+        );
+        // It may refuse; its status is the session's, and nothing runs.
+        let out = run("echo refused >&2; exit 4", &["x"]);
+        assert_eq!(out.status.code(), Some(4));
+        assert_eq!(text(&out.stdout), "");
+        // An empty wrapper is none.
+        let out = run("", &["plain"]);
+        assert_eq!(text(&out.stdout), "plain\n");
+        assert!(!text(&out.stderr).contains("wrapper"));
+    }
+
     /// What a definition sets with `env` reaches the agent as written,
     /// through the launcher and the login shell.
     #[test]
@@ -521,6 +571,7 @@ mod tests {
             name: "tool",
             native: false,
             install_script: "",
+            wrapper: "",
             paths: &paths,
         };
         let env = os(&[r#"OPENCODE_PERMISSION={"*":"allow"}"#, "A_SECOND=two words"]);
@@ -787,19 +838,32 @@ echo "installer says hello" >&2
                 .code()
         };
         // A count that is not a number, is zero, or exceeds what follows.
-        assert_eq!(bash(&["agent", "tool", "0", ""]), Some(2));
-        assert_eq!(bash(&["agent", "tool", "0", "", "x", "/bin/echo"]), Some(2));
-        assert_eq!(bash(&["agent", "tool", "0", "", "0"]), Some(2));
+        assert_eq!(bash(&["agent", "tool", "0", "", ""]), Some(2));
+        assert_eq!(
+            bash(&["agent", "tool", "0", "", "", "x", "/bin/echo"]),
+            Some(2)
+        );
+        assert_eq!(bash(&["agent", "tool", "0", "", "", "0"]), Some(2));
         // "probe" is no longer a kind: sv2 does not ask a sandbox what it has.
         assert_eq!(bash(&["probe", "1", "/bin/echo"]), Some(2));
         assert_eq!(
-            bash(&["agent", "tool", "0", "", "3", "/bin/echo", "x"]),
+            bash(&["agent", "tool", "0", "", "", "3", "/bin/echo", "x"]),
             Some(2)
         );
         // The count separates paths from arguments: "/bin/cat" is an
         // argument here, not a candidate.
         let out = Command::new("/bin/bash")
-            .args(["-c", LAUNCHER, "sv2-launch", "/", "agent", "tool", "0", ""])
+            .args([
+                "-c",
+                LAUNCHER,
+                "sv2-launch",
+                "/",
+                "agent",
+                "tool",
+                "0",
+                "",
+                "",
+            ])
             .args(["1", "/bin/echo", "/bin/cat"])
             .env_clear()
             .env("HOME", &s.home)

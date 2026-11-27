@@ -1,0 +1,24 @@
+# herdr (https://herdr.dev), a terminal multiplexer for coding agents
+# Taken from sandvault v1's working wrapper (guest/home/bin/herdr) and its
+# install step in sv. Its options were checked against `herdr --help` of
+# 0.9.5; it has not been run under sv2.
+#
+# herdr is not an agent: it has nothing to approve, so there is no flag,
+# and a flag in front would hide its own subcommands. Its server outlives
+# the session that starts it, and every pane is a child of that server,
+# like a tmux server (see "Terminal multiplexers" in docs/SANDVAULT2.md).
+# The sandbox profile is inherited by it and every pane, so this grants
+# nothing new. Its socket and state are in ~/.config/herdr.
+schema = 1
+
+[install.host]
+brew = { formula = "herdr" }
+binary = ["{brew}/bin/herdr"]
+
+[install.guest]
+script = "install.sh"
+binary = ["~/.local/bin/herdr"]
+
+[run]
+# Refuses a session that has a browser; see the script.
+wrapper = "run.sh"

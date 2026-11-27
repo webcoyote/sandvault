@@ -61,7 +61,12 @@ sv2 --native claude               # the agent's own install, in the sandbox home
 sv2 -p work claude                # in the profile "work"
 sv2 --lightpanda claude           # with a headless browser in the sandbox
 sv2 shell ls -la                  # one command, then back
+sv2 herdr                         # many agents in one terminal; reattaches
 ```
+
+herdr's server, and every pane in it, outlives the `sv2` that started it,
+inside the sandbox. So it refuses `--chrome` and `--lightpanda`: the browser
+stops with the session, and the panes would keep its address.
 
 `sv2 --help` lists every command and the agents it knows. Names can be
 shortened: `sv2 s` is `sv2 shell`.
@@ -194,6 +199,9 @@ sv2 agent new claude --from claude  # a copy of a built-in, to change
 Definitions live in `~/.config/sandvault2/agents/NAME/agent.toml` and take
 precedence over the built-ins of the same name. The template shows every
 key. `sv2` refuses a definition kept where a sandbox could change it.
+A program that needs more than the keys say can have a `wrapper`: a shell
+script beside `agent.toml` that runs in the sandbox, is given the program
+and its arguments, and runs it (`sv2/agents/herdr/run.sh` is one).
 
 
 ## When something is wrong

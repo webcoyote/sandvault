@@ -783,10 +783,41 @@ Decisions this milestone made:
     banner repeats; a unit test requires it of every built-in that has
     either). The last three came with the definitions that needed them,
     before any release, so the schema number did not change; nor did it
-    for `system_prompt`, added on 2026-11-27 (see below). `wrapper` from
-    the design's example is not in it. A key sv2 does not know is an error,
-    so adding one after a release is a schema change and not a silent
-    difference between versions.
+    for `system_prompt` and `wrapper`, added on 2026-11-27 (see below). A
+    key sv2 does not know is an error, so adding one after a release is a
+    schema change and not a silent difference between versions.
+  - *The wrapper (2026-11-27).* `run.wrapper` names a `.sh` file in the
+    definition's directory, read and limited like `install.sh` and
+    covered by the same rule on who may write the directory. It was added
+    to schema 1 without a new number, as `env` was: nothing has been
+    released. The launcher runs it with `/bin/bash -c`, in the login
+    shell's environment, as the sandbox user under the sandbox profile,
+    with the program sv2 found as `$1` and the arguments (the flag already
+    placed) after it; it normally ends with `exec "$@"`. It grants nothing
+    a guest install script does not. The banner says when a wrapper
+    starts the agent, since it decides what runs. The built-ins' scripts,
+    wrappers included, are linted by `scripts/tests-sv2`; a user's own
+    are not.
+  - *muse and herdr (2026-11-27)* are built-ins, taken from v1's wrappers
+    and install steps. muse is data only (`--yolo`; muse 1.0.2 had no way
+    to add to its system prompt, so it will not get `system_prompt`
+    either). herdr has no flag (it is a multiplexer, not an agent) and a
+    wrapper that refuses a session with a browser: its server outlives
+    the session, as a tmux server does (see "Terminal multiplexers"), and
+    its panes would keep `SV_BROWSER_ENDPOINT` after the browser has
+    stopped. v1 refused `--chrome` for this; in sv2 Lightpanda is stopped
+    with the session too, so both are refused. v1's other refusal, of
+    `--no-sandbox`, has nothing to apply to. Neither has been run under
+    sv2: they need a Mac where sv2 is installed. To measure there: that
+    herdr's server starts and is found again by a second `sv2 herdr` (its
+    sockets are in `~/.config/herdr`, in the home the profile lets the
+    session write, and the profile allows `network*`); and that the
+    server, which moves itself to the per-user Mach bootstrap
+    (`bootstrap_look_up_per_user` and `task_set_bootstrap_port` are in
+    herdr 0.9.5), ends up in the sandbox user's domain and not the host
+    user's (`launchctl manageruid` in a pane equals `id -u`). The profile
+    is inherited either way and still limits which services it can look
+    up.
   - *What a definition may say* is checked when it is read: binaries start
     with `~/`, `{brew}/` or `/` and are plain paths; a package is a plain
     name, or `user/repository/name` from a tap (opencode); a variable is
@@ -852,7 +883,8 @@ Decisions this milestone made:
     provider signed in, so no text was seen to reach a model. `codex`,
     `gemini` and `opencode` take text another way than a flag.
   - *The launcher* gets the agent as arguments: name, whether to install,
-    the script's text, a counted list of paths, then the agent's arguments.
+    the script's text, the wrapper's text (empty for none), a counted list
+    of paths, then the agent's arguments.
   - *Measured on 2026-11-26:* Homebrew's `claude` runs in a session;
     `--native claude` installed and ran 2.1.332 in a throwaway profile.
     (The next run without the option used that copy, as the first design
@@ -1355,7 +1387,7 @@ dropped from the document by mistake in commit 9a52da3 and put back.)
 
 1. Done: the helper's group rename, `next-id` kept across `uninstall`, and
    the helper's security gaps that do not concern launchd.
-2. Done: the guest-side launcher, agent definitions (five built-ins),
+2. Done: the guest-side launcher, agent definitions (seven built-ins),
    quarantine handling, and `sv2 agent new`.
 3. Done: the safer `uninstall`, default deny, `sv2 doctor`, repository
    credentials, and the verification that needed no push.
@@ -1372,7 +1404,8 @@ dropped from the document by mistake in commit 9a52da3 and put back.)
 5. Put off on 2026-11-26, until asked for: Homebrew packaging; the daemon
    (open items 3 and 10); the planted `~/Library/LaunchAgents` measurement
    (open item 7); CI on a runner; checking codex, gemini, opencode and pi
-   against their programs, and definitions for muse and herdr.
+   against their programs. (Definitions for muse and herdr, and wrapper
+   scripts, done 2026-11-27.)
 
 ### Not yet verified
 
@@ -1549,8 +1582,8 @@ None recorded.
   "Milestone 1". There is no unpacked payload.
 - [x] Agent definitions: format, `install.sh`, Homebrew and native install,
   `--native`; see "Agent definitions" under "Milestone 1". Built-ins:
-  `claude`, `codex`, `gemini`, `opencode`, `pi`. Not yet: `muse` and
-  `herdr` from v1; `wrapper`.
+  `claude`, `codex`, `gemini`, `herdr`, `muse`, `opencode`, `pi`, and
+  `wrapper` scripts (2026-11-27).
 - [x] `sv2 agent new NAME [--from AGENT]` creates a definition in
   `~/.config/sandvault2/agents`: from a template that shows every key, the
   optional ones commented out, or as a copy of an existing definition (a

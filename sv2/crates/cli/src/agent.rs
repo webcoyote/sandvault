@@ -21,6 +21,7 @@
 //! inject_last = ["config"]    # subcommands that get it after their arguments
 //! system_prompt = { flag = "--append-system-prompt" }   # how it takes text
 //! env = { NAME = "value" }    # set for the agent
+//! wrapper = "run.sh"          # runs in the sandbox, and runs the agent
 //! ```
 //!
 //! The two installs are separate, and a run uses one of them: the host's
@@ -114,6 +115,7 @@ struct RunFile {
     #[serde(default)]
     env: std::collections::BTreeMap<String, String>,
     system_prompt: Option<SystemPromptFile>,
+    wrapper: Option<String>,
 }
 
 /// How the agent takes text for its system prompt. A table, so that a way
@@ -171,6 +173,10 @@ pub struct Definition {
     /// The option whose value the agent adds to its system prompt. sv2
     /// tells the agent about its session this way.
     pub prompt_flag: Option<String>,
+    /// The name and text of the wrapper script: it runs in the sandbox in
+    /// place of the agent, is given the agent's path and its arguments,
+    /// and is expected to run it.
+    pub wrapper: Option<(String, String)>,
 }
 
 /// Where the flag goes on one command line.
@@ -330,20 +336,31 @@ impl Definition {
                 return Err(format!("'{p}' is not a plain Homebrew package name"));
             }
         }
+        let script = |key: &str, name: &str| {
+            if valid_script_name(name) {
+                read_script(name)
+            } else {
+                Err(format!(
+                    "{key} '{name}' must be the name of a .sh file in the definition's directory"
+                ))
+            }
+        };
         let (guest_binary, guest_install) = match file.install.guest {
             None => (Vec::new(), None),
             Some(guest) => {
                 let binary = paths(&guest.binary, "install.guest.binary", true)?;
-                let script = match guest.script {
+                let text = match guest.script {
                     None => None,
-                    Some(name) if !valid_script_name(&name) => {
-                        return Err(format!(
-                            "script '{name}' must be the name of a .sh file in the definition's directory"
-                        ))
-                    }
-                    Some(name) => Some(read_script(&name)?),
+                    Some(name) => Some(script("script", &name)?),
                 };
-                (binary, script)
+                (binary, text)
+            }
+        };
+        let wrapper = match file.run.wrapper {
+            None => None,
+            Some(name) => {
+                let text = script("wrapper", &name)?;
+                Some((name, text))
             }
         };
         if let Some(flag) = &file.run.bypass_flag {
@@ -411,6 +428,7 @@ impl Definition {
             inject_last: file.run.inject_last,
             env: file.run.env.into_iter().collect(),
             prompt_flag,
+            wrapper,
         })
     }
 
@@ -999,8 +1017,31 @@ no_inject = ["update"]
                 inject_last: vec![],
                 env: vec![],
                 prompt_flag: None,
+                wrapper: None,
             }
         );
+    }
+
+    #[test]
+    fn a_definition_with_a_wrapper() {
+        let d = parse(&CLAUDE.replace("no_inject", "wrapper = \"run.sh\"\nno_inject")).unwrap();
+        assert_eq!(
+            d.wrapper,
+            Some(("run.sh".to_string(), "# run.sh\n".to_string()))
+        );
+        // The rest is read as without it.
+        assert_eq!(Definition { wrapper: None, ..d }, parse(CLAUDE).unwrap());
+        // A wrapper sv2 cannot read stops the definition.
+        let unreadable = Definition::parse(
+            "claude",
+            Path::new("/defs/claude"),
+            &CLAUDE.replace("no_inject", "wrapper = \"run.sh\"\nno_inject"),
+            &|name| match name {
+                "run.sh" => Err(format!("{name}: No such file or directory")),
+                _ => Ok(String::new()),
+            },
+        );
+        assert_eq!(unreadable.unwrap_err(), "run.sh: No such file or directory");
     }
 
     #[test]
@@ -1025,7 +1066,23 @@ no_inject = ["update"]
             ("no schema", with("schema = 1", "")),
             (
                 "a key sv2 does not know",
+                with("schema = 1", "schema = 1\ncolour = \"red\""),
+            ),
+            (
+                "a wrapper outside [run]",
                 with("schema = 1", "schema = 1\nwrapper = \"run.sh\""),
+            ),
+            (
+                "a wrapper outside the directory",
+                with("no_inject", "wrapper = \"../run.sh\"\nno_inject"),
+            ),
+            (
+                "a wrapper that is not .sh",
+                with("no_inject", "wrapper = \"agent.toml\"\nno_inject"),
+            ),
+            (
+                "two wrappers",
+                with("no_inject", "wrapper = [\"a.sh\", \"b.sh\"]\nno_inject"),
             ),
             (
                 "an unknown key in a table",
@@ -1415,7 +1472,42 @@ no_inject = ["update"]
             seen.push(name);
         }
         seen.sort();
-        assert_eq!(seen, ["claude", "codex", "gemini", "opencode", "pi"]);
+        assert_eq!(
+            seen,
+            ["claude", "codex", "gemini", "herdr", "muse", "opencode", "pi"]
+        );
+    }
+
+    /// herdr's wrapper: a session with a browser is refused, because the
+    /// server it starts outlives the browser; otherwise herdr runs with its
+    /// arguments as given.
+    #[test]
+    fn herdrs_wrapper_refuses_a_session_with_a_browser() {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../agents/herdr/run.sh");
+        let text = std::fs::read_to_string(script).unwrap();
+        let run = |endpoint: Option<&str>| {
+            let mut c = std::process::Command::new("/bin/bash");
+            c.args([
+                "-c",
+                &text,
+                "sv2-wrapper-herdr",
+                "/bin/echo",
+                "a b",
+                "--session",
+            ])
+            .env_remove("SV_BROWSER_ENDPOINT");
+            if let Some(e) = endpoint {
+                c.env("SV_BROWSER_ENDPOINT", e);
+            }
+            c.output().unwrap()
+        };
+        let out = run(None);
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a b --session\n");
+        let out = run(Some("http://127.0.0.1:9222"));
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--lightpanda"));
     }
 
     /// The two installs are separate lists, and a run reads one of them.
@@ -1674,6 +1766,7 @@ no_inject = ["update"]
         );
         assert_eq!(d.prompt_flag.as_deref(), Some("--append-system-prompt"));
         assert!(d.guest_install.is_some());
+        assert_eq!(d.wrapper.map(|(file, _)| file).as_deref(), Some("run.sh"));
         assert_eq!(
             d.guest_binary,
             vec![Candidate::Home(".local/bin/my-agent".into())]

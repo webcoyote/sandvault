@@ -623,10 +623,15 @@ fn run(
         None => eprintln!("sv2: {agent} runs inside the sandbox of profile '{profile}'"),
     }
     eprintln!("sv2: definition: {}", def.dir.display());
+    if let Some((file, _)) = &def.wrapper {
+        // It decides what runs, so the banner says that it is there.
+        eprintln!("sv2: {agent} is started by its definition's wrapper, {file}");
+    }
     let kind = shell::Kind::Agent {
         name: agent,
         native,
         install_script: def.guest_install.as_deref().unwrap_or(""),
+        wrapper: def.wrapper.as_ref().map_or("", |(_, text)| text.as_str()),
         paths: &paths,
     };
     let err = launch(&kind, &args).exec();

@@ -13,9 +13,12 @@
 #   DIR    where the session starts
 #   KIND   shell: a login zsh, or ARGS as a command in a login zsh's
 #          environment
-#          agent NAME NATIVE SCRIPT N PATH1..PATHN [ARGS...]: the first of
-#          the N paths that is a program, with ARGS. When none is and NATIVE
-#          is 1, SCRIPT (the text of the agent's installer) is run first.
+#          agent NAME NATIVE SCRIPT WRAPPER N PATH1..PATHN [ARGS...]: the
+#          first of the N paths that is a program, with ARGS. When none is
+#          and NATIVE is 1, SCRIPT (the text of the agent's installer) is
+#          run first. When WRAPPER (the text of the definition's wrapper) is
+#          not empty, it runs instead, given the program and ARGS, and is
+#          expected to run them.
 #          unpack: the tar archive on standard input, into the home. sv2
 #          sends the user's own configuration this way.
 #          browser NAME PROGRAM KIND...: start the browser PROGRAM (NAME is
@@ -287,14 +290,15 @@ case "$KIND" in
         exec /bin/zsh -lc 'exec -- "$@"' sv2 "$@"
         ;;
     agent)
-        if [[ $# -lt 5 ]]; then
-            warn "launcher: agent needs NAME NATIVE SCRIPT N PATH..."
+        if [[ $# -lt 6 ]]; then
+            warn "launcher: agent needs NAME NATIVE SCRIPT WRAPPER N PATH..."
             exit 2
         fi
         NAME="$1"
         NATIVE="$2"
         SCRIPT="$3"
-        shift 3
+        WRAPPER="$4"
+        shift 4
         take_paths "$@"
         shift "$TAKEN"
         find_program
@@ -315,6 +319,13 @@ case "$KIND" in
                 warn "the installer of $NAME finished, but none of these exists: ${PATHS[*]}"
                 exit 127
             fi
+        fi
+        if [[ -n "$WRAPPER" ]]; then
+            warn "running $PROGRAM as ${USER:-the sandbox user}, through the wrapper of $NAME"
+            # In the login shell's environment, like the program itself.
+            # shellcheck disable=SC2016 # expanded by the zsh this starts
+            exec /bin/zsh -lc 'exec -- "$@"' sv2 \
+                /bin/bash -c "$WRAPPER" "sv2-wrapper-$NAME" "$PROGRAM" "$@"
         fi
         warn "running $PROGRAM as ${USER:-the sandbox user}"
         # shellcheck disable=SC2016 # expanded by the zsh this starts
