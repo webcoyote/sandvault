@@ -336,7 +336,7 @@ pub fn check_agents(sources: &Sources, brew: Option<&str>, report: &mut Report) 
                 None => report.ok(format!("agent '{name}' ({program})")),
             },
             None if def.host_binary.is_empty() => report.note(format!(
-                "agent '{name}' is installed only inside a sandbox: sv2 run --native {name}"
+                "agent '{name}' is installed inside the sandbox on first use"
             )),
             None => report.note(format!(
                 "agent '{name}' is not installed on this Mac; sv2 installs it on first use"

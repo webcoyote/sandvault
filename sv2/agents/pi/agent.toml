@@ -1,6 +1,7 @@
 # pi coding agent
 # Taken from sandvault v1's working wrapper (guest/home/bin/pi) and its
-# install step in sv; not checked again against a current pi.
+# install step in sv. Checked on 2026-11-27 against pi 1.7.0 (npm; Homebrew
+# had 1.6.1). Both installs were run from sv2 that day.
 schema = 1
 
 [install.host]
@@ -23,7 +24,9 @@ grants = "it trusts files a project brings along: extensions, skills, prompts, t
 # commands and config take the flag themselves, after their arguments
 # ("install -l" and "config -l" need it to write project settings).
 inject_last = ["install", "remove", "uninstall", "update", "list", "config"]
-# These reject it outright ("Unknown option --approve.").
+# These reject it outright ("Unknown option --approve."). Checked again
+# against pi 1.7.0: its help lists the same eight commands, and "pi mcp list
+# --approve" is refused.
 no_inject = ["auth", "mcp"]
 # Text sv2 has for the agent about its session goes in with this. Checked
 # against pi 1.6.1: "pi --approve --append-system-prompt TEXT" is accepted

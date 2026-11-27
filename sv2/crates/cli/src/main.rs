@@ -561,6 +561,9 @@ fn run(
             Some(_) => {}
         }
     }
+    // A definition with only the program's own install (gemini) uses it
+    // without being asked: there is no other install to choose.
+    let native = def.as_ref().map_or(native, |d| d.uses_own_install(native));
 
     // Before the profile, like the definition: a browser that is not there
     // should not create one either.

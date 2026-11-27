@@ -1,6 +1,8 @@
 # OpenAI Codex CLI
 # Taken from sandvault v1's working wrapper (guest/home/bin/codex) and its
-# install step in sv; not checked again against a current codex.
+# install step in sv. Checked on 2026-11-27 against codex 0.172.0 (npm) and
+# the Homebrew cask of the same version, which links bin/codex into
+# {brew}/bin. Both installs were run from sv2 that day.
 schema = 1
 
 [install.host]
@@ -13,6 +15,9 @@ script = "install.sh"
 binary = ["~/.local/bin/codex"]
 
 [run]
-# v1 gave the flag on every command line, subcommands included.
+# v1 gave the flag on every command line, subcommands included. Checked
+# against codex 0.172.0: each of its 28 subcommands (help included) prints
+# the same with the flag in front as without it, and so do "completion
+# zsh", "features list" and "mcp list". So nothing is in no_inject.
 bypass_flag = "--dangerously-bypass-approvals-and-sandbox"
 grants = "it acts without asking, and without its own sandbox"

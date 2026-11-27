@@ -10,7 +10,8 @@ schema = 1
 # uses one of them and never the other in its place:
 #   sv2 run {name}            the host's install
 #   sv2 run --native {name}   the program's own install, inside the sandbox
-# Keep the section you have; a definition needs at least one.
+# Keep the section you have; a definition needs at least one. With only
+# [install.guest], sv2 run {name} uses it, as if --native were given.
 
 # The host's install: sv2 installs the program on this Mac, as you, before
 # the sandbox starts, when it is not there yet.

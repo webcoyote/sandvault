@@ -604,6 +604,12 @@ impl Definition {
         })
     }
 
+    /// Whether a run uses the program's own install in the sandbox: with
+    /// --native, or when the definition has no other (gemini).
+    pub fn uses_own_install(&self, native: bool) -> bool {
+        native || self.host_binary.is_empty()
+    }
+
     /// Where the host's install may have left the program, in order. Those
     /// below the Homebrew prefix are left out on a Mac without Homebrew.
     pub fn host_paths(&self, brew: Option<&str>) -> Vec<String> {
@@ -1638,8 +1644,13 @@ no_inject = ["update"]
             })
             .unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(d.guest_install.is_some(), "{name} has no installer");
-            assert!(d.brew.is_some(), "{name} names no package");
-            assert!(!d.host_binary.is_empty(), "{name} has no host install");
+            // gemini only: Homebrew deprecated its formula.
+            if name == "gemini" {
+                assert!(d.host_binary.is_empty(), "{name} has a host install");
+            } else {
+                assert!(d.brew.is_some(), "{name} names no package");
+                assert!(!d.host_binary.is_empty(), "{name} has no host install");
+            }
             assert!(
                 !d.guest_binary.is_empty(),
                 "{name} has no install of its own"
@@ -1807,6 +1818,12 @@ no_inject = ["update"]
             ["/h/.x/bin/x", "/h/.local/bin/x"]
         );
         assert_eq!(guest_only.guest_install, None);
+
+        // Without --native, each uses the one install it has.
+        assert!(!host_only.uses_own_install(false));
+        assert!(host_only.uses_own_install(true));
+        assert!(guest_only.uses_own_install(false));
+        assert!(guest_only.uses_own_install(true));
     }
 
     #[test]

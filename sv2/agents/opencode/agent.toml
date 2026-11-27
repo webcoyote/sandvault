@@ -1,10 +1,19 @@
 # opencode
 # Taken from sandvault v1's working wrapper (guest/home/bin/opencode) and its
-# install step in sv; not checked again against a current opencode.
+# install step in sv. Checked on 2026-11-27 against opencode 1.19.6. Both
+# installs were run from sv2 that day.
+#
+# Both installs give opencode 1. homebrew-core's "opencode" (2.4.1) and the
+# tap's "opencode-v2" are opencode 2, which does not read
+# OPENCODE_PERMISSION (it has no string of that name) and would run asking
+# as usual. Its "--auto" flag is the way there; moving to opencode 2 means
+# changing [run], not only the package.
 schema = 1
 
 [install.host]
-# From the project's own tap, as v1 installed it.
+# From the project's own tap, as v1 installed it. Homebrew now refuses to
+# load a formula from a tap no one has trusted ("brew trust"), but "brew
+# install" given the full name trusts it itself.
 brew = { formula = "anomalyco/tap/opencode" }
 binary = ["{brew}/bin/opencode"]
 
@@ -15,7 +24,8 @@ script = "install.sh"
 binary = ["~/.opencode/bin/opencode", "~/.local/bin/opencode"]
 
 [run]
-# opencode has no flag for this; it reads a variable. It applies to
-# subcommands as well, as it did in v1.
+# opencode reads a variable for this. It applies to subcommands as well, as
+# it did in v1. opencode 1.19.6 also has "--auto" for the TUI; the variable
+# is kept because it reaches every subcommand without a list.
 env = { OPENCODE_PERMISSION = '{"*":"allow"}' }
 grants = "it acts without asking"

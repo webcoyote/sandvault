@@ -828,6 +828,30 @@ Decisions this milestone made:
     user's (`launchctl manageruid` in a pane equals `id -u`). The profile
     is inherited either way and still limits which services it can look
     up.
+  - *codex, gemini, opencode and pi (checked 2026-11-27)* were written
+    from v1. They were checked against the programs themselves, installed
+    with npm into scratch in a v1 sandbox (codex 0.172.0, gemini 0.71.1,
+    opencode 1.19.6, pi 1.7.0), and against Homebrew's API and the
+    opencode tap. No definition was found wrong. Each bypass flag is in
+    the program's `--help`; each `no_inject` and `inject_last` still
+    names exactly the subcommands that need it (codex: none, since all 28
+    of its subcommands take the flag in front); opencode still reads
+    `OPENCODE_PERMISSION`. Each was then run from `sv2` on the
+    development Mac, with Homebrew and with `--native`, and all worked.
+    What came out of it:
+    - Homebrew deprecated `gemini-cli` on 2026-06-18, so gemini's
+      definition has no `[install.host]` any more and is installed with
+      npm in the sandbox home (see "Two installs, never mixed").
+    - opencode 2 (homebrew-core's `opencode`, the tap's `opencode-v2`)
+      does not read `OPENCODE_PERMISSION` and has `--auto` instead. The
+      tap's `opencode` and opencode's own installer still give opencode 1.
+    - Homebrew now requires trust for a tap's formula. `brew install
+      anomalyco/tap/opencode`, given the full name, trusts the formula
+      itself (`brew info` with the same name refuses it), so sv2 needs
+      no change.
+    Not run, for any agent: a Mac without Homebrew or with a prefix
+    the user cannot write, and a user definition in
+    `~/.config/sandvault2/agents` on a real machine.
   - *What a definition may say* is checked when it is read: binaries start
     with `~/`, `{brew}/` or `/` and are plain paths; a package is a plain
     name, or `user/repository/name` from a tap (opencode); a variable is
@@ -855,7 +879,9 @@ Decisions this milestone made:
     see, and runs `brew install --formula|--cask NAME` (as the host user,
     from `/`, shown first) when none is a program. With `--native`, only
     the sandbox's paths count, and the launcher runs the definition's
-    script when none exists. `sv2` no longer asks the sandbox what it has:
+    script when none exists. A definition with only `[install.guest]`
+    (gemini, since 2026-11-27) is run as if `--native` were given: there
+    is no other install to mix it with. `sv2` no longer asks the sandbox what it has:
     the launcher's `probe` and its extra launch are gone.
   - *The flag.* `sv2` puts `bypass_flag` before the user's arguments unless
     the first is listed in `no_inject`; the banner says which happened.
