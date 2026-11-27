@@ -104,6 +104,27 @@ impl Browser {
             Browser::Lightpanda => "lightpanda",
         }
     }
+
+    /// What the agent is told about it, for its system prompt. Which
+    /// Chrome runs is the launcher's choice, made in the sandbox after
+    /// this is written, so Chrome's limit is said as a possibility.
+    pub fn told(self) -> String {
+        let which = match self {
+            Browser::Chrome => {
+                "It is Chrome: Playwright's headless shell, or Google Chrome when \
+                 the shell could not be installed. Google Chrome ends when the \
+                 last page of a browser context closes, so keep one page open in \
+                 each context you use, and open a new page before closing the \
+                 last one."
+            }
+            Browser::Lightpanda => {
+                "It is Lightpanda, whose CDP support is narrower than Chrome's. \
+                 If a script fails for want of a feature, ask the user to start \
+                 the session with `sv2 --chrome` in place of `--lightpanda`."
+            }
+        };
+        format!("{}\n{which}\n", include_str!("browser-prompt.md"))
+    }
 }
 
 /// `NAME=value` pairs for `/usr/bin/env`, from the host environment.

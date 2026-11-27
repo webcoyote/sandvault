@@ -863,11 +863,11 @@ Decisions this milestone made:
     in front of them. With no text, or no key, the command line is what it
     was. The value is a table so that another way of giving text (codex
     reads a file named in its configuration, gemini a directory) is a new
-    key in it. `sv2` has no text yet, so no session's command line has
-    changed: the first text is the browser's, below. For the same reason
-    nothing here was run in a session: unit tests cover the argument
-    vector, and a text of several lines through the real launcher and
-    login shell, run as the current user.
+    key in it. The first text is the browser's ("Telling the agent" under
+    "Browsers"); a session without a browser option has none, and its
+    command line is what it was. Unit tests cover the argument vector, and
+    a text of several lines through the real launcher and login shell,
+    run as the current user.
     Of the built-ins `claude` and `pi` have the key. Measured against
     Claude Code 2.1.326: every subcommand not in `no_inject` prints the
     same `--help` with both flags and a two-line text in front as without.
@@ -1115,6 +1115,30 @@ Decisions this milestone made:
     what it is, then looks for leftovers.
   - *Not run when this was written:* `--chrome` in a session, and the
     suite, which wait for `sv2 install` of profile version 6.
+  - *Telling the agent (2026-11-27).* With a browser option `sv2` gives
+    the agent text for its system prompt through its definition's
+    `system_prompt` (`crates/cli/src/browser-prompt.md`, from v1's
+    `prompts/browser.md`): a browser is at `$SV_BROWSER_ENDPOINT`, connect
+    to it over CDP and do not launch one, check it with
+    `curl "$SV_BROWSER_ENDPOINT/json/version"`, and leave it running
+    (Playwright's `browser.close()` over CDP stops it, commit 7bc1094;
+    Puppeteer has `disconnect()`). Then a line for the browser asked for:
+    for Lightpanda its narrower CDP and `sv2 --chrome`; for Chrome the
+    limit of Google Chrome, said as a possibility, because the launcher
+    chooses between the headless shell and Google Chrome in the sandbox,
+    after the command line is made. The text names the variable and not
+    the address, which only the launcher knows. The banner says whether
+    the agent was told; when it was not (no `system_prompt`: codex,
+    gemini, opencode; or a subcommand in `no_inject` or `inject_last`), it
+    says why and where the browser is. herdr refuses a browser anyway.
+    Measured: Claude Code 2.1.326, run directly with the text of a
+    Lightpanda session and asked without tools whether its system prompt
+    names a browser, answered "SV_BROWSER_ENDPOINT, Lightpanda", and "NO"
+    without it. The text's Playwright example (playwright-core 1.59.1)
+    loaded a page through Lightpanda 1.0.6 and left it running. The user
+    ran `sv2 --lightpanda` and `sv2 --chrome` sessions with it on a Mac
+    with sv2 installed. Not seen: pi and muse reading it (no provider
+    signed in).
 - **The user's configuration (2026-11-26).** What the user puts in
   `~/.config/sandvault2/home` (shell startup files, a `.gitconfig`) is
   copied into the home of a profile's sandbox account when `sv2 run` starts
@@ -1554,7 +1578,9 @@ None recorded.
 - [x] `system_prompt` in agent definitions: how an agent takes text for
   its system prompt; see "Text for the system prompt" under "Agent
   definitions". A flag (`claude`, `pi`) or a setting (`muse`; "Text as a
-  setting"). `sv2` has no text to give yet (TASK-0009).
+  setting"). The first text is the browser's (next item).
+- [x] Telling an agent that its session has a browser; see "Telling the
+  agent" under "Browsers".
 
 ## Open items
 

@@ -162,6 +162,10 @@ else. The session finds it at `$SV_BROWSER_ENDPOINT`
 (`http://127.0.0.1:PORT`), which Playwright's `connectOverCDP` and
 Puppeteer's `connect` take.
 
+An agent whose definition has a `system_prompt` (claude, pi, muse) is told
+in its system prompt that the browser is there and how to attach to it.
+Others are not; `sv2` says which when the session starts.
+
 Lightpanda is installed with Homebrew when it is missing
 (`lightpanda-io/browser/lightpanda`, Apple silicon only).
 

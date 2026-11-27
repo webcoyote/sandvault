@@ -516,6 +516,22 @@ fn agent_new(sources: &agent::Sources, name: &str, from: Option<&str>) -> ExitCo
     ExitCode::SUCCESS
 }
 
+/// For the banner: whether the agent is told about the session's browser,
+/// and when it is not, why, and where the user will find it.
+fn told_line(def: &agent::Definition, args: &[OsString], browser: shell::Browser) -> String {
+    let (agent, name) = (&def.name, browser.name());
+    if def.prompt_for(args).is_some() {
+        return format!(
+            "{agent} is told in its system prompt that {name} is at $SV_BROWSER_ENDPOINT"
+        );
+    }
+    let why = match (&def.prompt, args.first()) {
+        (Some(_), Some(sub)) => format!("'{}' takes no system prompt", sub.to_string_lossy()),
+        _ => "its definition has no system_prompt".to_string(),
+    };
+    format!("{agent} is not told about {name} ({why}); it is at $SV_BROWSER_ENDPOINT")
+}
+
 fn run(
     sources: &agent::Sources,
     profile: &str,
@@ -612,9 +628,9 @@ fn run(
         ));
     }
     // What sv2 tells the agent about its session, through the definition's
-    // system_prompt. Nothing yet: the first text will be about the browser.
-    let told: Option<&str> = None;
-    let args = def.final_args(agent_args, told);
+    // system_prompt: that it has a browser, and how to use it.
+    let told = browser.as_ref().map(|(b, _)| b.told());
+    let args = def.final_args(agent_args, told.as_deref());
     // What the session is trusted with, as it is on this code path.
     match def.trust_line(agent_args) {
         Some(with) => {
@@ -623,6 +639,9 @@ fn run(
         None => eprintln!("sv2: {agent} runs inside the sandbox of profile '{profile}'"),
     }
     eprintln!("sv2: definition: {}", def.dir.display());
+    if let Some((b, _)) = &browser {
+        eprintln!("sv2: {}", told_line(&def, agent_args, *b));
+    }
     if let Some((file, _)) = &def.wrapper {
         // It decides what runs, so the banner says that it is there.
         eprintln!("sv2: {agent} is started by its definition's wrapper, {file}");
@@ -772,6 +791,90 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn builtin(name: &str) -> agent::Definition {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../agents")
+            .join(name);
+        let text = std::fs::read_to_string(dir.join("agent.toml")).unwrap();
+        agent::Definition::parse(name, &dir, &text, &|f| {
+            std::fs::read_to_string(dir.join(f)).map_err(|e| e.to_string())
+        })
+        .unwrap()
+    }
+
+    fn os(v: &[&str]) -> Vec<OsString> {
+        v.iter().map(OsString::from).collect()
+    }
+
+    /// The agent is told what a browser option started, how to reach it
+    /// and that it must attach; without one it is told nothing.
+    #[test]
+    fn the_agent_is_told_about_its_browser() {
+        for b in [shell::Browser::Chrome, shell::Browser::Lightpanda] {
+            let t = b.told();
+            assert!(t.contains("$SV_BROWSER_ENDPOINT"), "{t}");
+            assert!(t.contains("Do not launch a browser"), "{t}");
+            assert!(t.contains("browser.disconnect()"), "{t}");
+            // No line of the text could be taken for an option.
+            assert!(!t.starts_with('-'), "{t}");
+        }
+        assert!(shell::Browser::Chrome.told().contains("last page"));
+        assert!(!shell::Browser::Lightpanda.told().contains("last page"));
+        assert!(shell::Browser::Lightpanda.told().contains("sv2 --chrome"));
+
+        let claude = builtin("claude");
+        let told = shell::Browser::Lightpanda.told();
+        let with = claude.final_args(&os(&["-p", "hi"]), Some(&told));
+        assert_eq!(
+            with,
+            [
+                "--dangerously-skip-permissions",
+                "--append-system-prompt",
+                told.as_str(),
+                "-p",
+                "hi"
+            ]
+            .map(OsString::from)
+        );
+        // muse gets it as one setting, whose value is a JSON string.
+        let muse = builtin("muse").final_args(&[], Some(&told));
+        assert_eq!(muse[1], "--config");
+        let value = muse[2].to_str().unwrap();
+        assert!(
+            value.starts_with("run.system_prompt_append=\"# Browser\\n"),
+            "{value}"
+        );
+        assert!(!value.contains('\n'), "{value}");
+        // Without a browser option run() has no text, and nothing is added.
+        assert_eq!(
+            claude.final_args(&os(&["-p", "hi"]), None),
+            os(&["--dangerously-skip-permissions", "-p", "hi"])
+        );
+    }
+
+    /// The banner says whether the agent was told, and when it was not,
+    /// why and where the browser is.
+    #[test]
+    fn the_banner_says_whether_the_agent_was_told() {
+        let b = shell::Browser::Chrome;
+        assert_eq!(
+            told_line(&builtin("claude"), &os(&["-p", "x"]), b),
+            "claude is told in its system prompt that chrome is at $SV_BROWSER_ENDPOINT"
+        );
+        assert_eq!(
+            told_line(&builtin("codex"), &[], b),
+            "codex is not told about chrome (its definition has no system_prompt); it is at $SV_BROWSER_ENDPOINT"
+        );
+        assert_eq!(
+            told_line(&builtin("muse"), &os(&["exec", "hi"]), b),
+            "muse is not told about chrome ('exec' takes no system prompt); it is at $SV_BROWSER_ENDPOINT"
+        );
+        assert_eq!(
+            told_line(&builtin("codex"), &os(&["exec"]), b),
+            "codex is not told about chrome (its definition has no system_prompt); it is at $SV_BROWSER_ENDPOINT"
+        );
+    }
 
     /// The help stays short: one line a command, nothing wider than a
     /// terminal, the agents on one line.
