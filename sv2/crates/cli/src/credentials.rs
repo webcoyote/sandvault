@@ -106,18 +106,7 @@ pub fn public_key(output: &str) -> Result<String, String> {
     Ok(format!("ssh-ed25519 {key}"))
 }
 
-fn passwd_home() -> Option<PathBuf> {
-    // SAFETY: getuid cannot fail. getpwuid returns NULL or a pointer to
-    // static storage, which is copied before any other passwd call.
-    unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if pw.is_null() || (*pw).pw_dir.is_null() {
-            return None;
-        }
-        let dir = std::ffi::CStr::from_ptr((*pw).pw_dir).to_str().ok()?;
-        dir.starts_with('/').then(|| PathBuf::from(dir))
-    }
-}
+use crate::passwd_home;
 
 /// Where sv2 keeps its own copy of a public key: in the host user's home,
 /// which no sandbox can write.

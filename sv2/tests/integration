@@ -15,6 +15,10 @@
 set -euo pipefail
 
 BIN_DIR="${1:?usage: integration DIR}"
+# The sessions here are not given the configuration of whoever runs the
+# suite (~/.config/sandvault2/home): a .gitconfig or a .zshrc of theirs
+# would decide what the checks see.
+export SV2_NO_HOME_COPY=1
 # Absolute: some checks run sv2 from another directory.
 BIN_DIR="$(cd "$BIN_DIR" && pwd)"
 SV2="$BIN_DIR/sv2"
@@ -192,6 +196,29 @@ for BREW in /opt/homebrew /usr/local; do
 done
 check "launcher: startup files are written into the sandbox home" "yes yes" \
     "$(sb /bin/sh -c 'grep -q "Written once by sandvault2" ~/.zprofile && printf "yes "; test -f ~/.zshrc && printf yes')"
+# The user's own configuration (crates/cli/src/home.rs): the host packs a
+# directory of its own and the sandbox account unpacks it into its home. The
+# launcher's part is run here as sv2 runs it, with an archive made in the
+# scratch directory: the suite does not put anything in ~/.config/sandvault2,
+# which every profile of this user would be given.
+/bin/mkdir -p "$SCRATCH/home/.config/sv2-test"
+echo 'export SV2_TEST_HOME=from-host' > "$SCRATCH/home/.zshenv"
+echo deep > "$SCRATCH/home/.config/sv2-test/conf"
+/bin/chmod 755 "$SCRATCH/home"
+/bin/chmod 600 "$SCRATCH/home/.config/sv2-test/conf"
+sb /bin/sh -c 'echo mine > ~/sv2-test-kept'
+/usr/bin/tar -c -f - -C "$SCRATCH/home" ./.zshenv ./.config \
+    | /usr/bin/sudo -n -- "$HELPER" call "$VERSION" launch "$P" -- \
+        /bin/bash -c "$(/bin/cat "$(dirname "${BASH_SOURCE[0]}")/../guest/launch.sh")" sv2-launch "$WS" unpack \
+    && rc=0 || rc=$?
+check "home copy: the sandbox unpacks the host's archive" "0" "$rc"
+check "home copy: the files are in the sandbox home, the account's, with their modes" \
+    "deep|$ACCOUNT 600|$ACCOUNT 644|mine" \
+    "$(sb /bin/sh -c 'cat ~/.config/sv2-test/conf; stat -f "%Su %Lp" ~/.config/sv2-test/conf ~/.zshenv; cat ~/sv2-test-kept' 2>&1 | /usr/bin/tr '\n' '|' | /usr/bin/sed 's/|$//')"
+check "home copy: a copied startup file takes effect in the next session" "from-host" \
+    "$(sb /bin/sh -c 'echo "$SV2_TEST_HOME"')"
+check "home copy: the home keeps its owner and mode" "$SB_UID 700" "$($STAT -f '%u %Lp' "/Users/$ACCOUNT")"
+sb /bin/rm -f "/Users/$ACCOUNT/.zshenv"
 # The helper ignores the terminal's stop signals so that ^Z cannot park it
 # with the registry lock held. An ignored signal stays ignored across exec,
 # and a session in which ^Z did nothing would be no use.

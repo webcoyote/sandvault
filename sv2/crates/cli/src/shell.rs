@@ -50,6 +50,8 @@ pub enum Kind<'a> {
         install_script: &'a str,
         paths: &'a [String],
     },
+    /// Unpack the archive on standard input into the sandbox home.
+    Unpack,
 }
 
 impl Kind<'_> {
@@ -62,6 +64,7 @@ impl Kind<'_> {
         };
         match self {
             Kind::Shell => vec!["shell".into()],
+            Kind::Unpack => vec!["unpack".into()],
             Kind::Agent {
                 name,
                 native,

@@ -904,6 +904,52 @@ Decisions this milestone made:
     owner still cloned over `https://`.
   - *Not run:* a key actually added to a repository and used to clone and
     push; a real token through `gh-token login`.
+- **The user's configuration (2026-11-26).** What the user puts in
+  `~/.config/sandvault2/home` (shell startup files, a `.gitconfig`) is
+  copied into the home of a profile's sandbox account when `sv2 run` starts
+  a session there, if it has changed (`crates/cli/src/home.rs`). It takes
+  the place of v1's `user/` directory in the workspace, which the sandbox
+  could write.
+  - *Who writes.* The host user packs its own directory with `tar`. The
+    archive goes on standard input to a session of its own, before the real
+    one, in which the launcher (KIND `unpack`) has the sandbox account
+    unpack it into its home, under the sandbox profile. `sv2` writes nothing
+    in a sandbox home (§1). The helper is unchanged.
+  - *What.* Everything in the directory. Links are followed, so a link to a
+    file kept elsewhere arrives as the file. A file of the same name in the
+    sandbox home is replaced; nothing is ever deleted there, so what is
+    taken out of the directory stays in the homes it was copied to. The
+    directory itself is not in the archive: its mode would become the
+    home's. The directory must resolve to a place in the user's own home.
+    Whatever is in it reaches every sandbox of the user: no place for a
+    secret.
+  - *When.* A listing of the directory (names, kinds, modes, sizes, times)
+    is kept for each profile in `~/.local/state/sandvault2/home`, with the
+    ID of the account it was copied to, and a session copies only when
+    either differs. Account IDs are not reused, so a profile made again
+    under the same name gets a copy. A change made in the sandbox to a
+    copied file lasts until the user's own copy changes. An unchanged
+    directory costs one walk of it and no extra launch.
+  - *Failure.* A copy that fails is reported and the session starts; the
+    next session tries again. `deploy-key` and `gh-token` sessions do not
+    copy.
+  - *A `.zprofile` of the user's own replaces the one the launcher wrote*,
+    which puts Homebrew and the account's bin directories ahead of the
+    system's in a login shell. An agent is still started by its full path.
+  - *`SV2_NO_HOME_COPY`*, set to anything in `sv2`'s environment, copies
+    nothing. The integration suite and root-checks set it. Without it the
+    suite's throwaway profile was given the configuration of whoever ran
+    the suite, and three checks failed on the first such run: a
+    `.gitconfig` that names a hooks directory the sandbox cannot execute,
+    the check that `deploy-key` leaves `~/.gitconfig` alone, and a check
+    that read the "copied" message as a session's output.
+  - *Tested:* unit tests run the whole of it against a stand-in for the
+    session; the integration suite sends an archive through the installed
+    helper to the launcher and looks at the sandbox home. By hand: `sv2 run
+    shell` with a real `~/.config/sandvault2/home` copied it and said so.
+  - *Not tested by the suite:* `sv2 run` itself doing the copy. The suite
+    does not make a `~/.config/sandvault2/home`, because every profile of
+    the user would be given what is in it.
 - **Doctor (2026-11-26).** `sv2 doctor` looks and reports; it changes
   nothing, asks for no password, and runs as the host user
   (`crates/cli/src/doctor.rs`). Each line is `ok`, `note` or `PROBLEM`, a
@@ -1040,14 +1086,16 @@ dropped from the document by mistake in commit 9a52da3 and put back.)
 3. Done: the safer `uninstall`, default deny, `sv2 doctor`, repository
    credentials, and the verification that needed no push.
 4. Next (order still to be settled, 2026-11-26): repository credentials
-   used for real (a key added to a repository, a real token); copying the
-   user's configuration into a sandbox home; browser support for the full
-   applications (Playwright's headless Chromium already runs); a position
+   used for real (a key added to a repository, a real token); browser
+   support for the full applications (Playwright's headless Chromium
+   already runs); a position
    on localhost and port 22; per-profile capabilities and a narrower rule
    for reading files (open item 8); the iOS bridge; the open `sv2 repair`
    questions (open item 9). Done 2026-11-26: the leftover verification
    that needed root (`use_pty`, the ACL checks), see
-   `sv2/tests/mutation-checks` under "Not yet verified".
+   `sv2/tests/mutation-checks` under "Not yet verified". Also done that day:
+   copying the user's configuration into a sandbox home, see "The user's
+   configuration" under "Milestone 1".
 5. Put off on 2026-11-26, until asked for: Homebrew packaging; the daemon
    (open items 3 and 10); the planted `~/Library/LaunchAgents` measurement
    (open item 7); CI on a runner; checking codex, gemini, opencode and pi

@@ -28,6 +28,8 @@ usage() {
 [[ "$(/usr/bin/id -u)" -ne 0 ]] || { echo >&2 "run it as yourself, not as root"; exit 2; }
 [[ -t 0 ]] || { echo >&2 "run it from a terminal: sudo has to ask for a password"; exit 2; }
 
+# Its sessions are not given the configuration of whoever runs it.
+export SV2_NO_HOME_COPY=1
 BIN_DIR="$(cd "$1" && pwd)"
 SV2="$BIN_DIR/sv2"
 BUILT_HELPER="$BIN_DIR/sv2-helper"

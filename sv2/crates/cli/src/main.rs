@@ -9,6 +9,7 @@ mod agent;
 mod args;
 mod credentials;
 mod doctor;
+mod home;
 mod repair;
 mod shell;
 
@@ -67,6 +68,21 @@ fn agent_names(sources: &agent::Sources) -> Vec<String> {
 
 fn help(names: &[String]) -> String {
     format!("{HELP}Agents: {}\n", names.join(", "))
+}
+
+/// The host user's home, from the account record and not from `HOME`,
+/// which the caller's environment sets.
+fn passwd_home() -> Option<PathBuf> {
+    // SAFETY: getuid cannot fail. getpwuid returns NULL or a pointer to
+    // static storage, which is copied before any other passwd call.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        let dir = std::ffi::CStr::from_ptr((*pw).pw_dir).to_str().ok()?;
+        dir.starts_with('/').then(|| PathBuf::from(dir))
+    }
 }
 
 fn fail(msg: &str) -> ExitCode {
@@ -466,6 +482,8 @@ fn run(
             .args(shell::argv(&env, OsStr::new(&dir), kind, args));
         cmd
     };
+    // Before the session, in one of its own: the user's configuration.
+    home::sync(profile, &p.account, &|| launch(&shell::Kind::Unpack, &[]));
     let Some(def) = def else {
         let err = launch(&shell::Kind::Shell, agent_args).exec();
         return fail(&format!("cannot run {SUDO}: {err}"));
@@ -557,6 +575,7 @@ fn main() -> ExitCode {
             Ok(()) => {
                 repair::after_profile_remove(&name);
                 credentials::forget_profile(&name);
+                home::forget_profile(&name);
                 ExitCode::SUCCESS
             }
             Err(code) => code,

@@ -16,6 +16,8 @@
 #          agent NAME NATIVE SCRIPT N PATH1..PATHN [ARGS...]: the first of
 #          the N paths that is a program, with ARGS. When none is and NATIVE
 #          is 1, SCRIPT (the text of the agent's installer) is run first.
+#          unpack: the tar archive on standard input, into the home. sv2
+#          sends the user's own configuration this way.
 #
 # It must run on /bin/bash 3.2. ARGS are never parsed as shell text.
 set -euo pipefail
@@ -180,6 +182,10 @@ case "$KIND" in
         warn "running $PROGRAM as ${USER:-the sandbox user}"
         # shellcheck disable=SC2016 # expanded by the zsh this starts
         exec /bin/zsh -lc 'exec -- "$@"' sv2 "$PROGRAM" "$@"
+        ;;
+    unpack)
+        # No login shell: the startup files may be what is being replaced.
+        exec /usr/bin/tar -x -f - -C "$HOME"
         ;;
     *)
         warn "launcher: unknown kind '$KIND'"

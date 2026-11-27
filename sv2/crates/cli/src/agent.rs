@@ -591,18 +591,7 @@ pub struct Sources {
     pub builtin: Option<PathBuf>,
 }
 
-fn passwd_home() -> Option<PathBuf> {
-    // SAFETY: getuid cannot fail. getpwuid returns NULL or a pointer to
-    // static storage, which is copied before any other passwd call.
-    unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if pw.is_null() || (*pw).pw_dir.is_null() {
-            return None;
-        }
-        let dir = CStr::from_ptr((*pw).pw_dir).to_str().ok()?;
-        dir.starts_with('/').then(|| PathBuf::from(dir))
-    }
-}
+use crate::passwd_home;
 
 impl Sources {
     /// Built-ins are found from this executable's own resolved path, never
