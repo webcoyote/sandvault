@@ -27,3 +27,4 @@ pnpm install --prefer-offline --reporter=append-only
 
 node test-playwright.js
 node test-puppeteer.js
+node test-https-trust.js
