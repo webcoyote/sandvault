@@ -15,10 +15,10 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use sv2_common::{
-    home_path, stamped_version, valid_host_user, valid_profile, workspace_path, workspace_user_dir,
-    Obelus, ALLOWED_GROUP, HELPER_PATH, MODE_CALL, SANDBOX_GROUP, SANDBOX_PROFILE_STAMP,
-    SANDBOX_PROFILE_VERSION, SSHD_DROPIN_STAMP, SSHD_DROPIN_VERSION, SUDOERS_STAMP,
-    SUDOERS_VERSION, WORKSPACE_ROOT,
+    hand_back_argv, home_path, stamped_version, valid_host_user, valid_profile, workspace_path,
+    workspace_user_dir, Obelus, ALLOWED_GROUP, HELPER_PATH, MODE_CALL, SANDBOX_GROUP,
+    SANDBOX_PROFILE_STAMP, SANDBOX_PROFILE_VERSION, SSHD_DROPIN_STAMP, SSHD_DROPIN_VERSION,
+    SUDOERS_STAMP, SUDOERS_VERSION, WORKSPACE_ROOT,
 };
 
 use crate::registry::{Entry, Registry, State, MAX_PROFILES_PER_USER};
@@ -437,6 +437,26 @@ fn run_as_sandbox(id: u32, program: &str, args: &[&str]) -> Res<()> {
         .map_err(|e| format!("cannot run {program}: {e}"))
 }
 
+/// Before the account goes, have it let the host user at what it owns in the
+/// workspace. A kept workspace is the host user's own files after a remove,
+/// but an entry of the sandbox account that has no ACL is closed to the host
+/// user, and once the account is deleted nobody but root could open it.
+///
+/// Root does not walk the workspace: `find` and `chmod` run as the sandbox
+/// user, and all they do is add an ACL entry for the host user to what that
+/// account owns, which the account could do itself. Every process of the
+/// account is dead and the caller holds the exclusive lock, so nothing puts
+/// an entry back in that state afterwards. Taking ownership is `sv2`'s part,
+/// as the host user, once the helper has returned.
+///
+/// Nothing depends on the outcome here: what stays closed (an immutable
+/// flag, a deny entry) is reported by that pass of `sv2`.
+fn hand_back_workspace(entry: &Entry) -> Res<()> {
+    let argv = hand_back_argv(&entry.host_user, &entry.profile, entry.id);
+    let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+    run_as_sandbox(entry.id, &argv[0], &args)
+}
+
 /// Empty the sandbox home as the sandbox user, then remove the empty
 /// directory as root. Root never walks the tree, so nothing planted in it
 /// can redirect a root operation.
@@ -507,6 +527,7 @@ fn remove_entry(reg: &mut Registry, host_uid: u32, profile: &str) -> Res<()> {
     save_registry(reg)?;
 
     kill_sandbox_processes(entry.id)?;
+    hand_back_workspace(&entry)?;
     sys::remove_file(&profile_file(&entry.host_user, &entry.profile))?;
     // The account record goes before its home: macOS refuses, even to root,
     // to remove the home directory of an account that still exists (EPERM).

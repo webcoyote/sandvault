@@ -170,7 +170,8 @@ tccutil reset SystemPolicySysAdminFiles
 
 **Files in the workspace that you or the sandbox cannot use.** Files moved
 into a workspace from elsewhere lack the permissions that files created
-there get. `sv2 repair PATH` puts them right.
+there get, and so do files an agent moves in from its own home.
+`sv2 repair PATH` puts them right.
 
 **An error message ends in two odd words in brackets**, such as
 `(loitering pelican)`. They identify the place in the code that raised the

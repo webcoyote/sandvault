@@ -34,6 +34,14 @@
 //!   workspace directory, computed from that directory's own ACL. The helper
 //!   writes that ACL, and the sandbox cannot change it.
 //!
+//! One kind of entry the host user cannot put right: what the sandbox
+//! account owns and has no ACL on (moved in from the sandbox home, or the
+//! ACL removed). The host user may neither open it nor take it over. When
+//! the walk meets such entries, the sandbox account is asked to hand them
+//! back (`hand_back`: a command run in a session of the profile), and the
+//! walk runs once more. The helper does the same before it deletes the
+//! account in `profile remove`.
+//!
 //! The same walk runs by itself after `sv2 profile add` (both steps, so a
 //! kept workspace works with the new account) and after `sv2 profile remove`
 //! (ownership only: what is kept is then simply the host user's files).
@@ -43,6 +51,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
 
 use sv2_common::{account_name, valid_host_user, valid_profile, WORKSPACE_ROOT};
 
@@ -60,6 +69,8 @@ extern "C" {
     fn acl_from_text(buf: *const c_char) -> *mut c_void;
     fn acl_to_text(acl: *mut c_void, len: *mut isize) -> *mut c_char;
     fn acl_free(obj: *mut c_void) -> c_int;
+    fn acl_size(acl: *mut c_void) -> isize;
+    fn acl_copy_ext_native(buf: *mut c_void, acl: *mut c_void, size: isize) -> isize;
 }
 
 /// The ACL of the file or directory at `path`, as text, without following a
@@ -139,6 +150,29 @@ impl Acl {
             let s = CStr::from_ptr(p).to_string_lossy().into_owned();
             acl_free(p.cast());
             Ok(s)
+        }
+    }
+
+    /// The ACL in the system's binary form: per entry an account's UUID,
+    /// flags and rights. Two ACLs are compared in this form. As text each
+    /// entry carries the account's name, which the system looks up for
+    /// every ACL it prints.
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        let failed = || format!("cannot read an ACL: {}", io::Error::last_os_error());
+        // SAFETY: self.0 is a live ACL, and the buffer is as large as
+        // acl_size says the copy needs.
+        unsafe {
+            let size = acl_size(self.0);
+            if size < 0 {
+                return Err(failed());
+            }
+            let mut buf = vec![0u8; size as usize];
+            let n = acl_copy_ext_native(buf.as_mut_ptr().cast(), self.0, size);
+            if n < 0 {
+                return Err(failed());
+            }
+            buf.truncate(n as usize);
+            Ok(buf)
         }
     }
 
@@ -280,6 +314,9 @@ pub struct Stats {
     pub unchanged: u64,
     /// Path and reason for everything that was not repaired.
     pub skipped: Vec<(PathBuf, String)>,
+    /// How many of the skipped belong to the sandbox account and refused the
+    /// host user. Only that account can open them again; see `hand_back`.
+    pub held_by_sandbox: u64,
 }
 
 struct Walk {
@@ -291,12 +328,12 @@ struct Walk {
     stats: Stats,
 }
 
-/// The ACLs to write, with their text for comparison.
+/// The ACLs to write, with their binary form for comparison.
 struct Models {
     file_acl: Acl,
-    file_text: String,
+    file_bytes: Vec<u8>,
     dir_acl: Acl,
-    dir_text: String,
+    dir_bytes: Vec<u8>,
 }
 
 impl Models {
@@ -316,14 +353,12 @@ impl Models {
                 root_path.display()
             ));
         }
-        // Through the system once, so the text compares equal to what
-        // acl_to_text reports for a file that already has this ACL.
         let file_acl = Acl::from_text(&file_model)?;
         let dir_acl = Acl::from_text(&dir_model)?;
         Ok(Models {
-            file_text: file_acl.text()?,
+            file_bytes: file_acl.bytes()?,
             file_acl,
-            dir_text: dir_acl.text()?,
+            dir_bytes: dir_acl.bytes()?,
             dir_acl,
         })
     }
@@ -449,6 +484,14 @@ impl Walk {
         self.stats.skipped.push((path.to_path_buf(), why.into()));
     }
 
+    /// Skip an entry of `owner` that the host user was refused.
+    fn skip_refused(&mut self, path: &Path, owner: u32, why: impl Into<String>) {
+        if Some(owner) == self.sandbox_uid {
+            self.stats.held_by_sandbox += 1;
+        }
+        self.skip(path, why);
+    }
+
     /// Repair the entry `name` in the open directory `dir`, and what is
     /// below it. `path` is only for messages.
     fn entry(&mut self, dir: RawFd, name: &CStr, path: &Path, depth: usize) {
@@ -465,7 +508,7 @@ impl Walk {
         };
         let fd = match open_at(dir, name, is_dir) {
             Ok(fd) => fd,
-            Err(e) => return self.skip(path, format!("cannot open it: {e}")),
+            Err(e) => return self.skip_refused(path, st.st_uid, format!("cannot open it: {e}")),
         };
         // From here on, only the descriptor: the name may already be
         // something else.
@@ -494,25 +537,25 @@ impl Walk {
         let mut changed = false;
         if owner != self.host_uid {
             if let Err(why) = self.take_ownership(fd.as_raw_fd(), &st) {
-                return self.skip(path, why);
+                return self.skip_refused(path, owner, why);
             }
             changed = true;
         }
         if let Some(models) = &self.models {
             let current = match Acl::of_fd(fd.as_raw_fd()) {
-                Ok(Some(acl)) => match acl.text() {
-                    Ok(t) => t,
+                Ok(Some(acl)) => match acl.bytes() {
+                    Ok(b) => b,
                     Err(e) => return self.skip(path, e),
                 },
-                Ok(None) => String::new(),
+                Ok(None) => Vec::new(),
                 Err(e) => return self.skip(path, format!("cannot read its ACL: {e}")),
             };
-            let (acl, text) = if is_dir {
-                (&models.dir_acl, &models.dir_text)
+            let (acl, wanted) = if is_dir {
+                (&models.dir_acl, &models.dir_bytes)
             } else {
-                (&models.file_acl, &models.file_text)
+                (&models.file_acl, &models.file_bytes)
             };
-            if current != *text {
+            if current != *wanted {
                 if let Err(e) = acl.set_on(fd.as_raw_fd()) {
                     return self.skip(path, format!("cannot change its ACL: {e}"));
                 }
@@ -699,6 +742,56 @@ fn current_user() -> Result<(u32, String), String> {
     }
 }
 
+/// Have the sandbox account let the host user at what it owns in the
+/// workspace: an entry it owns that has no ACL is closed to the host user,
+/// and only its owner can change that. The command runs in a session of the
+/// profile, as the sandbox user under its sandbox, like anything else the
+/// host wants done on the sandbox's side.
+///
+/// It says nothing and its result is not looked at: the walk that follows
+/// reports what is still closed.
+fn hand_back(host_user: &str, profile: &str, sandbox_uid: u32) {
+    let argv = sv2_common::hand_back_argv(host_user, profile, sandbox_uid);
+    let status = crate::call_command("launch")
+        .arg(profile)
+        .arg("--")
+        .args(&argv)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    // Says so when the helper is out of date or the user may not call it.
+    if let Ok(status) = status {
+        if !status.success() {
+            crate::explain_call_failure(status);
+        }
+    }
+}
+
+/// `repair_in`, and once more after the sandbox account has handed back
+/// whatever the first walk found closed.
+fn repair_with_hand_back(
+    root: &OwnedFd,
+    root_path: &Path,
+    rel: &[OsString],
+    host: (u32, &str),
+    profile: &str,
+    sandbox_uid: Option<u32>,
+    what: What,
+) -> Result<Stats, String> {
+    let (host_uid, host_user) = host;
+    let first = repair_in(root, root_path, rel, host_uid, sandbox_uid, what)?;
+    let Some(uid) = sandbox_uid.filter(|_| first.held_by_sandbox > 0) else {
+        return Ok(first);
+    };
+    hand_back(host_user, profile, uid);
+    let mut second = repair_in(root, root_path, rel, host_uid, sandbox_uid, what)?;
+    // What the first walk repaired, the second found correct.
+    second.unchanged = second.unchanged.saturating_sub(first.repaired);
+    second.repaired += first.repaired;
+    Ok(second)
+}
+
 /// `sv2 repair PATH`. Returns whether everything under PATH is now right.
 pub fn run(arg: &OsStr) -> Result<bool, String> {
     let (host_uid, host_user) = current_user()?;
@@ -716,11 +809,12 @@ pub fn run(arg: &OsStr) -> Result<bool, String> {
             target.profile
         ));
     }
-    let stats = repair_in(
+    let stats = repair_with_hand_back(
         &ws,
         &ws_path,
         &target.rel,
-        host_uid,
+        (host_uid, &host_user),
+        &target.profile,
         sandbox_uid,
         What::Everything,
     )?;
@@ -762,7 +856,15 @@ fn automatic(profile: &str, what: What) {
         }
         let ws = open_workspace(&host_user, host_uid, profile)?;
         let sandbox_uid = uid_of(&account_name(&host_user, profile));
-        let stats = repair_in(&ws, &ws_path, &[], host_uid, sandbox_uid, what)?;
+        let stats = repair_with_hand_back(
+            &ws,
+            &ws_path,
+            &[],
+            (host_uid, &host_user),
+            profile,
+            sandbox_uid,
+            what,
+        )?;
         Ok(Some((ws_path, stats)))
     })();
     match result {

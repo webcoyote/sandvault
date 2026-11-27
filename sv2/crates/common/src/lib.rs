@@ -30,7 +30,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The helper itself: bump on any change to its code that an installed
 /// machine must get (a fix, a new check, a new verb or argument). Nothing
 /// can detect a forgotten bump here.
-pub const HELPER_VERSION: u32 = 6;
+pub const HELPER_VERSION: u32 = 7;
 /// `/etc/sudoers.d/sandvault2`.
 pub const SUDOERS_VERSION: u32 = 2;
 /// The sshd drop-in that refuses sandbox accounts.
@@ -152,6 +152,45 @@ pub fn workspace_path(user: &str, profile: &str) -> String {
     format!("{WORKSPACE_ROOT}/{user}/{profile}")
 }
 
+/// The command a sandbox account runs so that the host user can take over
+/// what the account owns in its workspace: `/usr/bin/find` and its
+/// arguments.
+///
+/// An entry the account owns that has no ACL (it was moved in from the
+/// sandbox home, or the ACL was removed) is closed to the host user, who can
+/// neither take it over nor repair it. Only its owner can change that, so
+/// the owner does: on each file and directory it owns it adds an entry that
+/// lets the host user open it, take ownership and write its ACL. `sv2 repair`
+/// does the rest as the host user. Links are not followed and not changed.
+///
+/// A directory the account has closed to itself is opened (`u+rx`) before
+/// `find` goes into it; `find` evaluates a directory before it reads it.
+/// Every other entry is passed to `chmod` in batches.
+pub fn hand_back_argv(host_user: &str, profile: &str, sandbox_uid: u32) -> Vec<String> {
+    hand_back_argv_in(&workspace_path(host_user, profile), host_user, sandbox_uid)
+}
+
+fn hand_back_argv_in(dir: &str, host_user: &str, owner_uid: u32) -> Vec<String> {
+    const COMMON: &str = "readattr,readextattr,readsecurity,writesecurity,chown";
+    const CHMOD: &str = "/bin/chmod";
+    let dir_entry = format!("user:{host_user} allow list,search,{COMMON}");
+    let file_entry = format!("user:{host_user} allow read,{COMMON}");
+    let uid = owner_uid.to_string();
+    #[rustfmt::skip]
+    let words = [
+        "/usr/bin/find", dir, "-user", &uid,
+        "(",
+            "(", "-type", "d",
+                "(", "-perm", "-500", "-o", "-exec", CHMOD, "u+rx", "{}", ";", ")",
+                "-exec", CHMOD, "+a", &dir_entry, "{}", "+",
+            ")",
+            "-o",
+            "(", "-type", "f", "-exec", CHMOD, "+a", &file_entry, "{}", "+", ")",
+        ")",
+    ];
+    words.iter().map(|w| (*w).to_string()).collect()
+}
+
 pub fn home_path(account: &str) -> String {
     format!("/Users/{account}")
 }
@@ -159,6 +198,68 @@ pub fn home_path(account: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real `find` and `chmod`, as the current user on a scratch tree:
+    /// a private file, a directory closed even to its owner, and a link.
+    #[test]
+    fn hand_back_opens_what_the_owner_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        let text = |cmd: &mut Command| {
+            String::from_utf8(cmd.output().expect("run").stdout).expect("utf-8")
+        };
+        let user = text(Command::new("/usr/bin/id").arg("-un"))
+            .trim()
+            .to_string();
+        let uid: u32 = text(Command::new("/usr/bin/id").arg("-u"))
+            .trim()
+            .parse()
+            .unwrap();
+        let top = std::env::temp_dir().join(format!("sv2-hand-back-{}", std::process::id()));
+        let closed = top.join("ws/closed");
+        let inner = closed.join("inner");
+        let outside = top.join("outside");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(inner.join("file"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, closed.join("link")).unwrap();
+        let mode = |p: &std::path::Path, m| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        mode(&inner.join("file"), 0o600);
+        mode(&inner, 0o000);
+        mode(&closed, 0o000);
+
+        let ws = top.join("ws");
+        let argv = hand_back_argv_in(ws.to_str().unwrap(), &user, uid);
+        let status = Command::new(&argv[0]).args(&argv[1..]).status().unwrap();
+        assert!(status.success());
+        // Twice: an entry that is there already is not added again.
+        assert!(Command::new(&argv[0])
+            .args(&argv[1..])
+            .status()
+            .unwrap()
+            .success());
+
+        let acl = |p: &std::path::Path| text(Command::new("/bin/ls").arg("-lde").arg(p));
+        let common = "readattr,readextattr,readsecurity,writesecurity,chown";
+        for dir in [&closed, &inner] {
+            let listed = acl(dir);
+            assert!(listed.starts_with("dr-x------"), "{listed}");
+            assert_eq!(listed.matches(" allow ").count(), 1, "{listed}");
+            assert!(listed.contains(&format!(" 0: user:{user} allow list,search,{common}")));
+        }
+        let listed = acl(&inner.join("file"));
+        assert_eq!(listed.matches(" allow ").count(), 1, "{listed}");
+        assert!(listed.contains(&format!(" 0: user:{user} allow read,{common}")));
+        // Neither the link nor what it points to.
+        assert!(!acl(&closed.join("link")).contains(" allow "));
+        assert!(!acl(&outside).contains(" allow "));
+
+        mode(&closed, 0o700);
+        mode(&inner, 0o700);
+        std::fs::remove_dir_all(&top).unwrap();
+    }
 
     #[test]
     fn profile_names() {
@@ -309,7 +410,7 @@ mod tests {
     #[test]
     fn install_version_is_one_plain_word() {
         let v = install_version();
-        assert_eq!(v, "helper=6,sudoers=2,sshd=1,profile=4");
+        assert_eq!(v, "helper=7,sudoers=2,sshd=1,profile=4");
         assert!(v
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'=' || b == b','));

@@ -227,6 +227,12 @@ separates user from profile unambiguously.
   failing exit status) a file that has more than one hard link and anything
   that belongs to another account. See "`sv2 repair`" under "Milestone 1" for
   what was built.
+- **Decided (2026-11-27):** what the sandbox account owns and the host user
+  has no way into is handed back by the sandbox account, not taken by root.
+  The account adds an ACL entry for the host user to what it owns; `sv2
+  repair` asks for that in a session, and `profile remove` does it before
+  the account is deleted. This is §1's rule 2: the write happens on the
+  sandbox's side of the boundary.
 - **Decided (2026-11-25):** the same pass runs by itself, as the host user,
   after `sv2 profile add` and `sv2 profile remove`, and it makes the host
   user the owner of what the sandbox account owned. A kept workspace is the
@@ -617,7 +623,8 @@ Decisions this milestone made:
   the base profile allows writes under `/private/tmp`, where its socket
   directory is.
 - **`sv2 repair` (implemented after the rest of the milestone).** It lives in
-  `crates/cli/src/repair.rs` and does not use the helper.
+  `crates/cli/src/repair.rs`. It uses the helper for one thing only, to run
+  a command as the sandbox account (see *Hand-back* below).
   - *Ownership.* An entry owned by this profile's sandbox account, or by a
     UID with no account (a removed sandbox), becomes the host user's. This
     needs no root: the inherited ACL entry gives the host user the right to
@@ -632,6 +639,9 @@ Decisions this milestone made:
     from the workspace directory's own, which the helper writes and the
     sandbox cannot change, so the rights are listed in one place
     (`ops::workspace_aces`). The workspace directory itself is not changed.
+    Whether an entry already has that ACL is decided on the ACL's binary
+    form (`acl_copy_ext_native`), not its text: as text every entry carries
+    an account name, which the system looks up for each ACL it prints.
   - *When it runs.* `sv2 repair PATH` does both steps under PATH. `sv2`
     also runs it over the whole workspace after the helper returns from
     `profile-add` (both steps) and from `profile-remove` (ownership only: the
@@ -642,10 +652,42 @@ Decisions this milestone made:
     then opened one component at a time without following links. A link
     named by PATH or on the way to it is an error; links found during the
     walk are left alone.
-  - *Limits.* An entry whose ACL the sandbox removed cannot be taken over or
-    repaired from the host (it can be deleted); it is reported. The
-    automatic pass visits every entry, so `profile add` on a very large kept
-    workspace takes as long as that walk; this has not been measured.
+  - *Hand-back (2026-11-27).* An entry the sandbox account owns that has no
+    ACL is closed to the host user: no opening it, no taking it over, and a
+    directory in that state cannot be emptied. It needs no hostile sandbox.
+    A file an agent moves in from the sandbox home arrives like that
+    (measured: owned by the account, no ACL, `Permission denied` for the
+    host user). Only the owner can change it, so the owner does. The
+    command is `find` over the workspace, for entries of the account's UID:
+    `chmod +a` of an entry that lets the host user open the file or
+    directory, take ownership and write its ACL, and `chmod u+rx` first on
+    a directory the account closed to itself. It is in
+    `sv2_common::hand_back_argv`. Links are neither followed nor changed,
+    files and directories get different rights, and none is `search` on a
+    file.
+    - `sv2 repair`, and the automatic pass after `profile add`: when the
+      walk skips entries of the sandbox account that refused the host user,
+      `sv2` runs the command through `launch` (as the sandbox user, under
+      the profile) and walks once more. Nothing is launched when there is
+      no such entry.
+    - `profile remove`: the helper runs the command as the sandbox UID
+      after the account's processes are killed and before the account is
+      deleted (helper version 7). `sv2`'s ownership pass afterwards takes
+      the entries over. After the account is gone nobody but root could.
+    - What the command adds is an entry for the host user on things the
+      account owns, which the account could add itself. The whole
+      workspace is covered, not only PATH: the helper takes no path.
+  - *Limits.* What its owner cannot change either is still reported and
+    left: a file with the immutable flag (measured), and presumably one
+    under a deny entry (not tried). Files that belong to an account
+    removed before helper version 7 are in that state for good and need
+    `sudo rm`.
+  - *Cost (measured 2026-11-27, 202,021 entries, development Mac).* With
+    every entry already correct the walk took 22 seconds while ACLs were
+    compared as text, and 5 to 6 seconds compared in binary form. With
+    every ACL missing and written, 7 to 8 seconds. `find` alone over the
+    tree took 0.4 seconds. The hand-back command was not timed on a tree
+    that size.
 - **SSH lockdown (implemented after the rest of the milestone).**
   - *Group.* `install` creates `sv2-sandboxes` (RealName
     `sandvault2 sandbox accounts`; a group of that name it did not create is
@@ -1096,8 +1138,8 @@ dropped from the document by mistake in commit 9a52da3 and put back.)
    support for the full applications (Playwright's headless Chromium
    already runs); a position
    on localhost and port 22; per-profile capabilities and a narrower rule
-   for reading files (open item 8); the iOS bridge; the open `sv2 repair`
-   questions (open item 9). Done 2026-11-26: the leftover verification
+   for reading files (open item 8); the iOS bridge. Done 2026-11-27: the
+   `sv2 repair` questions (open item 9), all five decided. Done 2026-11-26: the leftover verification
    that needed root (`use_pty`, the ACL checks), see
    `sv2/tests/mutation-checks` under "Not yet verified". Also done that day:
    copying the user's configuration into a sandbox home, see "The user's
@@ -1159,6 +1201,16 @@ run on the development Mac on 2026-11-26 (sudo 1.9.17p2) and passed (13 of
   checks that the workspace is there and empty before the sandbox tries to
   remove it, since removing one that is not empty fails whatever the ACL.
 
+- [ ] **The hand-back at `profile remove` has not run.** It is in helper
+  version 7, which was not installed when this was written, so the
+  integration suite has not run on this build. Run on 2026-11-27 against
+  the installed helper version 6, with a `sv2` built to speak to it: the
+  hand-back in `sv2 repair` (a file moved in from the sandbox home, a tree
+  without ACLs, a directory of mode 000: 7 repaired, none skipped; an
+  immutable file still reported), and the suite's new removal check, which
+  failed as it should against the old helper. The suite's new repair
+  checks ran in that pass with a wrong count in three of them, since
+  corrected and not run again.
 - [ ] **CI steps are unverified.** `.github/workflows/ci.yml` has "Install
   sandvault2" and "SandVault2 Tests"; neither has run on a runner, because
   the branch has not been pushed. The first also turns Remote Login on
@@ -1346,19 +1398,25 @@ None recorded.
    to rules it already contains, or raw SBPL rules added to the base profile.
    Named capabilities keep root's parser small and every rule reviewed. Raw
    SBPL is more flexible, but the helper then has to parse and validate it.
-9. **What `sv2 repair` should do.** Partly decided on 2026-11-25: it runs
+9. **What `sv2 repair` should do.** Decided. On 2026-11-25: it runs
    automatically after `profile add` and `profile remove`, and it makes the
    host user the owner (see "Workspace permissions" and "`sv2 repair`" under
-   "Milestone 1"). Still to go over:
-   - whether it replaces an entry's ACL, as built, or adds to it;
-   - whether it should also fix mode bits (a kept file of mode 000 stays
-     that way) or the group;
-   - whether PATH is required, or `sv2 repair` alone means a whole profile;
-   - what to do with entries it cannot take over because the sandbox removed
-     their ACL: leave and report them, as built, or have the sandbox account
-     put the ACL back before the account is deleted;
-   - the cost of the automatic pass on a very large workspace, and whether
-     `profile add` of a profile that is already active should skip it.
+   "Milestone 1"). On 2026-11-27, each as built:
+   - it replaces an entry's ACL and does not add to it. The sandbox can
+     write entries of its own, a deny for the host user among them, and the
+     result should not depend on them. An entry the host user added by hand
+     is lost;
+   - it changes neither mode bits nor the group. Measured that day: a file
+     and a directory of mode 000 are fully usable through an ACL entry
+     alone, so mode bits keep neither user out; they decide only execute,
+     which the workspace ACL leaves out on purpose;
+   - PATH is required. The whole-workspace cases run by themselves after
+     `profile add` and `profile remove`;
+   - entries it cannot take over are handed back by the sandbox account, in
+     `sv2 repair` and before the account is deleted;
+   - the automatic pass always runs, also on `profile add` of a profile
+     that is already active: it is the pass that picks up files moved in.
+     Its cost was measured and the slow comparison replaced.
 10. **The "administer your computer" permission.** `profile remove`, a
     repeated `profile add` and `uninstall` depend on a TCC permission held by
     the user's terminal app (see "Account changes need a macOS privacy

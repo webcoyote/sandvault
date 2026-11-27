@@ -507,14 +507,40 @@ refused "repair: the directory above the workspace is refused" "$SV2" repair "/U
 refused "repair: '..' is refused" "$SV2" repair "$WS/../$P"
 refused "repair: a profile that does not exist is refused" "$SV2" repair "/Users/Shared/sv2/$HOST_USER/nosuchprofile"
 
-# What the host has no right to change is reported, and the exit status says so.
-sb /bin/sh -c 'umask 077; echo mine > locked; chmod -N locked'
+# What the sandbox account owns and the host has no way into: a file moved in
+# from the sandbox home, a tree whose ACLs are gone, and a directory closed
+# even to its owner. Only the account can open them, so repair has it do that.
+# (host-file, from above, is the entry that is correct already.)
+sb /bin/sh -c 'umask 077
+    echo moved > "$HOME/held-moved" && mv "$HOME/held-moved" held-moved
+    mkdir -p held-tree/sub held-closed/in && echo deep > held-tree/sub/deep && echo in > held-closed/in/file
+    chmod -R -N held-tree held-closed && chmod 000 held-closed/in held-closed'
+check "repair: precondition, the host cannot open what the sandbox holds" "" \
+    "$(/bin/cat "$WS/held-moved" "$WS/held-tree/sub/deep" "$WS/held-closed/in/file" 2>/dev/null || true)"
+check "repair: precondition, nor remove it" "held-closed held-tree" \
+    "$(/bin/rm -rf "$WS/held-tree" "$WS/held-closed" 2>/dev/null; /bin/ls "$WS" | /usr/bin/grep '^held-[ct]' | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+check "repair: the sandbox account hands back what it holds" "repaired 7, already correct 1, skipped 0" \
+    "$("$SV2" repair "$WS" 2>&1)"
+check "repair: what was handed back is the host user's and readable" "$HOST_UID $HOST_UID $HOST_UID moved deep in" \
+    "$({ $STAT -f '%u' "$WS/held-moved" "$WS/held-tree/sub/deep" "$WS/held-closed/in"
+        /bin/cat "$WS/held-moved" "$WS/held-tree/sub/deep" "$WS/held-closed/in/file"; } 2>&1 \
+        | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+check "repair: and the sandbox can still use it" "moved deep in" \
+    "$(sb /bin/sh -c 'cat held-moved held-tree/sub/deep held-closed/in/file' 2>&1 | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+check "repair: a second run changes nothing after a hand-back" "repaired 0, already correct 8, skipped 0" \
+    "$("$SV2" repair "$WS" 2>&1)"
+/bin/rm -rf "$WS/held-moved" "$WS/held-tree" "$WS/held-closed"
+check "repair: the host can remove what was handed back" "host-file" "$(/bin/ls -A "$WS")"
+
+# What even its owner cannot change is reported, and the exit status says so.
+sb /bin/sh -c 'umask 077; echo mine > locked; chmod -N locked; chflags uchg locked'
 rc=0; OUT="$("$SV2" repair "$WS" 2>&1)" || rc=$?
 if [[ "$rc" -ne 0 && "$OUT" == *"skipped 1"* && "$OUT" == *locked* ]]; then
     pass "repair: an entry it may not change is reported and fails the run"
 else
     fail "repair: an entry it may not change is reported and fails the run" "rc=$rc $OUT"
 fi
+sb /bin/sh -c 'chflags nouchg locked'
 /bin/rm -f "$WS/locked"
 
 ###############################################################################
@@ -847,6 +873,8 @@ else
 fi
 # A private file of the sandbox's, kept across removal (see re-add below).
 sb /bin/sh -c 'umask 077; echo kept > sandbox-kept'
+# And a tree the host has no way into: no ACL, private, closed to its owner.
+sb /bin/sh -c 'umask 077; mkdir -p held-kept/in && echo held > held-kept/in/file && chmod -R -N held-kept && chmod 000 held-kept/in held-kept'
 # A home laid out to resist deletion: immutable file, unreadable directories.
 sb /bin/sh -c 'mkdir -p ~/deep/tree && echo x > ~/deep/tree/file && chflags uchg ~/deep/tree/file && chmod 000 ~/deep/tree ~/deep'
 
@@ -895,6 +923,17 @@ fi
 check "remove: kept files become the host user's" "$HOST_UID $HOST_UID" \
     "$($STAT -f '%u' "$WS/sandbox-kept") $($STAT -f '%u' "$WS/host-file")"
 check "remove: kept files keep their mode" "600" "$($STAT -f '%Lp' "$WS/sandbox-kept")"
+# The account handed it over before it was deleted; afterwards nobody could.
+check "remove: what the account held is the host user's too" "$HOST_UID $HOST_UID $HOST_UID held" \
+    "$({ $STAT -f '%u' "$WS/held-kept" "$WS/held-kept/in" "$WS/held-kept/in/file"; /bin/cat "$WS/held-kept/in/file"; } 2>&1 \
+        | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+/bin/chmod -R u+rwx "$WS/held-kept" 2>/dev/null
+/bin/rm -rf "$WS/held-kept" 2>/dev/null
+if [[ -e "$WS/held-kept" ]]; then
+    fail "remove: and the host user can delete it"
+else
+    pass "remove: and the host user can delete it"
+fi
 check "remove: no longer listed" "" "$("$SV2" profile list | /usr/bin/awk -v p="$P" '$1 == p')"
 refused "remove: no session after removal" "${CALL[@]}" launch "$P" -- /usr/bin/true
 if [[ -e "$HOME/.local/state/sandvault2/deploy-keys/$P" ]]; then
