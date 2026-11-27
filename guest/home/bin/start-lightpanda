@@ -20,11 +20,15 @@ fi
 _SV_LP_LOG="$(mktemp "${TMPDIR:-/tmp}/lightpanda-XXXXXX.log")"
 
 _lp_debug "Starting lightpanda on 127.0.0.1..."
+# Do not pass --ca-cert or --ca-path: either one replaces the system trust
+# store, and /etc/ssl/cert.pem lacks roots the system trusts (e.g. the
+# SSL.com chain that example.com uses), so pages fail with
+# PeerFailedVerification. The sandbox profile allows the trust store reads
+# Lightpanda needs. tests/lightpanda/test-https-trust.js covers this.
 "$_lp_bin" serve \
     --host 127.0.0.1 \
     --port 0 \
     --log-level info \
-    --ca-cert /etc/ssl/cert.pem \
     > "$_SV_LP_LOG" 2>&1 &
 _SV_LP_PID=$!
 
