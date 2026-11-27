@@ -56,7 +56,7 @@ P="svt$((RANDOM % 90000 + 10000))"
 # A second throwaway profile, for the checks that add and remove one.
 P2="${P}b"
 ACCOUNT="sv2-$HOST_USER-$P"
-WS="/Users/Shared/sv2/$HOST_USER/$P"
+WS="/Users/sv2/$HOST_USER/$P"
 SB="/Library/Application Support/sandvault2/profiles/$HOST_USER/$P.sb"
 SSHD_DROPIN="/etc/ssh/sshd_config.d/000-sandvault2.conf"
 
@@ -155,8 +155,10 @@ check "sshd: the refusal does not apply to the host user" "denygroups sv2-sandbo
 check "home: owner and mode" "$SB_UID 700" "$($STAT -f '%u %Lp' "/Users/$ACCOUNT")"
 check "workspace: owner and mode" "$HOST_UID 700" "$($STAT -f '%u %Lp' "$WS")"
 check "workspace parents: root-owned, not writable by others" "0 755 0 755" \
-    "$($STAT -f '%u %Lp' /Users/Shared/sv2) $($STAT -f '%u %Lp' "/Users/Shared/sv2/$HOST_USER")"
+    "$($STAT -f '%u %Lp' /Users/sv2) $($STAT -f '%u %Lp' "/Users/sv2/$HOST_USER")"
 check "sandbox profile: root-owned, read-only" "0 444" "$($STAT -f '%u %Lp' "$SB")"
+check "the name of the workspace root is taken by sandvault2's hidden account" "sandvault2 reserved name" \
+    "$(/usr/bin/dscl . -read /Users/sv2 RealName 2>/dev/null | /usr/bin/sed -n '2s/^ *//p')"
 
 if "$SV2" profile add "$P" >/dev/null; then pass "profile add: repeatable"; else fail "profile add: repeatable"; fi
 check "profile add: repeat keeps the UID" "$SB_UID" \
@@ -339,8 +341,8 @@ if [[ -e "/Users/Shared/$MARK" ]]; then
 else
     pass "sandbox: cannot write outside the workspace"
 fi
-sb /usr/bin/touch "/Users/Shared/sv2/$HOST_USER/$MARK" 2>/dev/null || true
-if [[ -e "/Users/Shared/sv2/$HOST_USER/$MARK" ]]; then
+sb /usr/bin/touch "/Users/sv2/$HOST_USER/$MARK" 2>/dev/null || true
+if [[ -e "/Users/sv2/$HOST_USER/$MARK" ]]; then
     fail "sandbox: cannot create a sibling of the workspace"
 else
     pass "sandbox: cannot create a sibling of the workspace"
@@ -518,9 +520,9 @@ check "repair: nothing the links point to was changed" "$VICTIMS_BEFORE" \
 
 refused "repair: a path outside any workspace is refused" "$SV2" repair /private/tmp
 refused "repair: the host home is refused" "$SV2" repair "$HOME"
-refused "repair: the directory above the workspace is refused" "$SV2" repair "/Users/Shared/sv2/$HOST_USER"
+refused "repair: the directory above the workspace is refused" "$SV2" repair "/Users/sv2/$HOST_USER"
 refused "repair: '..' is refused" "$SV2" repair "$WS/../$P"
-refused "repair: a profile that does not exist is refused" "$SV2" repair "/Users/Shared/sv2/$HOST_USER/nosuchprofile"
+refused "repair: a profile that does not exist is refused" "$SV2" repair "/Users/sv2/$HOST_USER/nosuchprofile"
 
 # What the sandbox account owns and the host has no way into: a file moved in
 # from the sandbox home, a tree whose ACLs are gone, and a directory closed

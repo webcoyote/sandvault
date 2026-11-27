@@ -159,7 +159,7 @@ pub fn forwarded_env(
 
 /// Start in the host's current directory when it is inside the workspace,
 /// otherwise at the workspace root. Compares path components, so
-/// `/Users/Shared/sv2/pat/work2` is not "inside" `.../work`.
+/// `/Users/sv2/pat/work2` is not "inside" `.../work`.
 pub fn initial_dir(cwd: Option<&std::path::Path>, workspace: &str) -> OsString {
     match cwd {
         Some(c) if c.starts_with(workspace) => c.as_os_str().to_owned(),
@@ -248,16 +248,16 @@ mod tests {
 
     #[test]
     fn initial_directory() {
-        let ws = "/Users/Shared/sv2/pat/work";
+        let ws = "/Users/sv2/pat/work";
         let d = |cwd: &str| initial_dir(Some(Path::new(cwd)), ws);
-        assert_eq!(d("/Users/Shared/sv2/pat/work"), OsString::from(ws));
+        assert_eq!(d("/Users/sv2/pat/work"), OsString::from(ws));
         assert_eq!(
-            d("/Users/Shared/sv2/pat/work/repo/src"),
-            OsString::from("/Users/Shared/sv2/pat/work/repo/src")
+            d("/Users/sv2/pat/work/repo/src"),
+            OsString::from("/Users/sv2/pat/work/repo/src")
         );
         assert_eq!(d("/Users/pat/src"), OsString::from(ws));
-        assert_eq!(d("/Users/Shared/sv2/pat/work2"), OsString::from(ws));
-        assert_eq!(d("/Users/Shared/sv2/pat/default"), OsString::from(ws));
+        assert_eq!(d("/Users/sv2/pat/work2"), OsString::from(ws));
+        assert_eq!(d("/Users/sv2/pat/default"), OsString::from(ws));
         assert_eq!(initial_dir(None, ws), OsString::from(ws));
     }
 

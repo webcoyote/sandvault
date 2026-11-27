@@ -199,9 +199,22 @@ separates user from profile unambiguously.
   `sv2-pat-work`. The `sv2-` prefix keeps v2 accounts distinct from v1's
   `sandvault-<user>-<profile>` accounts, so both versions can be installed
   side by side and v2 never adopts or modifies a v1 account.
-- **Workspace:** `/Users/Shared/sv2/<user>/<profile>/`. The directories `sv2/`
+- **Workspace:** `/Users/sv2/<user>/<profile>/`. The directories `sv2/`
   and `sv2/<user>/` are root-owned and not world-writable, so no sandbox can
-  pre-create the name of a future profile (finding 5).
+  pre-create the name of a future profile (finding 5). They are in `/Users`,
+  where only root can create a name, and not in `/Users/Shared`, where
+  anybody can (see "The workspace root" under "Milestone 1").
+- **The name `sv2` is reserved** by a hidden account that `install` creates,
+  so that no new account is given `/Users/sv2` as its home folder.
+- **Decided (2026-11-27): `/Users/sv2`, not `/sv2`.** The reason to move at
+  all was `/Users/Shared`: anybody can write it, so another user could take
+  the name first. `/Users` solves that with a plain `mkdir` as root. `/sv2`
+  would need an `/etc/synthetic.conf` entry, a reboot or `apfs.util -t`, and
+  probably a symbolic link whose real path differs from the one users type,
+  which the sandbox profile, `sv2 repair` and the session's working
+  directory all compare. Shorter paths were not worth that. Workspaces from
+  earlier builds are moved by hand (see "The workspace root" under
+  "Milestone 1").
 - **Ownership is recorded, not parsed.** A root-owned registry, keyed by host
   UID, lists each user's profiles. The helper reads the registry and never
   derives ownership from a name. This replaces v1's collision guard, its
@@ -995,13 +1008,42 @@ Decisions this milestone made:
     the helper waiting.
   - The helper repeats the whole thing until no process is left, for at
     most 10 seconds; then the removal fails and can be run again.
-- **A taken workspace root (2026-11-25).** `/Users/Shared` is writable by
-  everyone, so another user can create `sv2` there first. `install` replaces
-  what holds nobody's data, an empty directory or a symbolic link, and
-  refuses anything else with the owner's name and the command that moves it
-  away. It never opens or follows what it finds. A user who keeps putting a
-  directory with a file in it there can still block `install`; the message
-  names them.
+- **The workspace root (2026-11-27, helper version 9, profile version 8).**
+  Until then workspaces were in `/Users/Shared/sv2`. `/Users/Shared` is
+  writable by everyone, so another user could create `sv2` there first:
+  `install` replaced an empty directory or a link and refused anything else,
+  and a user who kept a directory with a file in it there blocked `install`
+  for good. A per-user name (`sv2-<user>`) would only have narrowed that to
+  one user. The root is now `/Users/sv2`, and the "taken name" handling is
+  gone: only root can create a name in `/Users`, so `install` accepts a
+  root-owned directory there and refuses anything else.
+  - *The name `sv2`.* What is left is an account named `sv2`, whose home
+    folder would be the root. Making one takes an administrator, so it is a
+    mistake, not an attack; but System Settings offers a folder that is
+    already there to the new account, and accepting may give it every
+    workspace. So `install` creates a hidden account `sv2` first: no usable
+    password, shell `/usr/bin/false`, home `/var/empty`, primary group
+    `nobody`, and an ID from the registry, like the sandbox group's. Its
+    `RealName`, `sandvault2 reserved name`, marks it as sandvault2's, and is
+    written right after the record, so a killed install leaves a record with
+    the mark or with no attributes at all; both are completed. An account
+    named `sv2` that is anything else stops `install`, which names it.
+  - `uninstall` deletes the account only once `/Users/sv2` is gone; while
+    workspaces with files keep the directory, the account stays and
+    `uninstall` says so. `sv2 user allow sv2` is refused.
+  - The sandbox profile no longer re-allows reading the `/Users/Shared`
+    entry: nothing a session reaches is there now. The probe "read inside
+    another home" now covers `/Users/Shared` and skips `/Users/sv2`, whose
+    listing is user names, not anybody's files.
+  - *Upgrade.* sv2 has no release, so nothing moves workspaces made by an
+    earlier build. On such a Mac, run `sudo mv /Users/Shared/sv2 /Users/sv2`
+    before installing this one: the directories stay root's, and their
+    ACLs name accounts, not paths.
+  - Verified 2026-11-27 on the development Mac: `scripts/tests-sv2`,
+    `tests/root-checks` (with the section "the name sv2"),
+    `tests/integration` and `tests/mutation-checks` passed. Not known:
+    whether System Settings refuses a name taken by a hidden account (it
+    should; `sysadminctl` and `dscl` see the record).
 - **Repository credentials (2026-11-26).** Built as decided under
   "Repository credentials", in `crates/cli/src/credentials.rs`.
   - *`sv2 deploy-key OWNER/REPO [--write]`.* The sandbox user makes an
@@ -1450,11 +1492,12 @@ dropped from the document by mistake in commit 9a52da3 and put back.)
 ### Not yet verified
 
 `sv2/tests/root-checks` makes the checks that need an administrator:
-uninstall with and without `--all-profiles`, install over a name somebody
-else took, and account IDs across a reinstall. It deletes every profile on
+uninstall with and without `--all-profiles`, the account that keeps the
+name `sv2` taken, and account IDs across a reinstall. It deletes every profile on
 the Mac, so it is run by hand: `sv2/tests/root-checks sv2/target/release
 --delete-every-profile`. It was run on the development Mac on 2026-11-26
-and passed (33 of 33), all three "taken name" cases included. That run
+and passed (33 of 33), all three "taken name" cases included (those
+cases went with `/Users/Shared/sv2` on 2026-11-27). That run
 still had a section for very large account IDs, since removed from the
 script: an account with ID 2147483000 was created, entered (in its own
 launchd domain) and removed, and the integration suite passed with IDs

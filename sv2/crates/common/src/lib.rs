@@ -30,13 +30,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The helper itself: bump on any change to its code that an installed
 /// machine must get (a fix, a new check, a new verb or argument). Nothing
 /// can detect a forgotten bump here.
-pub const HELPER_VERSION: u32 = 8;
+pub const HELPER_VERSION: u32 = 9;
 /// `/etc/sudoers.d/sandvault2`.
 pub const SUDOERS_VERSION: u32 = 2;
 /// The sshd drop-in that refuses sandbox accounts.
 pub const SSHD_DROPIN_VERSION: u32 = 1;
 /// The rendered `sandbox-exec` profile: `base.sb` and how it is filled in.
-pub const SANDBOX_PROFILE_VERSION: u32 = 7;
+pub const SANDBOX_PROFILE_VERSION: u32 = 8;
 
 /// The key of the comment line each file carries: `<key>: <number>`.
 pub const SUDOERS_STAMP: &str = "sv2-sudoers-version";
@@ -100,8 +100,15 @@ pub const ALLOWED_GROUP: &str = "sv2-users";
 /// `account_name` always produces a second dash.
 pub const SANDBOX_GROUP: &str = "sv2-sandboxes";
 
-/// Root-owned parent of every workspace: `<root>/<user>/<profile>`.
-pub const WORKSPACE_ROOT: &str = "/Users/Shared/sv2";
+/// Root-owned parent of every workspace: `<root>/<user>/<profile>`. In
+/// `/Users`, where only root can create a name; `/Users/Shared` would let any
+/// user take it first.
+pub const WORKSPACE_ROOT: &str = "/Users/sv2";
+
+/// The hidden account that `install` creates so that nobody else can be
+/// given this name: a new account named `sv2` would get `WORKSPACE_ROOT`
+/// as its home folder, and macOS may hand an existing folder to it.
+pub const RESERVED_ACCOUNT: &str = "sv2";
 
 pub const DEFAULT_PROFILE: &str = "default";
 
@@ -622,7 +629,7 @@ mod tests {
     #[test]
     fn install_version_is_one_plain_word() {
         let v = install_version();
-        assert_eq!(v, "helper=8,sudoers=2,sshd=1,profile=7");
+        assert_eq!(v, "helper=9,sudoers=2,sshd=1,profile=8");
         assert!(v
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'=' || b == b','));
@@ -668,10 +675,9 @@ mod tests {
 
     #[test]
     fn paths() {
-        assert_eq!(
-            workspace_path("pat", "default"),
-            "/Users/Shared/sv2/pat/default"
-        );
+        assert_eq!(workspace_path("pat", "default"), "/Users/sv2/pat/default");
         assert_eq!(home_path("sv2-pat-default"), "/Users/sv2-pat-default");
+        // The account that keeps the root's name taken is named for it.
+        assert_eq!(WORKSPACE_ROOT, format!("/Users/{RESERVED_ACCOUNT}"));
     }
 }

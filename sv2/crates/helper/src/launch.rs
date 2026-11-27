@@ -265,7 +265,7 @@ mod tests {
         assert_eq!(get("HOME"), Some("/Users/sv2-pat-work"));
         assert_eq!(get("USER"), Some("sv2-pat-work"));
         assert_eq!(get("PATH"), Some("/usr/bin:/bin:/usr/sbin:/sbin"));
-        assert_eq!(get("SV2_WORKSPACE"), Some("/Users/Shared/sv2/pat/work"));
+        assert_eq!(get("SV2_WORKSPACE"), Some("/Users/sv2/pat/work"));
         assert_eq!(get("TMPDIR"), Some("/var/folders/x/T/"));
         assert!(session_env("a", "b", "c", None)
             .iter()

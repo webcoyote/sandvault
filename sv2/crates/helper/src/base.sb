@@ -157,22 +157,20 @@ __SSH_PORT_RULES__
     (regex #"^/dev/bpf"))
 
 ;; Default-deny reads under /Users, then re-allow only the sandvault
-;; user's home and its shared workspace. Catches the host user's home
-;; plus any other accounts on the machine (other users, /Users/Guest,
-;; sibling sv-* workspaces under /Users/Shared) without enumeration.
+;; user's home and its workspace. Catches the host user's home plus any
+;; other accounts on the machine (other users, /Users/Guest, /Users/Shared,
+;; the other workspaces under the workspace root) without enumeration.
 ;; Last-match-wins, so the re-allows below must follow this deny.
 ;;
-;; The literal re-allows on /Users, /Users/Shared and the two root-owned
-;; parents of the workspace grant lookup of
-;; those directory entries themselves so that path resolution into the
-;; allowed subpaths works. Without them, mkdir -p and open() under
-;; the allowed subtrees fail because path traversal touches the denied
-;; parent components.
+;; The literal re-allows on /Users and the two root-owned parents of the
+;; workspace grant lookup of those directory entries themselves so that
+;; path resolution into the allowed subpaths works. Without them, mkdir -p
+;; and open() under the allowed subtrees fail because path traversal
+;; touches the denied parent components.
 (deny file-read*
     (subpath "/Users"))
 (allow file-read*
     (literal "/Users")
-    (literal "/Users/Shared")
     (literal "__WORKSPACE_ROOT__")
     (literal "__WORKSPACE_USER_DIR__")
     (subpath "__WORKSPACE__")

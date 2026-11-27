@@ -972,18 +972,18 @@ mod tests {
                 rel: os(rel),
             })
         };
-        assert_eq!(r("/Users/Shared/sv2/pat/work", "/"), t("work", &[]));
-        assert_eq!(r("/Users/Shared/sv2/pat/work/", "/"), t("work", &[]));
+        assert_eq!(r("/Users/sv2/pat/work", "/"), t("work", &[]));
+        assert_eq!(r("/Users/sv2/pat/work/", "/"), t("work", &[]));
         assert_eq!(
-            r("/Users/Shared/sv2/pat/work/a/b c", "/"),
+            r("/Users/sv2/pat/work/a/b c", "/"),
             t("work", &["a", "b c"])
         );
-        assert_eq!(r(".", "/Users/Shared/sv2/pat/work/a"), t("work", &["a"]));
+        assert_eq!(r(".", "/Users/sv2/pat/work/a"), t("work", &["a"]));
         assert_eq!(
-            r("b/./c", "/Users/Shared/sv2/pat/work/a"),
+            r("b/./c", "/Users/sv2/pat/work/a"),
             t("work", &["a", "b", "c"])
         );
-        assert_eq!(r("work/x", "/Users/Shared/sv2/pat"), t("work", &["x"]));
+        assert_eq!(r("work/x", "/Users/sv2/pat"), t("work", &["x"]));
     }
 
     #[test]
@@ -992,18 +992,21 @@ mod tests {
         for (arg, cwd) in [
             ("/", "/"),
             ("/Users/pat", "/"),
-            ("/Users/Shared/sv2", "/"),
-            ("/Users/Shared/sv2/pat", "/"),
-            ("/Users/Shared/sv2/sam/work", "/"),
-            ("/Users/Shared/sv2/patricia/work", "/"),
-            ("/Users/Shared/sv2/pat/Not-A-Profile", "/"),
-            ("/Users/Shared/sv2x/pat/work", "/"),
+            ("/Users/sv2", "/"),
+            ("/Users/sv2/pat", "/"),
+            ("/Users/sv2/sam/work", "/"),
+            ("/Users/sv2/patricia/work", "/"),
+            ("/Users/sv2/pat/Not-A-Profile", "/"),
+            ("/Users/sv2x/pat/work", "/"),
+            // A sandbox home shares the root's first letters, not its path.
+            ("/Users/sv2-pat-work", "/"),
+            ("/Users/sv2-pat-work/pat/work", "/"),
             (".", "/Users/pat"),
             ("x", "/tmp"),
             // No lexical "..": what it means depends on links.
-            ("/Users/Shared/sv2/pat/work/../work", "/"),
-            ("..", "/Users/Shared/sv2/pat/work/a"),
-            ("a/../../../../../etc", "/Users/Shared/sv2/pat/work"),
+            ("/Users/sv2/pat/work/../work", "/"),
+            ("..", "/Users/sv2/pat/work/a"),
+            ("a/../../../../../etc", "/Users/sv2/pat/work"),
         ] {
             assert!(r(arg, cwd).is_err(), "{arg:?} in {cwd:?}");
         }

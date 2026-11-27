@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 use sv2_common::{
     hand_back_argv, home_path, local_ports_left_open, ssh_ports, ssh_ports_in_services,
     ssh_ports_in_sshd_config, stamped_version, valid_host_user, valid_profile, workspace_path,
-    workspace_user_dir, Obelus, ALLOWED_GROUP, HELPER_PATH, MODE_CALL, SANDBOX_GROUP,
-    SANDBOX_PROFILE_STAMP, SANDBOX_PROFILE_VERSION, SERVICES_FILE, SSHD_DROPIN_STAMP,
-    SSHD_DROPIN_VERSION, SUDOERS_STAMP, SUDOERS_VERSION, WORKSPACE_ROOT,
+    workspace_user_dir, Obelus, ALLOWED_GROUP, HELPER_PATH, MODE_CALL, RESERVED_ACCOUNT,
+    SANDBOX_GROUP, SANDBOX_PROFILE_STAMP, SANDBOX_PROFILE_VERSION, SERVICES_FILE,
+    SSHD_DROPIN_STAMP, SSHD_DROPIN_VERSION, SUDOERS_STAMP, SUDOERS_VERSION, WORKSPACE_ROOT,
 };
 
 use crate::registry::{Entry, Registry, State, MAX_PROFILES_PER_USER};
@@ -39,6 +39,8 @@ const SUDOERS_NAME: &str = "sandvault2";
 const ALLOWED_GROUP_REAL_NAME: &str = "sandvault2 allowed users";
 /// Marks the group of all sandbox accounts as ours, in the same way.
 const SANDBOX_GROUP_REAL_NAME: &str = "sandvault2 sandbox accounts";
+/// What marks `RESERVED_ACCOUNT` as one sandvault2 created.
+const RESERVED_ACCOUNT_REAL_NAME: &str = "sandvault2 reserved name";
 const SSHD: &str = "/usr/sbin/sshd";
 const SSHD_DROPIN_DIR: &str = "/etc/ssh/sshd_config.d";
 /// Sorts before every other drop-in (macOS ships `100-macos.conf`): among
@@ -377,12 +379,18 @@ fn workspace_aces(host_user: &str, account: &str) -> Vec<String> {
     ]
 }
 
-/// `/Users/Shared/sv2/<user>/<profile>`. `/Users/Shared` is world-writable,
-/// so `sv2` and `sv2/<user>` must be root-owned and are refused otherwise;
-/// below them nobody but root can create or replace a name (finding 5).
+/// `WORKSPACE_ROOT`, in `/Users`, where only root can create a name. Its
+/// name is `RESERVED_ACCOUNT`'s, which no other account can then be given.
+fn ensure_workspace_root() -> Res<std::os::fd::OwnedFd> {
+    let users = sys::open_dir("/Users")?;
+    sys::ensure_root_dir_at(&users, RESERVED_ACCOUNT, WORKSPACE_ROOT)
+}
+
+/// `/Users/sv2/<user>/<profile>`. `sv2` and `sv2/<user>` must be root-owned
+/// and are refused otherwise; below them nobody but root can create or
+/// replace a name (finding 5).
 fn ensure_workspace(entry: &Entry, account: &str, host_gid: u32) -> Res<()> {
-    let shared = sys::open_dir("/Users/Shared")?;
-    let root = sys::ensure_root_dir_at(&shared, "sv2", WORKSPACE_ROOT)?;
+    let root = ensure_workspace_root()?;
     let user_dir_path = workspace_user_dir(&entry.host_user);
     let user_dir = sys::ensure_root_dir_at(&root, &entry.host_user, &user_dir_path)?;
 
@@ -827,6 +835,51 @@ fn ensure_sandbox_group(reg: &mut Registry) -> Res<()> {
     }
 }
 
+/// What install makes of an existing account named `RESERVED_ACCOUNT`, from
+/// its `RealName` and `UniqueID` as `ds::user_attr` reads them: Ok(Some(uid))
+/// to keep the ID it has, Ok(None) to give it a new one, Err(()) when the
+/// account is not sandvault2's.
+///
+/// A record with neither attribute is one a killed install created just
+/// before marking it; nobody can log in to it, so it is completed.
+fn reserved_account_id(real_name: Option<&str>, uid: Option<&str>) -> Result<Option<u32>, ()> {
+    match real_name {
+        None => Ok(None),
+        Some(r) if r == RESERVED_ACCOUNT_REAL_NAME => Ok(uid.and_then(|u| u.parse().ok())),
+        Some("") if uid.is_none_or(str::is_empty) => Ok(None),
+        Some(_) => Err(()),
+    }
+}
+
+/// Take the name `RESERVED_ACCOUNT` with a hidden account, so that no new
+/// account gets `WORKSPACE_ROOT` as its home folder. Without it, an admin
+/// who creates an account named `sv2` in System Settings is asked whether to
+/// use the folder that is already there, and saying yes can give that
+/// account every workspace.
+fn reserve_workspace_name(reg: &mut Registry) -> Res<()> {
+    let real_name = ds::user_attr(RESERVED_ACCOUNT, "RealName")?;
+    let uid = ds::user_attr(RESERVED_ACCOUNT, "UniqueID")?;
+    let existing = reserved_account_id(real_name.as_deref(), uid.as_deref()).map_err(|()| {
+        format!(
+            "an account named {RESERVED_ACCOUNT} already exists, and sandvault2 did not create it. sandvault2 keeps its workspaces in {WORKSPACE_ROOT}, which is that account's home folder. Rename or delete the account, then run the install again. {}",
+            Obelus("homesick pelican")
+        )
+    })?;
+    let uid = match existing {
+        Some(uid) => uid,
+        None => {
+            let uid = reg.allocate_id(sys::id_in_use)?;
+            save_registry(reg)?;
+            uid
+        }
+    };
+    ds::ensure_reserved_user(RESERVED_ACCOUNT, uid, RESERVED_ACCOUNT_REAL_NAME)
+}
+
+fn reserved_account_is_ours() -> Res<bool> {
+    Ok(ds::user_attr(RESERVED_ACCOUNT, "RealName")?.as_deref() == Some(RESERVED_ACCOUNT_REAL_NAME))
+}
+
 fn ensure_allowed_group() -> Res<()> {
     match ds::group_real_name(ALLOWED_GROUP)? {
         None => ds::create_group_auto_id(ALLOWED_GROUP, ALLOWED_GROUP_REAL_NAME),
@@ -889,8 +942,10 @@ pub fn install(caller: &Caller) -> Res<()> {
     };
     reject_sandbox_caller(&reg, caller)?;
 
-    let shared = sys::open_dir("/Users/Shared")?;
-    sys::claim_root_dir_at(&shared, "sv2", WORKSPACE_ROOT)?;
+    // The name first: once the directory exists, a new account by its name
+    // would be offered it.
+    reserve_workspace_name(&mut reg)?;
+    ensure_workspace_root()?;
 
     ensure_allowed_group()?;
     ds::add_member(&caller.name, ALLOWED_GROUP)?;
@@ -1019,12 +1074,20 @@ pub fn uninstall(all_profiles: bool) -> Res<()> {
         None => {}
     }
 
-    if let Ok(shared) = sys::open_dir("/Users/Shared") {
+    if let Ok(users) = sys::open_dir("/Users") {
         // Only when it is ours; rmdir removes it only when empty.
-        if let Ok(root) = sys::open_dir_at(&shared, "sv2") {
-            if sys::fstat(&root)?.uid == 0 && !sys::rmdir_at(&shared, "sv2")? {
+        if let Ok(root) = sys::open_dir_at(&users, RESERVED_ACCOUNT) {
+            if sys::fstat(&root)?.uid == 0 && !sys::rmdir_at(&users, RESERVED_ACCOUNT)? {
                 say!("kept {WORKSPACE_ROOT}: workspaces with files remain");
             }
+        }
+    }
+    // The name stays taken for as long as the directory is there.
+    if reserved_account_is_ours()? {
+        if sys::exists(WORKSPACE_ROOT) {
+            say!("kept account {RESERVED_ACCOUNT}: it keeps a new account from being given {WORKSPACE_ROOT} as its home folder");
+        } else {
+            ds::delete_user(RESERVED_ACCOUNT)?;
         }
     }
 
@@ -1040,6 +1103,11 @@ fn check_allowable_user(user: &str) -> Res<sys::Passwd> {
     let pw = sys::passwd_by_name(user).ok_or_else(|| format!("no such user: {user}"))?;
     if pw.uid == 0 {
         return Err("root cannot be a sandvault user".to_string());
+    }
+    if user == RESERVED_ACCOUNT && reserved_account_is_ours()? {
+        return Err(format!(
+            "{user} is the account that keeps the name of {WORKSPACE_ROOT} taken; nobody uses it"
+        ));
     }
     let _lock = lock(false)?;
     if load_registry()?.is_sandbox_id(pw.uid) {
@@ -1092,7 +1160,7 @@ mod tests {
         let pinned = [
             ("sudoers", 2, 2_912_536_391_597_273_097u64),
             ("sshd drop-in", 1, 1_053_182_674_171_491_837),
-            ("sandbox profile", 7, 18_094_520_995_419_841_184),
+            ("sandbox profile", 8, 9_823_659_607_425_949_229),
         ];
         assert_eq!(
             now, pinned,
@@ -1412,6 +1480,27 @@ mod tests {
         );
         let main = fx.main_config();
         assert!(sshd_parse(Some(&main)).is_ok());
+    }
+
+    /// Install takes over only an account named sv2 that it made, or the
+    /// empty record a killed install left; anybody else's is refused.
+    #[test]
+    fn the_reserved_name_is_taken_over_only_when_it_is_ours() {
+        let ours = Some(RESERVED_ACCOUNT_REAL_NAME);
+        // None yet: a new ID.
+        assert_eq!(reserved_account_id(None, None), Ok(None));
+        // Ours: the ID it has, or a new one when a killed run left it out.
+        assert_eq!(reserved_account_id(ours, Some("612")), Ok(Some(612)));
+        assert_eq!(reserved_account_id(ours, Some("")), Ok(None));
+        // Created and killed before it was marked: nothing in it but a name.
+        assert_eq!(reserved_account_id(Some(""), Some("")), Ok(None));
+        // Somebody's: a person's account, or a record with an ID and no name.
+        assert_eq!(
+            reserved_account_id(Some("Sam V. Two"), Some("502")),
+            Err(())
+        );
+        assert_eq!(reserved_account_id(Some(""), Some("502")), Err(()));
+        assert_eq!(reserved_account_id(Some("sandvault2"), None), Err(()));
     }
 
     #[test]

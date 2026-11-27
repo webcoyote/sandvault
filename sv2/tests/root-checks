@@ -1,7 +1,7 @@
 #!/bin/bash
 # Checks of sv2 that need an administrator, and that the integration suite
-# therefore cannot make: uninstall, install over a name somebody else took,
-# and account IDs across a reinstall.
+# therefore cannot make: uninstall, the account that keeps the name sv2
+# taken, and account IDs across a reinstall.
 #
 # Run it yourself, from a terminal. It asks for your sudo password, and macOS
 # may ask whether your terminal may "administer your computer": allow it.
@@ -38,7 +38,7 @@ STATE_DIR="/Library/Application Support/sandvault2"
 REGISTRY="$STATE_DIR/registry"
 SUDOERS="/etc/sudoers.d/sandvault2"
 SSHD_DROPIN="/etc/ssh/sshd_config.d/000-sandvault2.conf"
-ROOT="/Users/Shared/sv2"
+ROOT="/Users/sv2"
 STAT=/usr/bin/stat
 ME="$(/usr/bin/id -un)"
 P="rootchk$((RANDOM % 9000 + 1000))"
@@ -54,6 +54,9 @@ check() { if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1" "expected [$2] g
 note() { echo -e "${ORANGE}     $1${NC}"; }
 section() { echo; echo "== $1"; /usr/bin/sudo -v; }
 uid_of() { /usr/bin/dscl . -read "/Users/$1" UniqueID 2>/dev/null | /usr/bin/awk '{print $2}'; }
+# attr USER ATTR: the value, also when dscl puts it on the next line.
+attr() { /usr/bin/dscl . -read "/Users/$1" "$2" 2>/dev/null | /usr/bin/sed -e 's/^[^:]*:[^:]*: *//' -e 's/^[^:]*: *//' -e 's/^ *//' | /usr/bin/tr -d '\n'; }
+user_exists() { /usr/bin/dscl . -read "/Users/$1" RecordName >/dev/null 2>&1; }
 group_exists() { /usr/bin/dscl . -read "/Groups/$1" RecordName >/dev/null 2>&1; }
 next_id() { /usr/bin/sudo /usr/bin/awk '$1 == "next-id" {print $2}' "$REGISTRY"; }
 # run CMD...: run CMD, keep its output in OUT and its status in RC.
@@ -129,45 +132,61 @@ else
     NEXT=""
 fi
 
-###############################################################################
-section "install over a name somebody else took"
-###############################################################################
-if [[ -e "$ROOT" || -L "$ROOT" ]]; then
-    note "$ROOT still exists (workspaces with files were kept): these checks NOT RUN"
+if [[ -e "$ROOT" ]]; then
+    pass "uninstall: $ROOT is kept, it has workspaces with files"
+    check "uninstall: so the account sv2 is kept" "sandvault2 reserved name" "$(attr sv2 RealName)"
+elif user_exists sv2; then
+    fail "uninstall: the account sv2 is removed with $ROOT" "$(attr sv2 RealName)"
 else
-    # An empty directory that root did not make: replaced.
-    /bin/mkdir "$ROOT"
-    run "$SV2" install
-    check "taken root, empty directory: install succeeds" "0" "$RC"
-    check "taken root, empty directory: it is root's now" "0" "$($STAT -f '%u' "$ROOT" 2>/dev/null)"
-    "$SV2" uninstall >/dev/null 2>&1 || true
+    pass "uninstall: the account sv2 is removed with $ROOT"
+fi
 
-    # A link: replaced, and what it points to is left alone.
-    TARGET="$(/usr/bin/mktemp -d)"
-    : > "$TARGET/keep"
-    /bin/ln -s "$TARGET" "$ROOT"
+###############################################################################
+section "the name sv2"
+###############################################################################
+if [[ -e "$ROOT" ]] || user_exists sv2; then
+    note "$ROOT or an account named sv2 is still there: these checks NOT RUN"
+else
+    # Somebody's account named sv2: refused, and nothing is made.
+    STAND_IN="root-checks stand-in"
+    trap '[[ "$(attr sv2 RealName)" != "$STAND_IN" ]] || /usr/bin/sudo /usr/bin/dscl . -delete /Users/sv2' EXIT
+    /usr/bin/sudo /usr/bin/dscl . -create /Users/sv2 RealName "$STAND_IN"
     run "$SV2" install
-    check "taken root, a link: install succeeds" "0" "$RC"
-    if [[ -d "$ROOT" && ! -L "$ROOT" && -f "$TARGET/keep" ]]; then
-        pass "taken root, a link: replaced by a directory, target untouched"
+    if [[ "$RC" -ne 0 && "$OUT" == *"homesick pelican"* ]]; then
+        pass "someone's sv2: install refuses"
     else
-        fail "taken root, a link: replaced by a directory, target untouched"
+        fail "someone's sv2: install refuses" "rc=$RC: $OUT"
     fi
-    check "taken root, a link: nothing was made in its target" "keep" "$(/bin/ls -A "$TARGET" | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
-    /bin/rm -rf "$TARGET"
-    "$SV2" uninstall >/dev/null 2>&1 || true
+    check "someone's sv2: the account is left as it was" "$STAND_IN" "$(attr sv2 RealName)"
+    if [[ -e "$ROOT" ]]; then fail "someone's sv2: $ROOT is not made"; else pass "someone's sv2: $ROOT is not made"; fi
+    /usr/bin/sudo /usr/bin/dscl . -delete /Users/sv2
+    trap - EXIT
 
-    # A directory with a file in it: refused, and left as it is.
-    /bin/mkdir "$ROOT"
-    echo mine > "$ROOT/file"
     run "$SV2" install
-    if [[ "$RC" -ne 0 && "$OUT" == *"was made by $ME"* && "$OUT" == *"squatting heron"* ]]; then
-        pass "taken root, with a file: install refuses and names the owner"
+    check "install: succeeds" "0" "$RC"
+    check "install: makes the account sv2" "sandvault2 reserved name" "$(attr sv2 RealName)"
+    check "the account sv2: hidden" "1" "$(attr sv2 IsHidden)"
+    check "the account sv2: no shell" "/usr/bin/false" "$(attr sv2 UserShell)"
+    check "the account sv2: no home" "/var/empty" "$(attr sv2 NFSHomeDirectory)"
+    check "the account sv2: no password" "*" "$(attr sv2 Password)"
+    check "install: $ROOT is root's and only root writes it" "0 755" "$($STAT -f '%u %Lp' "$ROOT" 2>/dev/null)"
+    run "$SV2" user allow sv2
+    if [[ "$RC" -ne 0 && "$OUT" == *"keeps the name"* ]]; then pass "user allow sv2: refused"; else fail "user allow sv2: refused" "rc=$RC: $OUT"; fi
+
+    # A workspace with a file in it keeps the directory, and so the name.
+    /usr/bin/sudo /bin/mkdir "$ROOT/root-checks"
+    /usr/bin/sudo /usr/bin/touch "$ROOT/root-checks/file"
+    run "$SV2" uninstall
+    check "uninstall, with files in $ROOT: succeeds" "0" "$RC"
+    check "uninstall, with files in $ROOT: the account sv2 is kept" "sandvault2 reserved name" "$(attr sv2 RealName)"
+    if [[ "$OUT" == *"kept account sv2"* ]]; then pass "uninstall: says the account is kept"; else fail "uninstall: says the account is kept" "$OUT"; fi
+    /usr/bin/sudo /bin/rm -r "$ROOT/root-checks"
+    run "$SV2" uninstall
+    if [[ ! -e "$ROOT" ]] && ! user_exists sv2; then
+        pass "uninstall, $ROOT empty: it goes, and the account sv2 with it"
     else
-        fail "taken root, with a file: install refuses and names the owner" "rc=$RC: $OUT"
+        fail "uninstall, $ROOT empty: it goes, and the account sv2 with it" "$OUT"
     fi
-    check "taken root, with a file: the file is untouched" "mine" "$(/bin/cat "$ROOT/file" 2>/dev/null)"
-    /bin/rm -rf "$ROOT"
 fi
 
 ###############################################################################

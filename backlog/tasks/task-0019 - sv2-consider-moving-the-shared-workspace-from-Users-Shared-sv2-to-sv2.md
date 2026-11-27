@@ -1,9 +1,10 @@
 ---
 id: TASK-0019
 title: 'sv2: consider moving the shared workspace from /Users/Shared/sv2 to /sv2'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-27T19:15:40Z'
+updated_date: '2026-11-27T22:04:16Z'
 labels:
   - sv2
 dependencies: []
@@ -28,9 +29,21 @@ Constraints to check before deciding, none measured yet:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The reason for the move is recorded in the task or the design doc
+- [x] #1 The reason for the move is recorded in the task or the design doc
 - [ ] #2 Whether a root-owned, not world-writable `/sv2` can be created on current macOS is measured, with how it is created, whether a reboot is needed, and whether it survives an OS update
 - [ ] #3 The effect on the sandbox profile, `sv2 repair` and the session working directory is checked, in particular if `/sv2` is a symlink
-- [ ] #4 What happens to existing workspaces under `/Users/Shared/sv2` is stated
-- [ ] #5 A decision to move or to stay is recorded in `docs/SANDVAULT2.md` under "Names and ownership" with the reasons, and a follow-up task exists if the decision is to move
+- [x] #4 What happens to existing workspaces under `/Users/Shared/sv2` is stated
+- [x] #5 A decision to move or to stay is recorded in `docs/SANDVAULT2.md` under "Names and ownership" with the reasons, and a follow-up task exists if the decision is to move
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Superseded by TASK-0020. Reason for moving: /Users/Shared is world-writable, so another user could take the name and block install. AC #2 and #3 (measuring /sv2 via synthetic.conf, and the effect of a symlinked root) were not measured: the decision is to use /Users/sv2, which needs neither.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Decided against /sv2: workspaces moved to /Users/sv2 instead (TASK-0020), which removes the world-writable parent with a plain root mkdir and needs no synthetic.conf, reboot or symlink. Decision and reasons recorded under "Names and ownership" in docs/SANDVAULT2.md. Existing workspaces under /Users/Shared/sv2 are moved by hand (sudo mv /Users/Shared/sv2 /Users/sv2). AC #2 and #3 left unchecked on purpose: the /sv2 measurements were not made because the option was dropped. No follow-up task needed.
+<!-- SECTION:FINAL_SUMMARY:END -->

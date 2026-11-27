@@ -909,32 +909,32 @@ mod tests {
             name: name.into(),
             state: state.into(),
             account: format!("sv2-pat-{name}"),
-            workspace: format!("/Users/Shared/sv2/pat/{name}"),
+            workspace: format!("/Users/sv2/pat/{name}"),
         };
         assert_eq!(
             format_profile_table(&[line("default", "active")]),
             "PROFILE  STATE   ACCOUNT          WORKSPACE\n\
-             default  active  sv2-pat-default  /Users/Shared/sv2/pat/default\n"
+             default  active  sv2-pat-default  /Users/sv2/pat/default\n"
         );
         // A cell longer than its heading widens the column for every row.
         assert_eq!(
             format_profile_table(&[line("a", "active"), line("abcdefghijklmnop", "removing")]),
             "PROFILE           STATE     ACCOUNT                   WORKSPACE\n\
-             a                 active    sv2-pat-a                 /Users/Shared/sv2/pat/a\n\
-             abcdefghijklmnop  removing  sv2-pat-abcdefghijklmnop  /Users/Shared/sv2/pat/abcdefghijklmnop\n"
+             a                 active    sv2-pat-a                 /Users/sv2/pat/a\n\
+             abcdefghijklmnop  removing  sv2-pat-abcdefghijklmnop  /Users/sv2/pat/abcdefghijklmnop\n"
         );
     }
 
     #[test]
     fn parses_helper_profile_list() {
-        let text = "profile default active sv2-pat-default /Users/Shared/sv2/pat/default\n\
-                    profile work adding sv2-pat-work /Users/Shared/sv2/pat/work\n";
+        let text = "profile default active sv2-pat-default /Users/sv2/pat/default\n\
+                    profile work adding sv2-pat-work /Users/sv2/pat/work\n";
         let v = parse_profile_list(text).unwrap();
         assert_eq!(v.len(), 2);
         assert_eq!(v[0].name, "default");
         assert_eq!(v[0].state, "active");
         assert_eq!(v[1].account, "sv2-pat-work");
-        assert_eq!(v[1].workspace, "/Users/Shared/sv2/pat/work");
+        assert_eq!(v[1].workspace, "/Users/sv2/pat/work");
         assert_eq!(parse_profile_list("").unwrap(), vec![]);
     }
 

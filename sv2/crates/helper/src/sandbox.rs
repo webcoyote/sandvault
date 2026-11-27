@@ -90,10 +90,12 @@ mod tests {
             sv2_common::stamped_version(&text, sv2_common::SANDBOX_PROFILE_STAMP),
             Some(SANDBOX_PROFILE_VERSION)
         );
-        assert!(text.contains("(subpath \"/Users/Shared/sv2/pat/work\")"));
+        assert!(text.contains("(subpath \"/Users/sv2/pat/work\")"));
         assert!(text.contains("(subpath \"/Users/sv2-pat-work\")"));
-        assert!(text.contains("(literal \"/Users/Shared/sv2\")"));
-        assert!(text.contains("(literal \"/Users/Shared/sv2/pat\")"));
+        assert!(text.contains("(literal \"/Users/sv2\")"));
+        assert!(text.contains("(literal \"/Users/sv2/pat\")"));
+        // Nothing of /Users/Shared, which anybody can write.
+        assert!(!text.contains("\"/Users/Shared"));
         // v1's text: nothing of the bash heredoc survives.
         assert!(!text.contains('$'));
         assert!(!text.contains("sandvault-"));
@@ -103,8 +105,8 @@ mod tests {
     fn profiles_are_distinct_per_user_and_profile() {
         let a = render("pat", "work", &[]).unwrap();
         let b = render("pat-work", "default", &[]).unwrap();
-        assert!(!a.contains("/Users/Shared/sv2/pat-work/"));
-        assert!(!b.contains("\"/Users/Shared/sv2/pat/work\""));
+        assert!(!a.contains("/Users/sv2/pat-work/"));
+        assert!(!b.contains("\"/Users/sv2/pat/work\""));
         assert!(!b.contains("\"/Users/sv2-pat-work\""));
     }
 

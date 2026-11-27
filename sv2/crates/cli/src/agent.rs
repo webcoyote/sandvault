@@ -2135,10 +2135,7 @@ no_inject = ["update"]
     #[test]
     fn workspaces_and_sandbox_homes_are_refused_by_where_they_are() {
         for (path, why) in [
-            (
-                "/Users/Shared/sv2/pat/work/agents/claude",
-                "sandbox workspace",
-            ),
+            ("/Users/sv2/pat/work/agents/claude", "sandbox workspace"),
             (
                 "/Users/sv2-pat-work/.config/sandvault2/agents/claude",
                 "sandbox account's home",

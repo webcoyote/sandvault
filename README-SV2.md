@@ -75,7 +75,7 @@ shortened: `sv2 s` is `sv2 shell`.
   `sv2 profile add NAME`, listed with `sv2 profile list`, and removed with
   `sv2 profile remove NAME`.
 - A session starts in the profile's workspace,
-  `/Users/Shared/sv2/YOU/PROFILE`, or in your current directory if that is
+  `/Users/sv2/YOU/PROFILE`, or in your current directory if that is
   inside it. You and the sandbox can both read and write everything there.
   It is the place to put what the agent should work on.
 - The sandbox account is `sv2-YOU-PROFILE`, with its home in `/Users`.
@@ -256,6 +256,9 @@ sv2 uninstall                     # asks for your password
 
 `sv2 uninstall` refuses while profiles exist and names them.
 `sv2 uninstall --all-profiles` removes every profile of every user as well.
+Workspaces with files in them stay in `/Users/sv2`, and so does the hidden
+account `sv2` that `install` creates: it keeps anybody else from being given
+that folder as a home folder.
 
 
 ## Not there yet

@@ -215,6 +215,31 @@ pub fn ensure_user(name: &str, uid: u32, gid: u32, home: &str) -> Res<()> {
     create(&record, "IsHidden", "1")
 }
 
+/// One attribute of a local account: None when there is no such account,
+/// an empty string when it lacks the attribute.
+pub fn user_attr(name: &str, attr: &str) -> Res<Option<String>> {
+    read_attr(&format!("/Users/{name}"), attr)
+}
+
+/// An account that exists only so that its name is taken: hidden, with no
+/// usable password, no shell, no home, and no group of its own (`-2` is
+/// `nobody`'s). `real_name` is written right after the record, because it
+/// is what marks the account as sandvault2's; a killed run leaves a record
+/// with that mark, or one with no attributes at all.
+pub fn ensure_reserved_user(name: &str, uid: u32, real_name: &str) -> Res<()> {
+    let record = format!("/Users/{name}");
+    if read_attr(&record, "RecordName")?.is_none() {
+        write(DSCL, &[".", "-create", &record])?;
+    }
+    create(&record, "RealName", real_name)?;
+    ensure_record_with_id(&record, "UniqueID", uid)?;
+    create(&record, "PrimaryGroupID", "-2")?;
+    create(&record, "NFSHomeDirectory", "/var/empty")?;
+    create(&record, "UserShell", "/usr/bin/false")?;
+    create(&record, "Password", "*")?;
+    create(&record, "IsHidden", "1")
+}
+
 fn has_token(list: &Option<String>, token: &str) -> bool {
     list.as_deref()
         .is_some_and(|l| l.split_whitespace().any(|t| t == token))

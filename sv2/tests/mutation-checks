@@ -54,7 +54,7 @@ HELPER="/Library/PrivilegedHelperTools/sv2-helper"
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 ME="$(/usr/bin/id -un)"
-WORKSPACES="/Users/Shared/sv2/$ME"
+WORKSPACES="/Users/sv2/$ME"
 # After "sandvault2" in the order sudo reads the directory, as a file an
 # administrator adds later would be.
 NO_PTY="/etc/sudoers.d/zz-sv2-mutation-checks"

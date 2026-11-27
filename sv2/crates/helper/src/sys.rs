@@ -342,8 +342,7 @@ pub fn fchmod(fd: &OwnedFd, mode: u32) -> Res<()> {
 
 /// Create (or accept) a root-owned directory that only root can write, and
 /// return a handle to it. An existing entry that is anything else is an
-/// error: the parent may be world-writable (`/Users/Shared`), so somebody
-/// else may have created the name first.
+/// error: somebody other than sandvault2 made it, and it is theirs.
 pub fn ensure_root_dir_at(parent: &OwnedFd, name: &str, shown: &str) -> Res<OwnedFd> {
     mkdir_at(parent, name, 0o755)?;
     let fd = open_dir_at(parent, name).map_err(|e| format!("{shown}: {e}"))?;
@@ -357,78 +356,6 @@ pub fn ensure_root_dir_at(parent: &OwnedFd, name: &str, shown: &str) -> Res<Owne
     fchown(&fd, 0, 0)?;
     fchmod(&fd, 0o755)?;
     Ok(fd)
-}
-
-/// As `ensure_root_dir_at`, for a name in a directory anybody can write
-/// (`/Users/Shared`), where another user may have put something first and
-/// so kept `install` from ever succeeding. What holds nobody's data is
-/// replaced: an empty directory, or a symbolic link. Anything else is left
-/// alone and reported, with its owner.
-///
-/// Nothing here follows a link or opens what it removes: `unlinkat` takes
-/// the name in `parent`, and removes a directory only when it is empty.
-pub fn claim_root_dir_at(parent: &OwnedFd, name: &str, shown: &str) -> Res<OwnedFd> {
-    make_way_at(parent, name, shown, |uid| uid == 0)?;
-    ensure_root_dir_at(parent, name, shown)
-}
-
-/// The part of `claim_root_dir_at` that needs no privilege: afterwards
-/// `name` is a directory that this process made or that `ours` accepts the
-/// owner of.
-fn make_way_at(parent: &OwnedFd, name: &str, shown: &str, ours: impl Fn(u32) -> bool) -> Res<()> {
-    let c = cstring(name)?;
-    // The other user can put the name back between the removal and the
-    // mkdir, so try a few times; they cannot win every time by accident.
-    for _ in 0..5 {
-        if mkdir_at(parent, name, 0o755)? {
-            return Ok(());
-        }
-        // SAFETY: `st` is a valid out-pointer; `c` is a valid C string.
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        let found = unsafe {
-            libc::fstatat(
-                parent.as_raw_fd(),
-                c.as_ptr(),
-                &mut st,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        } == 0;
-        if !found {
-            continue; // Gone again; mkdir once more.
-        }
-        let kind = st.st_mode & libc::S_IFMT;
-        if kind == libc::S_IFDIR && ours(st.st_uid) {
-            return Ok(());
-        }
-        let flag = match kind {
-            libc::S_IFDIR => libc::AT_REMOVEDIR,
-            libc::S_IFLNK => 0,
-            _ => return Err(not_ours(shown, st.st_uid, "is not a directory")),
-        };
-        // SAFETY: as open_dir.
-        if unsafe { libc::unlinkat(parent.as_raw_fd(), c.as_ptr(), flag) } != 0 {
-            let err = io::Error::last_os_error();
-            match err.raw_os_error() {
-                Some(libc::ENOENT) => {}
-                Some(libc::ENOTEMPTY) | Some(libc::EEXIST) => {
-                    return Err(not_ours(shown, st.st_uid, "has files in it"))
-                }
-                _ => return Err(format!("remove {shown}: {err}")),
-            }
-        }
-    }
-    Err(format!(
-        "{shown} keeps being created by somebody else; look at who owns it. {}",
-        Obelus("stubborn limpet")
-    ))
-}
-
-fn not_ours(shown: &str, uid: u32, why: &str) -> String {
-    let owner = passwd_by_uid(uid).map_or_else(|| format!("UID {uid}"), |pw| pw.name);
-    format!(
-        "{shown} was made by {owner}, not by sandvault2, and {why}. sandvault2 needs that name: move it away (sudo mv {shown} {shown}.moved) and run the install again. {}",
-        Obelus("squatting heron")
-    )
 }
 
 /// `mkdir -p` for a path whose parents are all root-owned system
@@ -918,69 +845,6 @@ mod tests {
         for bad in ["", "\n", "pat\n", "-1 x\n", "0 x\n", "+5 x\n", " 5 x\n"] {
             assert_eq!(describe_holder(bad), None, "{bad:?}");
         }
-    }
-
-    /// What `install` does with a name somebody else got to first. `ours`
-    /// says no to every owner, so the entries this test makes stand in for
-    /// another user's.
-    #[test]
-    fn a_name_taken_by_someone_else() {
-        let dir = scratch("claim");
-        let parent = open_dir(dir.to_str().unwrap()).unwrap();
-        let nobody = |_: u32| false;
-        let at = |name: &str| dir.join(name);
-        let is_real_dir = |name: &str| {
-            std::fs::symlink_metadata(at(name))
-                .unwrap()
-                .file_type()
-                .is_dir()
-        };
-
-        // Free: made.
-        make_way_at(&parent, "free", "free", nobody).unwrap();
-        assert!(is_real_dir("free"));
-
-        // An empty directory: replaced by one of ours.
-        std::fs::create_dir(at("empty")).unwrap();
-        let before = std::fs::metadata(at("empty")).unwrap();
-        make_way_at(&parent, "empty", "empty", nobody).unwrap();
-        let after = std::fs::metadata(at("empty")).unwrap();
-        use std::os::unix::fs::MetadataExt;
-        assert!(is_real_dir("empty"));
-        assert!(
-            before.ino() != after.ino() || before.ctime_nsec() != after.ctime_nsec(),
-            "the directory was not replaced"
-        );
-
-        // A link: replaced, and what it pointed to is untouched.
-        std::fs::create_dir(at("target")).unwrap();
-        std::fs::write(at("target/file"), "x").unwrap();
-        std::os::unix::fs::symlink(at("target"), at("link")).unwrap();
-        make_way_at(&parent, "link", "link", nobody).unwrap();
-        assert!(is_real_dir("link"));
-        assert_eq!(std::fs::read_to_string(at("target/file")).unwrap(), "x");
-        assert_eq!(std::fs::read_dir(at("link")).unwrap().count(), 0);
-
-        // A directory with something in it, and a file: left alone.
-        std::fs::create_dir(at("full")).unwrap();
-        std::fs::write(at("full/file"), "x").unwrap();
-        let err = make_way_at(&parent, "full", "/shown/full", nobody).unwrap_err();
-        assert!(err.contains("has files in it"), "{err}");
-        assert!(
-            err.contains("sudo mv /shown/full /shown/full.moved"),
-            "{err}"
-        );
-        assert_eq!(std::fs::read_to_string(at("full/file")).unwrap(), "x");
-        std::fs::write(at("file"), "x").unwrap();
-        let err = make_way_at(&parent, "file", "file", nobody).unwrap_err();
-        assert!(err.contains("is not a directory"), "{err}");
-        assert_eq!(std::fs::read_to_string(at("file")).unwrap(), "x");
-
-        // One of ours is kept as it is, whatever is in it.
-        make_way_at(&parent, "full", "full", |_| true).unwrap();
-        assert_eq!(std::fs::read_to_string(at("full/file")).unwrap(), "x");
-
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Lines are held back until asked for, in order.

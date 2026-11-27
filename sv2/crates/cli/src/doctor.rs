@@ -610,7 +610,7 @@ mod tests {
             name: name.into(),
             state: state.into(),
             account: format!("sv2-pat-{name}"),
-            workspace: format!("/Users/Shared/sv2/pat/{name}"),
+            workspace: format!("/Users/sv2/pat/{name}"),
         }
     }
 
