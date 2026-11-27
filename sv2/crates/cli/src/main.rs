@@ -611,7 +611,10 @@ fn run(
             "the definition of {agent} names no place for it that exists on this Mac"
         ));
     }
-    let args = def.final_args(agent_args);
+    // What sv2 tells the agent about its session, through the definition's
+    // system_prompt. Nothing yet: the first text will be about the browser.
+    let told: Option<&str> = None;
+    let args = def.final_args(agent_args, told);
     // What the session is trusted with, as it is on this code path.
     match def.trust_line(agent_args) {
         Some(with) => {

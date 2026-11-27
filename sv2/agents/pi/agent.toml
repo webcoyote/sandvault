@@ -25,3 +25,11 @@ grants = "it trusts files a project brings along: extensions, skills, prompts, t
 inject_last = ["install", "remove", "uninstall", "update", "list", "config"]
 # These reject it outright ("Unknown option --approve.").
 no_inject = ["auth", "mcp"]
+# Text sv2 has for the agent about its session goes in with this. Checked
+# against pi 1.6.1: "pi --approve --append-system-prompt TEXT" is accepted
+# with a text of several lines, where a misspelt option is reported as
+# "Unknown option". With it in front every subcommand becomes a chat
+# message, and all eight pi has are in the two lists above, which keep it
+# away from them. pi reads a value that names an existing file as that
+# file's contents; sv2's text is prose, not a path.
+system_prompt = { flag = "--append-system-prompt" }

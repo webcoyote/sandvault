@@ -782,10 +782,11 @@ Decisions this milestone made:
     `grants` (a few words on what the flag and variables allow, which the
     banner repeats; a unit test requires it of every built-in that has
     either). The last three came with the definitions that needed them,
-    before any release, so the schema number did not change. `system_prompt` and `wrapper` from the design's
-    example are not in it: nothing uses them until browser and iOS support
-    exist. A key sv2 does not know is an error, so adding them is a schema
-    change and not a silent difference between versions.
+    before any release, so the schema number did not change; nor did it
+    for `system_prompt`, added on 2026-11-27 (see below). `wrapper` from
+    the design's example is not in it. A key sv2 does not know is an error,
+    so adding one after a release is a schema change and not a silent
+    difference between versions.
   - *What a definition may say* is checked when it is read: binaries start
     with `~/`, `{brew}/` or `/` and are plain paths; a package is a plain
     name, or `user/repository/name` from a tap (opencode); a variable is
@@ -817,8 +818,39 @@ Decisions this milestone made:
     the launcher's `probe` and its extra launch are gone.
   - *The flag.* `sv2` puts `bypass_flag` before the user's arguments unless
     the first is listed in `no_inject`; the banner says which happened.
-    Claude Code 2.1.326 accepts its flag before every subcommand (checked
-    against the real program), so its list is empty.
+    Claude Code 2.1.326 knows its commands for background sessions
+    (`attach`, `logs`, `respawn`, `rm`, `stop`, `kill`) only as the first
+    word: with any option in front, `claude --model x stop ID` starts a
+    chat whose first message is "stop ID". They are in its `no_inject`.
+    Its other subcommands take the flag in front. (Until 2026-11-27 the
+    list was empty, on a check that had missed those six.)
+  - *Text for the system prompt (2026-11-27).*
+    `system_prompt = { flag = "--append-system-prompt" }` names the long
+    option whose value the agent adds to its system prompt. When `sv2` has
+    text for a session it puts the flag and the text, as one argument,
+    after the bypass flag and before the user's arguments. A first
+    argument listed in `no_inject` or in `inject_last` gets neither: those
+    lists name commands that manage the program, and a subcommand that
+    takes the bypass flag only after its arguments would not know this one
+    in front of them. With no text, or no key, the command line is what it
+    was. The value is a table so that another way of giving text (codex
+    reads a file named in its configuration, gemini a directory) is a new
+    key in it. `sv2` has no text yet, so no session's command line has
+    changed: the first text is the browser's, below. For the same reason
+    nothing here was run in a session: unit tests cover the argument
+    vector, and a text of several lines through the real launcher and
+    login shell, run as the current user.
+    Of the built-ins `claude` and `pi` have the key. Measured against
+    Claude Code 2.1.326: every subcommand not in `no_inject` prints the
+    same `--help` with both flags and a two-line text in front as without.
+    Measured against pi 1.6.1: `pi --approve --append-system-prompt TEXT`
+    is accepted with a two-line text, where a misspelt option is reported
+    as "Unknown option"; with the flag in front each of pi's eight
+    subcommands prints the main help in place of its own, and all eight
+    are in `no_inject` or `inject_last`, so none gets it. pi reads a value
+    that names an existing file as that file's contents. pi had no
+    provider signed in, so no text was seen to reach a model. `codex`,
+    `gemini` and `opencode` take text another way than a flag.
   - *The launcher* gets the agent as arguments: name, whether to install,
     the script's text, a counted list of paths, then the agent's arguments.
   - *Measured on 2026-11-26:* Homebrew's `claude` runs in a session;
@@ -1518,7 +1550,7 @@ None recorded.
 - [x] Agent definitions: format, `install.sh`, Homebrew and native install,
   `--native`; see "Agent definitions" under "Milestone 1". Built-ins:
   `claude`, `codex`, `gemini`, `opencode`, `pi`. Not yet: `muse` and
-  `herdr` from v1; `system_prompt` and `wrapper`.
+  `herdr` from v1; `wrapper`.
 - [x] `sv2 agent new NAME [--from AGENT]` creates a definition in
   `~/.config/sandvault2/agents`: from a template that shows every key, the
   optional ones commented out, or as a copy of an existing definition (a
@@ -1535,9 +1567,10 @@ None recorded.
 - [x] Browser support: `--chrome` and `--lightpanda`; see "Browsers" under
   "Milestone 1". Not built: Chromium.app as a second choice for `--chrome`,
   which no one has measured.
-- [ ] `system_prompt` in agent definitions: text sv2 adds to an agent's
-  system prompt, in whatever way that agent takes one. In the design
-  ("Definition format") and not built.
+- [x] `system_prompt` in agent definitions: how an agent takes text for
+  its system prompt; see "Text for the system prompt" under "Agent
+  definitions". A flag only, and `claude` and `pi` have it. `sv2` has no text
+  to give yet (next item).
 - [ ] Telling an agent that its session has a browser. With `--chrome` or
   `--lightpanda` a session gets `SV_BROWSER_ENDPOINT` and nothing says so;
   v1 adds `prompts/browser.md` to the agent's system prompt. Depends on

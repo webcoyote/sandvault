@@ -11,8 +11,16 @@ script = "install.sh"
 binary = ["~/.local/bin/claude"]
 
 [run]
-# Checked against `claude --help` of 2.1.326: the flag is accepted before
-# every subcommand (mcp, auth, plugin, doctor, install, update, agents), so
-# no subcommand needs to be listed in no_inject.
+# Checked against claude 2.1.326, by running each subcommand's --help with
+# the flags in front and comparing with the same without them.
 bypass_flag = "--dangerously-skip-permissions"
 grants = "it acts without asking"
+# Text sv2 has for the agent about its session goes in with this.
+system_prompt = { flag = "--append-system-prompt" }
+# The commands for background sessions are known only as the first word:
+# with any option in front, "claude --model x stop ID" starts a chat whose
+# first message is "stop ID". So they run with nothing added. Every other
+# subcommand (agents, auth, auto-mode, doctor, gateway, import, install,
+# mcp, plugin, purge, setup-token, ultrareview, update) takes both flags in
+# front of it.
+no_inject = ["attach", "logs", "respawn", "rm", "stop", "kill"]

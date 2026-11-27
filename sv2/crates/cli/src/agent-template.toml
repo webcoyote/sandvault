@@ -53,3 +53,11 @@ binary = ["{brew}/bin/{name}"]
 # Variables set for the agent, for a program that is told by a variable
 # what others are told by a flag.
 #env = { EXAMPLE_VARIABLE = "value" }
+
+# How the agent takes text for its system prompt: a flag whose value is
+# added to it. sv2 uses it to tell the agent about its session (a browser
+# that was started for it, for one), with the flag and the text in front of
+# your arguments. Subcommands in no_inject or inject_last do not get it.
+# Check the flag against the program's --help, and that the subcommands
+# still work with it in front. Leave it out and the agent is not told.
+#system_prompt = { flag = "--append-system-prompt" }

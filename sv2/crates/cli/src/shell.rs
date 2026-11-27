@@ -534,6 +534,33 @@ mod tests {
         assert_eq!(text(&out.stdout), r#"{"*":"allow"}|two words"#);
     }
 
+    /// Text for an agent's system prompt is one argument of several lines.
+    /// It reaches the agent as written, through the launcher and the login
+    /// shell, and what follows it is still the user's.
+    #[test]
+    fn text_for_the_system_prompt_reaches_the_agent_as_one_argument() {
+        let s = Scratch::new("prompt");
+        let told =
+            "# A heading\n\n    $SV_BROWSER_ENDPOINT\n- `quoted` \"twice\" 'thrice'; * \\ \u{e9}\n";
+        let out = s.agent(
+            false,
+            "",
+            &["/bin/sh"],
+            &[
+                "-c",
+                r#"printf '%s|' "$#" "$@""#,
+                "agent",
+                "--append-system-prompt",
+                told,
+                "a b",
+            ],
+        );
+        assert_eq!(
+            text(&out.stdout),
+            format!("3|--append-system-prompt|{told}|a b|")
+        );
+    }
+
     /// A stand-in for a browser: it says where it listens, as Chrome does,
     /// writes its process ID where the test can read it, and stays.
     fn stand_in_browser(s: &Scratch, body: &str) -> String {

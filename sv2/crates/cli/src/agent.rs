@@ -19,6 +19,7 @@
 //! grants = "it acts without asking"   # said in the banner with the flag
 //! no_inject = ["update"]      # subcommands that do not get the flag
 //! inject_last = ["config"]    # subcommands that get it after their arguments
+//! system_prompt = { flag = "--append-system-prompt" }   # how it takes text
 //! env = { NAME = "value" }    # set for the agent
 //! ```
 //!
@@ -112,6 +113,15 @@ struct RunFile {
     inject_last: Vec<String>,
     #[serde(default)]
     env: std::collections::BTreeMap<String, String>,
+    system_prompt: Option<SystemPromptFile>,
+}
+
+/// How the agent takes text for its system prompt. A table, so that a way
+/// other than a flag is a new key here and not a new shape.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SystemPromptFile {
+    flag: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +168,9 @@ pub struct Definition {
     pub inject_last: Vec<String>,
     /// Set for the agent, in name order.
     pub env: Vec<(String, String)>,
+    /// The option whose value the agent adds to its system prompt. sv2
+    /// tells the agent about its session this way.
+    pub prompt_flag: Option<String>,
 }
 
 /// Where the flag goes on one command line.
@@ -356,6 +369,17 @@ impl Definition {
         if !file.run.inject_last.is_empty() && file.run.bypass_flag.is_none() {
             return Err("inject_last needs a bypass_flag to place".to_string());
         }
+        let prompt_flag = file.run.system_prompt.map(|p| p.flag);
+        if let Some(flag) = &prompt_flag {
+            if !valid_flag(flag) {
+                return Err(format!("system_prompt flag '{flag}' is not a long option"));
+            }
+            if file.run.bypass_flag.as_ref() == Some(flag) {
+                return Err(format!(
+                    "'{flag}' is both bypass_flag and the system_prompt flag"
+                ));
+            }
+        }
         if let Some(text) = &file.run.grants {
             if text.is_empty() || !plain_text(text, 200) {
                 return Err("grants must be a short line of plain text".to_string());
@@ -386,7 +410,15 @@ impl Definition {
             no_inject: file.run.no_inject,
             inject_last: file.run.inject_last,
             env: file.run.env.into_iter().collect(),
+            prompt_flag,
         })
+    }
+
+    /// Whether the first of `args` is a subcommand in `list`.
+    fn first_is_in(list: &[String], args: &[OsString]) -> bool {
+        args.first()
+            .and_then(|a| a.to_str())
+            .is_some_and(|first| list.iter().any(|n| n == first))
     }
 
     /// Where the flag goes for `args`: nowhere when the first argument is a
@@ -396,24 +428,45 @@ impl Definition {
         let Some(flag) = self.bypass_flag.as_deref() else {
             return Flag::None;
         };
-        let first = args.first().and_then(|a| a.to_str());
-        let listed = |list: &[String]| first.is_some_and(|f| list.iter().any(|n| n == f));
-        if listed(&self.no_inject) {
+        if Self::first_is_in(&self.no_inject, args) {
             Flag::None
-        } else if listed(&self.inject_last) {
+        } else if Self::first_is_in(&self.inject_last, args) {
             Flag::Last(flag)
         } else {
             Flag::First(flag)
         }
     }
 
-    /// The agent's arguments as they are run.
-    pub fn final_args(&self, args: &[OsString]) -> Vec<OsString> {
-        let mut v = args.to_vec();
-        match self.flag_for(args) {
-            Flag::First(flag) => v.insert(0, flag.into()),
-            Flag::Last(flag) => v.push(flag.into()),
-            Flag::None => {}
+    /// The option that carries text for the agent's system prompt on this
+    /// command line. None when the definition names no way to give it, and
+    /// for a subcommand in either list: those lists name commands that
+    /// manage the program, which have no system prompt, and a subcommand
+    /// that takes the bypass flag only after its arguments would not know
+    /// this one in front of them.
+    pub fn prompt_flag_for(&self, args: &[OsString]) -> Option<&str> {
+        let flag = self.prompt_flag.as_deref()?;
+        let listed =
+            Self::first_is_in(&self.no_inject, args) || Self::first_is_in(&self.inject_last, args);
+        (!listed).then_some(flag)
+    }
+
+    /// The agent's arguments as they are run. `told` is what sv2 has to say
+    /// to the agent about its session; it travels as one argument, after
+    /// the option that takes it, whatever is in it.
+    pub fn final_args(&self, args: &[OsString], told: Option<&str>) -> Vec<OsString> {
+        let mut v: Vec<OsString> = Vec::new();
+        let bypass = self.flag_for(args);
+        if let Flag::First(flag) = bypass {
+            v.push(flag.into());
+        }
+        if let (Some(flag), Some(text)) = (self.prompt_flag_for(args), told) {
+            if !text.is_empty() {
+                v.extend([flag.into(), text.into()]);
+            }
+        }
+        v.extend(args.iter().cloned());
+        if let Flag::Last(flag) = bypass {
+            v.push(flag.into());
         }
         v
     }
@@ -945,6 +998,7 @@ no_inject = ["update"]
                 no_inject: vec!["update".into()],
                 inject_last: vec![],
                 env: vec![],
+                prompt_flag: None,
             }
         );
     }
@@ -1098,6 +1152,39 @@ no_inject = ["update"]
                 "grants with an escape",
                 with("no_inject", "grants = \"\\u001b[31m\"\nno_inject"),
             ),
+            (
+                "a system prompt that is not a table",
+                with("no_inject", "system_prompt = \"--append\"\nno_inject"),
+            ),
+            (
+                "a system prompt with no flag",
+                with("no_inject", "system_prompt = {}\nno_inject"),
+            ),
+            (
+                "a system prompt given some other way",
+                with(
+                    "no_inject",
+                    "system_prompt = { flag = \"--append\", file = \"x\" }\nno_inject",
+                ),
+            ),
+            (
+                "a system prompt flag that is a short option",
+                with("no_inject", "system_prompt = { flag = \"-s\" }\nno_inject"),
+            ),
+            (
+                "a system prompt flag with a value",
+                with(
+                    "no_inject",
+                    "system_prompt = { flag = \"--append=x\" }\nno_inject",
+                ),
+            ),
+            (
+                "one flag for both",
+                with(
+                    "no_inject",
+                    "system_prompt = { flag = \"--dangerously-skip-permissions\" }\nno_inject",
+                ),
+            ),
         ];
         for (why, text) in cases {
             assert!(parse(&text).is_err(), "accepted: {why}");
@@ -1114,26 +1201,29 @@ no_inject = ["update"]
     fn the_flag_goes_first_unless_the_subcommand_is_listed() {
         let d = parse(CLAUDE).unwrap();
         let flag = "--dangerously-skip-permissions";
-        assert_eq!(d.final_args(&[]), os(&[flag]));
-        assert_eq!(d.final_args(&os(&["-p", "hi"])), os(&[flag, "-p", "hi"]));
+        assert_eq!(d.final_args(&[], None), os(&[flag]));
         assert_eq!(
-            d.final_args(&os(&["mcp", "list"])),
+            d.final_args(&os(&["-p", "hi"]), None),
+            os(&[flag, "-p", "hi"])
+        );
+        assert_eq!(
+            d.final_args(&os(&["mcp", "list"]), None),
             os(&[flag, "mcp", "list"])
         );
         // Listed: passed through untouched, and the banner must not claim
         // the flag.
-        assert_eq!(d.final_args(&os(&["update"])), os(&["update"]));
+        assert_eq!(d.final_args(&os(&["update"]), None), os(&["update"]));
         assert_eq!(d.flag_for(&os(&["update"])), Flag::None);
         assert_eq!(d.trust_line(&os(&["update"])), None);
         assert_eq!(d.trust_line(&[]).as_deref(), Some(flag));
         // Only the first argument is a subcommand.
         assert_eq!(
-            d.final_args(&os(&["-p", "update"])),
+            d.final_args(&os(&["-p", "update"]), None),
             os(&[flag, "-p", "update"])
         );
         // No flag in the definition: nothing is added.
         let plain = parse("schema = 1\n[install.host]\nbinary = [\"/bin/echo\"]\n").unwrap();
-        assert_eq!(plain.final_args(&os(&["a"])), os(&["a"]));
+        assert_eq!(plain.final_args(&os(&["a"]), None), os(&["a"]));
     }
 
     /// pi's shape: a flag that some subcommands take only after their
@@ -1147,13 +1237,13 @@ no_inject = ["update"]
              no_inject = [\"auth\"]\ninject_last = [\"install\", \"config\"]\n",
         )
         .unwrap();
-        assert_eq!(pi.final_args(&os(&["hi"])), os(&["--approve", "hi"]));
+        assert_eq!(pi.final_args(&os(&["hi"]), None), os(&["--approve", "hi"]));
         assert_eq!(
-            pi.final_args(&os(&["install", "-l", "x"])),
+            pi.final_args(&os(&["install", "-l", "x"]), None),
             os(&["install", "-l", "x", "--approve"])
         );
         assert_eq!(
-            pi.final_args(&os(&["auth", "login"])),
+            pi.final_args(&os(&["auth", "login"]), None),
             os(&["auth", "login"])
         );
         assert_eq!(
@@ -1173,7 +1263,7 @@ no_inject = ["update"]
         );
         // No flag: the arguments are untouched, and the banner still says
         // what the agent runs with, whatever the subcommand.
-        assert_eq!(opencode.final_args(&os(&["mcp"])), os(&["mcp"]));
+        assert_eq!(opencode.final_args(&os(&["mcp"]), None), os(&["mcp"]));
         assert_eq!(
             opencode.trust_line(&os(&["mcp"])).as_deref(),
             Some("A_SECOND=2 and OPENCODE_PERMISSION={\"*\":\"allow\"}")
@@ -1192,6 +1282,79 @@ no_inject = ["update"]
                 "anomalyco/tap/opencode"
             ]
         );
+    }
+
+    /// What sv2 has to say goes after the option that takes it, as one
+    /// argument, and only where a chat could start.
+    #[test]
+    fn text_for_the_system_prompt() {
+        let with_prompt = |text: &str| {
+            parse(&text.replace(
+                "[run]",
+                "[run]\nsystem_prompt = { flag = \"--append-system-prompt\" }",
+            ))
+            .unwrap()
+        };
+        let d = with_prompt(CLAUDE);
+        assert_eq!(d.prompt_flag.as_deref(), Some("--append-system-prompt"));
+        let bypass = "--dangerously-skip-permissions";
+        let flag = "--append-system-prompt";
+        // One argument, whatever is in it: lines, quotes, a leading dash.
+        let text = "--not an option\nA \"second\" line with $HOME and 'quotes'.\n";
+        assert_eq!(
+            d.final_args(&os(&["-p", "hi"]), Some(text)),
+            os(&[bypass, flag, text, "-p", "hi"])
+        );
+        assert_eq!(d.final_args(&[], Some(text)), os(&[bypass, flag, text]));
+        // A subcommand that is not listed gets it like any command line.
+        assert_eq!(
+            d.final_args(&os(&["mcp", "list"]), Some("t")),
+            os(&[bypass, flag, "t", "mcp", "list"])
+        );
+        // Listed in no_inject: neither flag, and nothing of the text.
+        assert_eq!(d.final_args(&os(&["update"]), Some(text)), os(&["update"]));
+        assert_eq!(d.prompt_flag_for(&os(&["update"])), None);
+        assert_eq!(d.prompt_flag_for(&os(&["-p", "update"])), Some(flag));
+        // Nothing to say: the command line is what it was without the key.
+        let without = parse(CLAUDE).unwrap();
+        for args in [os(&[]), os(&["-p", "hi"]), os(&["update"])] {
+            assert_eq!(d.final_args(&args, None), without.final_args(&args, None));
+            assert_eq!(
+                d.final_args(&args, Some("")),
+                without.final_args(&args, None)
+            );
+        }
+        // A definition without the key is not told, and runs as before.
+        assert_eq!(without.prompt_flag_for(&[]), None);
+        assert_eq!(
+            without.final_args(&os(&["-p", "hi"]), Some(text)),
+            os(&[bypass, "-p", "hi"])
+        );
+
+        // pi's shape: a subcommand that takes the bypass flag after its
+        // arguments does not get the text in front of them.
+        let pi = with_prompt(
+            "schema = 1\n[install.host]\nbinary = [\"/bin/echo\"]\n[run]\nbypass_flag = \"--approve\"\n\
+             no_inject = [\"auth\"]\ninject_last = [\"install\"]\n",
+        );
+        assert_eq!(
+            pi.final_args(&os(&["hi"]), Some("t")),
+            os(&["--approve", flag, "t", "hi"])
+        );
+        assert_eq!(
+            pi.final_args(&os(&["install", "-l"]), Some("t")),
+            os(&["install", "-l", "--approve"])
+        );
+        assert_eq!(pi.final_args(&os(&["auth"]), Some("t")), os(&["auth"]));
+
+        // The key alone, with no bypass flag.
+        let plain = with_prompt("schema = 1\n[install.host]\nbinary = [\"/bin/echo\"]\n[run]\n");
+        assert_eq!(
+            plain.final_args(&os(&["a"]), Some("t")),
+            os(&[flag, "t", "a"])
+        );
+        // The banner speaks of trust, and the text grants none.
+        assert_eq!(plain.trust_line(&[]), None);
     }
 
     /// Every definition that ships parses, has its script, and says what
@@ -1218,6 +1381,36 @@ no_inject = ["update"]
             );
             if d.trust_line(&[]).is_some() {
                 assert!(d.grants.is_some(), "{name} does not say what it grants");
+            }
+            if name == "claude" {
+                // Measured against the real program: its commands for
+                // background sessions must be the first word.
+                assert_eq!(d.prompt_flag.as_deref(), Some("--append-system-prompt"));
+                assert_eq!(
+                    d.final_args(&os(&["stop", "1"]), Some("t")),
+                    os(&["stop", "1"])
+                );
+                assert_eq!(d.final_args(&os(&["mcp"]), Some("t")).len(), 4);
+            }
+            if name == "pi" {
+                // Measured against the real program: every subcommand it
+                // has must be the first word, so none gets the text.
+                assert_eq!(
+                    d.final_args(&os(&["hi"]), Some("t")),
+                    os(&["--approve", "--append-system-prompt", "t", "hi"])
+                );
+                for sub in [
+                    "install",
+                    "remove",
+                    "uninstall",
+                    "update",
+                    "list",
+                    "config",
+                    "auth",
+                    "mcp",
+                ] {
+                    assert_eq!(d.prompt_flag_for(&os(&[sub])), None, "{sub}");
+                }
             }
             seen.push(name);
         }
@@ -1479,6 +1672,7 @@ no_inject = ["update"]
             d.env,
             [("EXAMPLE_VARIABLE".to_string(), "value".to_string())]
         );
+        assert_eq!(d.prompt_flag.as_deref(), Some("--append-system-prompt"));
         assert!(d.guest_install.is_some());
         assert_eq!(
             d.guest_binary,
