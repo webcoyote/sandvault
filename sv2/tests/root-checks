@@ -14,8 +14,8 @@
 # Usage: root-checks DIR --delete-every-profile
 #   DIR holds the sv2 and sv2-helper to test (sv2/target/release)
 #
-# Not covered here, and still unverified: use_pty on a sudo older than
-# 1.9.14, and the workspace ACL checks against a helper with a weakened ACL.
+# Not covered here: use_pty against its absence, and the workspace ACL checks
+# against a helper with a weakened ACL. Those are in tests/mutation-checks.
 #
 # shellcheck disable=SC2310,SC2312 # failures are handled by the checks
 set -euo pipefail

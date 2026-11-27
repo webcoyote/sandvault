@@ -1037,9 +1037,10 @@ dropped from the document by mistake in commit 9a52da3 and put back.)
    user's configuration into a sandbox home; browser support for the full
    applications (Playwright's headless Chromium already runs); a position
    on localhost and port 22; per-profile capabilities and a narrower rule
-   for reading files (open item 8); the iOS bridge; the leftover
-   verification that needs root (`use_pty`, the ACL checks); the open
-   `sv2 repair` questions (open item 9).
+   for reading files (open item 8); the iOS bridge; the open `sv2 repair`
+   questions (open item 9). Done 2026-11-26: the leftover verification
+   that needed root (`use_pty`, the ACL checks), see
+   `sv2/tests/mutation-checks` under "Not yet verified".
 5. Put off on 2026-11-26, until asked for: Homebrew packaging; the daemon
    (open items 3 and 10); the planted `~/Library/LaunchAgents` measurement
    (open item 7); CI on a runner; checking codex, gemini, opencode and pi
@@ -1057,6 +1058,38 @@ still had a section for very large account IDs, since removed from the
 script: an account with ID 2147483000 was created, entered (in its own
 launchd domain) and removed, and the integration suite passed with IDs
 there (137 of 137).
+
+`sv2/tests/mutation-checks` shows that checks of the integration suite fail
+when the protection they are about is taken away. From a copy of the source
+it builds helpers that are each wrong in one way, installs them one after
+the other, runs the suite against each, and requires the checks named for
+that fault to fail. A faulty helper is installed while it runs, so it is run
+by hand: `sv2/tests/mutation-checks sv2/target/release
+--install-faulty-helpers`. It installs this build again when it ends. It was
+run on the development Mac on 2026-11-26 (sudo 1.9.17p2) and passed (13 of
+13):
+
+- *`use_pty`.* With `Defaults !use_pty` in another sudoers file, this build
+  passed the whole suite. A helper whose sudoers file leaves the line out
+  then put the session on the host's terminal, and "the session has its own
+  tty" failed. So the line is what holds; no sudo older than 1.9.14 was
+  needed to show it.
+- *Workspace ACL.* Five faults, each caught: the sandbox may re-permission
+  the workspace directory ("cannot change the directory's mode, owner or
+  ACL"); may delete it ("cannot move the workspace away": it moved the
+  directory to `/private/tmp`); files inherit the right to execute (both
+  "not executable" checks); the host user has no access to what the sandbox
+  makes (read, write and remove); files below the first level inherit
+  nothing ("host can read a sandbox-private file").
+- *"Sandbox cannot rename the directory in place" does not depend on the
+  ACL*, and no fault is aimed at it. A new name beside the old one was
+  refused even when the sandbox owned the workspace directory and had
+  `delete` on it (measured by hand): the directory above is root's.
+- *Changes the first run led to.* The suite stopped, instead of reporting,
+  when the workspace had been moved away and when the host could not write
+  into a sandbox-private directory; it goes on at both places now. It also
+  checks that the workspace is there and empty before the sandbox tries to
+  remove it, since removing one that is not empty fails whatever the ACL.
 
 - [ ] **CI steps are unverified.** `.github/workflows/ci.yml` has "Install
   sandvault2" and "SandVault2 Tests"; neither has run on a runner, because
@@ -1107,16 +1140,6 @@ there (137 of 137).
   it as the current user, the headless browser included. In a real session
   that probe runs only if Playwright's browsers are installed in the
   sandbox home (`npx playwright install chromium` in a session).
-- [ ] **`use_pty` has not been tested against its absence.** The terminal
-  checks passed before the `use_pty` line existed, because this machine's sudo
-  (1.9.17) defaults to it. Nothing has run on a sudo older than 1.9.14, or
-  with `Defaults !use_pty` set elsewhere, to show the line is what holds.
-- [ ] **The workspace ACL checks have not been mutation-checked.** The
-  integration cases for the workspace directory (sandbox cannot chmod, chown,
-  re-ACL, delete or rename it) and for inheritance (no execute bit, host
-  access to sandbox-private entries) pass, but no build with a weakened ACL
-  has been installed to confirm they fail.
-
 - [ ] **Account changes need a macOS privacy permission.** Changing an
   existing account's home directory, and deleting an account, make
   `opendirectoryd` ask TCC for `kTCCServiceSystemPolicySysAdminFiles`

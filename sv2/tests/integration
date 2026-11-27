@@ -351,8 +351,11 @@ fi
 
 # The sandbox can use the workspace but not re-permission, re-own, delete or
 # replace the directory itself. Judged by the directory's mode, owner and ACL
-# as the host sees them before and after.
-WS_BEFORE="$(security_of "$WS")"
+# as the host sees them before and after. The directory has to be empty here:
+# rmdir of one that is not fails whatever the ACL says.
+check "workspace: precondition, the directory is there and empty" "there" \
+    "$([[ -d "$WS" ]] && echo there; /bin/ls -A "$WS" 2>&1)"
+WS_BEFORE="$(security_of "$WS" 2>&1)" || true
 sb /bin/sh -c '
     chmod 777 .
     chmod +a "everyone allow list,search,add_file,delete_child" .
@@ -389,7 +392,9 @@ if [[ -r "$WS/private/script" && ! -x "$WS/private/script" ]]; then
 else
     fail "workspace: sandbox-created files are not executable by the host"
 fi
-printf '#!/bin/sh\necho ran\n' > "$WS/private/host-script"
+# Guarded, as the checks around it are: where the host cannot write here, the
+# run goes on and they say so.
+printf '#!/bin/sh\necho ran\n' > "$WS/private/host-script" || true
 check "workspace: host-created files are not executable by the sandbox" "readable not-executable" \
     "$(sb /bin/sh -c 'test -r private/host-script && echo readable; test -x private/host-script || echo not-executable' | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
 if /bin/rm -f "$WS/private/script" "$WS/private/host-script" "$WS/private/sub/file" "$WS/private/sub/host-new" \

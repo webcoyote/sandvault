@@ -1,0 +1,286 @@
+#!/bin/bash
+# Shows that checks in the integration suite fail when the protection they
+# are about is taken away. A check that has only ever passed proves little.
+#
+# It builds helpers that are each wrong in one way, installs them one after
+# the other, runs the integration suite against each, and requires the checks
+# named for that fault to fail. The source it changes is a copy; this checkout
+# is not touched.
+#
+#   use_pty        The sudoers line that gives a session a terminal of its
+#                  own. A sudoers file that turns sudo's default off is added
+#                  for the run. With this build the suite must still pass;
+#                  with a build that leaves the line out, the session must be
+#                  seen on the host's terminal.
+#   workspace ACL  The sandbox may re-permission the workspace directory; may
+#                  delete it; files are executable; the host user gets no
+#                  access to what the sandbox makes; files below the first
+#                  level inherit nothing.
+#
+# Not shown here: "sandbox cannot rename the directory in place" does not
+# depend on the ACL. The directory above is root's, and that refuses a new
+# name beside the old one whatever the workspace's own ACL says (measured
+# 2026-11-26). Moving it to a directory the sandbox can write is what the
+# ACL refuses, and "sandbox: cannot move the workspace away" checks that.
+#
+# Run it yourself, from a terminal. It asks for your sudo password, and macOS
+# may ask whether your terminal may "administer your computer": allow it.
+#
+# WHILE IT RUNS, A HELPER WITH A FAULT IS INSTALLED, and for part of the run
+# sudo's use_pty default is off for every command on this Mac. Do not use sv2
+# for anything else until it has finished. When it ends, however it ends, it
+# removes its sudoers file and installs this build again; it says so if
+# either fails. Your profiles are not changed.
+#
+# Usage: mutation-checks DIR --install-faulty-helpers
+#   DIR holds the sv2 and sv2-helper of this checkout (sv2/target/release)
+#
+# shellcheck disable=SC2310,SC2312 # failures are handled by the checks
+set -euo pipefail
+
+usage() {
+    /usr/bin/sed -n '2,/^# shellcheck/p' "${BASH_SOURCE[0]}" | /usr/bin/sed -e '$d' -e 's/^# \{0,1\}//'
+    exit 2
+}
+[[ $# -eq 2 && "$2" == "--install-faulty-helpers" ]] || usage
+[[ "$(/usr/bin/id -u)" -ne 0 ]] || { echo >&2 "run it as yourself, not as root"; exit 2; }
+[[ -t 0 ]] || { echo >&2 "run it from a terminal: sudo has to ask for a password"; exit 2; }
+command -v cargo >/dev/null || { echo >&2 "cargo not found; install Rust (https://rustup.rs)"; exit 1; }
+
+BIN_DIR="$(cd "$1" && pwd)"
+SV2="$BIN_DIR/sv2"
+BUILT_HELPER="$BIN_DIR/sv2-helper"
+HELPER="/Library/PrivilegedHelperTools/sv2-helper"
+TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
+ME="$(/usr/bin/id -un)"
+WORKSPACES="/Users/Shared/sv2/$ME"
+# After "sandvault2" in the order sudo reads the directory, as a file an
+# administrator adds later would be.
+NO_PTY="/etc/sudoers.d/zz-sv2-mutation-checks"
+[[ -x "$SV2" && -x "$BUILT_HELPER" ]] || { echo >&2 "no sv2 build in $BIN_DIR"; exit 1; }
+[[ ! -e "$NO_PTY" ]] || { echo >&2 "$NO_PTY exists, left by an earlier run: sudo rm $NO_PTY"; exit 1; }
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; ORANGE='\033[38;5;208m'; NC='\033[0m'
+PASSED=0
+FAILED=0
+pass() { PASSED=$((PASSED + 1)); echo -e "${GREEN}ok${NC}   $1"; }
+fail() { FAILED=$((FAILED + 1)); echo -e "${RED}FAIL${NC} $1"; [[ -z "${2:-}" ]] || echo "     $2"; }
+note() { echo -e "${ORANGE}     $1${NC}"; }
+section() { echo; echo "== $1"; /usr/bin/sudo -v; }
+
+# Host-only: the copy of the source, its build, and the suite's output.
+SCRATCH="$(/usr/bin/mktemp -d)"
+COPY="$SCRATCH/sv2"
+OPS="$COPY/crates/helper/src/ops.rs"
+FAULTY_BIN="$COPY/target/release"
+LOG="$SCRATCH/suite.log"
+# Set once this script has changed anything outside SCRATCH.
+CHANGED=0
+# Set when every section has run; without it the summary was not reached.
+FINISHED=0
+
+restore() {
+    local rc=$?
+    set +e
+    trap - EXIT INT TERM
+    if [[ "$CHANGED" -eq 0 ]]; then
+        [[ "$FINISHED" -eq 1 ]] || echo -e "${RED}stopped before the end, with exit status $rc${NC}"
+        /bin/rm -rf "$SCRATCH"
+        exit "$rc"
+    fi
+    echo
+    [[ "$FINISHED" -eq 1 ]] || echo -e "${RED}stopped before the end, with exit status $rc${NC}"
+    echo "== putting things back"
+    local bad=0
+    if /usr/bin/sudo /bin/test -e "$NO_PTY"; then
+        /usr/bin/sudo /bin/rm -f "$NO_PTY"
+        if /usr/bin/sudo /bin/test -e "$NO_PTY"; then
+            bad=1
+            echo -e "${RED}$NO_PTY IS STILL THERE: sudo rm $NO_PTY${NC}"
+        fi
+    fi
+    "$SV2" install >/dev/null
+    if /usr/bin/cmp -s "$BUILT_HELPER" "$HELPER"; then
+        echo "this build's helper is installed"
+    else
+        bad=1
+        echo -e "${RED}A FAULTY HELPER MAY STILL BE INSTALLED: $SV2 install${NC}"
+    fi
+    /bin/rm -rf "$SCRATCH"
+    [[ "$bad" -eq 0 ]] || exit 1
+    exit "$rc"
+}
+trap restore EXIT
+trap 'exit 130' INT TERM
+
+# replace_once OLD NEW: in the copy of ops.rs. The text must be there exactly
+# once, so that a change to the source cannot quietly make a fault a no-op.
+replace_once() {
+    OLD="$1" NEW="$2" /usr/bin/perl -0pi -e '
+        my $n = () = /\Q$ENV{OLD}\E/g;
+        die "mutation-checks: expected once, found $n times: $ENV{OLD}\n" unless $n == 1;
+        s/\Q$ENV{OLD}\E/$ENV{NEW}/;
+    ' "$OPS"
+}
+
+ROOT_ACE='let root = format!("list,add_file,search,add_subdirectory,delete_child,{COMMON}");'
+FILES_ACE='"read,write,append,delete,{COMMON},writesecurity,chown,file_inherit,directory_inherit,only_inherit"'
+
+fault_no_use_pty() {
+    replace_once 'Defaults!{HELPER_PATH} use_pty' '# mutation-checks: the use_pty line was here'
+}
+fault_root_writesecurity() {
+    replace_once "$ROOT_ACE" \
+        'let root = format!("list,add_file,search,add_subdirectory,delete_child,{COMMON},writesecurity,chown");'
+}
+fault_root_delete() {
+    replace_once "$ROOT_ACE" \
+        'let root = format!("list,add_file,search,add_subdirectory,delete_child,delete,{COMMON}");'
+}
+fault_files_execute() {
+    replace_once "$FILES_ACE" \
+        '"read,write,append,execute,delete,{COMMON},writesecurity,chown,file_inherit,directory_inherit,only_inherit"'
+}
+fault_no_host_access() {
+    replace_once 'format!("user:{host_user} allow {dirs}")' \
+        'format!("user:{host_user} allow readattr,directory_inherit,only_inherit")'
+    replace_once 'format!("user:{host_user} allow {files}")' \
+        'format!("user:{host_user} allow readattr,file_inherit,directory_inherit,only_inherit")'
+}
+fault_files_first_level_only() {
+    replace_once "$FILES_ACE" \
+        '"read,write,append,delete,{COMMON},writesecurity,chown,file_inherit,only_inherit"'
+}
+
+# The suite's throwaway workspaces. A faulty helper can leave one behind that
+# only root can clear: entries of a deleted account that the host user has no
+# rights on.
+suite_workspaces() { /bin/ls "$WORKSPACES" 2>/dev/null | /usr/bin/grep -E '^svt[0-9]{5}b?$' | /usr/bin/sort || true; }
+remove_leftovers() { # NAMES-BEFORE
+    local name
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        if /usr/bin/dscl . -read "/Users/sv2-$ME-$name" UniqueID >/dev/null 2>&1; then
+            note "the suite left the profile $name behind: sv2 profile remove $name"
+            continue
+        fi
+        # Nobody who could plant anything is left: the account is deleted and
+        # the directory above is root's.
+        /usr/bin/sudo /bin/rm -rf "${WORKSPACES:?}/$name"
+    done < <(/usr/bin/comm -13 <(echo "$1") <(suite_workspaces))
+}
+
+# run_suite DIR: the integration suite against DIR's build, which must be the
+# one installed. Its output goes to LOG, without colors.
+run_suite() {
+    local before
+    before="$(suite_workspaces)"
+    VERBOSE=1 SV_TESTS_FAIL_ON_SKIP=1 "$TESTS_DIR/integration" "$1" 2>&1 \
+        | /usr/bin/sed $'s/\x1b\\[[0-9;]*m//g' > "$LOG" && SUITE_RC=0 || SUITE_RC=$?
+    # A session that a fault puts on this terminal can leave its modes changed.
+    /bin/stty sane 2>/dev/null || true
+    remove_leftovers "$before"
+}
+suite_failed() { /usr/bin/grep -qxF "FAIL $1" "$LOG"; }
+suite_ran() { /usr/bin/grep -qxF -e "FAIL $1" -e "ok   $1" "$LOG"; }
+
+# faulty NAME FAULT-FUNCTION CHECK...: build and install the helper with that
+# fault, and require each CHECK of the suite to fail.
+faulty() {
+    local name="$1" fault="$2" check_name others
+    shift 2
+    section "$name"
+    /bin/cp "$SOURCE_DIR/crates/helper/src/ops.rs" "$OPS"
+    "$fault"
+    if ! (cd "$COPY" && cargo build --locked --release --quiet) \
+        || /usr/bin/cmp -s "$FAULTY_BIN/sv2-helper" "$SCRATCH/helper-without-fault"; then
+        fail "$name: the faulty helper builds, and differs from the one without the fault"
+        return
+    fi
+    if ! "$FAULTY_BIN/sv2" install >/dev/null || ! /usr/bin/cmp -s "$FAULTY_BIN/sv2-helper" "$HELPER"; then
+        fail "$name: the faulty helper is installed"
+        return
+    fi
+    run_suite "$FAULTY_BIN"
+    for check_name in "$@"; do
+        if suite_failed "$check_name"; then
+            pass "$name: fails '$check_name'"
+        elif suite_ran "$check_name"; then
+            fail "$name: fails '$check_name'" "the check passed"
+        else
+            fail "$name: fails '$check_name'" "the suite has no check of that name, or stopped before it"
+            /usr/bin/tail -5 "$LOG" | /usr/bin/sed 's/^/     /'
+        fi
+    done
+    # Not judged: a fault usually breaks checks further on as well.
+    others="$(/usr/bin/sed -n 's/^FAIL //p' "$LOG" | /usr/bin/grep -vxF -f <(printf '%s\n' "$@") || true)"
+    [[ -z "$others" ]] || note "also failed: $(echo "$others" | /usr/bin/tr '\n' ';' | /usr/bin/sed 's/;$//; s/;/; /g')"
+}
+
+/usr/bin/sudo -v
+echo "copying and building the source in $COPY"
+/usr/bin/rsync -a --exclude /target "$SOURCE_DIR/" "$COPY/"
+(cd "$COPY" && cargo build --locked --release --quiet)
+/bin/cp "$FAULTY_BIN/sv2-helper" "$SCRATCH/helper-without-fault"
+
+###############################################################################
+section "use_pty: this build, with sudo's default turned off"
+###############################################################################
+echo 'Defaults !use_pty' > "$SCRATCH/no-pty"
+/usr/bin/sudo /usr/sbin/visudo -c -f "$SCRATCH/no-pty" >/dev/null
+CHANGED=1
+/usr/bin/sudo /usr/bin/install -m 0440 -o root -g wheel "$SCRATCH/no-pty" "$NO_PTY"
+# Not "visudo -c" over everything: it also fails for what was wrong before,
+# such as another file's mode. What matters is that sudo still works.
+/usr/bin/sudo -n /usr/bin/true
+"$SV2" install >/dev/null
+/usr/bin/cmp -s "$BUILT_HELPER" "$HELPER" || { echo >&2 "the installed helper is not this build"; exit 1; }
+run_suite "$BIN_DIR"
+if [[ "$SUITE_RC" -eq 0 ]]; then
+    pass "use_pty: the suite passes with 'Defaults !use_pty' in another sudoers file"
+else
+    fail "use_pty: the suite passes with 'Defaults !use_pty' in another sudoers file"
+    /usr/bin/grep -A1 '^FAIL ' "$LOG" | /usr/bin/sed 's/^/     /'
+fi
+for check_name in "terminal: the session has its own tty" "terminal: window size reaches the session"; do
+    if /usr/bin/grep -qxF "ok   $check_name" "$LOG"; then
+        pass "use_pty: '$check_name' passed in that run"
+    else
+        fail "use_pty: '$check_name' passed in that run"
+    fi
+done
+
+# The other half: without the line, that sudoers file does put the session on
+# the host's terminal. If this did not fail, the run above showed nothing.
+faulty "use_pty: a helper whose sudoers file leaves the line out" fault_no_use_pty \
+    "terminal: the session has its own tty"
+/usr/bin/sudo /bin/rm -f "$NO_PTY"
+
+###############################################################################
+# workspace ACL
+###############################################################################
+faulty "ACL: the sandbox may re-permission the workspace directory" fault_root_writesecurity \
+    "workspace: sandbox cannot change the directory's mode, owner or ACL"
+# With "delete" the sandbox moves the directory to /private/tmp, so the later
+# attempt to remove it in place finds nothing.
+faulty "ACL: the sandbox may delete the workspace directory" fault_root_delete \
+    "sandbox: cannot move the workspace away" \
+    "workspace: precondition, the directory is there and empty"
+faulty "ACL: files inherit the right to execute" fault_files_execute \
+    "workspace: sandbox-created files are not executable by the host" \
+    "workspace: host-created files are not executable by the sandbox"
+faulty "ACL: the host user gets no access to what the sandbox makes" fault_no_host_access \
+    "workspace: host can read a sandbox-private file" \
+    "workspace: host can write inside a sandbox-private directory" \
+    "workspace: host can remove what the sandbox created"
+faulty "ACL: files below the first level inherit nothing" fault_files_first_level_only \
+    "workspace: host can read a sandbox-private file"
+
+FINISHED=1
+echo
+if [[ "$FAILED" -ne 0 ]]; then
+    echo -e "${RED}sv2 mutation checks: $FAILED failed, $PASSED passed${NC}"
+    exit 1
+fi
+echo -e "${GREEN}sv2 mutation checks: $PASSED passed${NC}"
