@@ -3723,21 +3723,46 @@ else
     trap cleanup_guard EXIT
 fi
 
-for bash_path in "$SYSTEM_BASH" "$BREW_BASH"; do
-    if [[ -z "$bash_path" ]]; then
-        continue
-    fi
-    for sv_mode in "${CONNECT_MODES[@]}"; do
-        if [[ "$sv_mode" == "ssh" ]]; then
-            SV_CMD=("$bash_path" "$SV_BASE" "--ssh")
-            mode_label="$bash_path sv --ssh"
-        else
-            SV_CMD=("$bash_path" "$SV_BASE")
-            mode_label="$bash_path sv"
-        fi
-
-        run_tests "$mode_label"
+# Which bash runs sv, and how it connects, for each pass over the tests:
+# "BASH default" or "BASH ssh", one pass a line.
+#
+# Two passes cover the two versions of bash and the two ways to connect
+# without running every pair. sv starts with #!/bin/bash, so the bash of
+# macOS (3.2) is what people run, and it gets the pass without --ssh, which
+# is the usual way in and has more tests (sv-clone and the deploy keys only
+# run there). The Homebrew bash, where there is one, gets the --ssh pass;
+# where there is none the bash of macOS runs both.
+# SV_TESTS_ALL_MODES=1 runs every pair, as before.
+PASSES=()
+if [[ "${SV_TESTS_ALL_MODES:-0}" == "1" ]]; then
+    for bash_path in "$SYSTEM_BASH" "$BREW_BASH"; do
+        [[ -n "$bash_path" ]] || continue
+        for sv_mode in "${CONNECT_MODES[@]}"; do
+            PASSES+=("$bash_path $sv_mode")
+        done
     done
+else
+    PASSES+=("$SYSTEM_BASH default")
+    if [[ " ${CONNECT_MODES[*]} " == *" ssh "* ]]; then
+        PASSES+=("${BREW_BASH:-$SYSTEM_BASH} ssh")
+    elif [[ -n "$BREW_BASH" ]]; then
+        # Nested in sandvault there is no --ssh pass to give the other bash.
+        PASSES+=("$BREW_BASH default")
+    fi
+fi
+
+for pass_spec in "${PASSES[@]}"; do
+    bash_path="${pass_spec% *}"
+    sv_mode="${pass_spec##* }"
+    if [[ "$sv_mode" == "ssh" ]]; then
+        SV_CMD=("$bash_path" "$SV_BASE" "--ssh")
+        mode_label="$bash_path sv --ssh"
+    else
+        SV_CMD=("$bash_path" "$SV_BASE")
+        mode_label="$bash_path sv"
+    fi
+
+    run_tests "$mode_label"
 done
 cleanup_guard
 
