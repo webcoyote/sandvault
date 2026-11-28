@@ -1,0 +1,40 @@
+# Google Antigravity CLI (https://antigravity.google/product/antigravity-cli)
+# Google's CLI after Gemini CLI, and where its Gemini 4 models (Neon among
+# them) are offered. Checked on 2026-11-28 against agy 1.5.18, the build
+# Homebrew's cask downloads (its SHA-256 matched the cask's). It has not
+# been run under sv2, and no account was signed in.
+#
+# No model is chosen here: agy makes Gemini 4 Neon the default for an
+# account whose plan has it, and a --model for an account without it would
+# fail. "sv2 agy --model NAME" picks one; "agy models" lists them.
+schema = 1
+
+[install.host]
+# A cask. It installs a wrapper that sets AGY_CLI_DISABLE_AUTO_UPDATE, so
+# Homebrew updates it and "agy update" does not.
+brew = { cask = "antigravity-cli" }
+binary = ["{brew}/bin/agy"]
+
+[install.guest]
+script = "install.sh"
+binary = ["~/.local/bin/agy"]
+
+[run]
+# agy asks before running a command or writing a file unless given this. Its
+# own sandbox (--sandbox) is off unless asked for, and the flag does not
+# change that.
+bypass_flag = "--dangerously-skip-permissions"
+grants = "it acts without asking"
+# Nothing in no_inject: agy takes the flag in front of every one of its 14
+# subcommands (acp, agent, agents, changelog, help, install, mcp,
+# mic-serve, models, plugin, plugins, remote-control, update). Checked
+# against 1.5.18: each prints the same --help with the flag in front as
+# without, except acp, whose help then shows the flag's default as true,
+# and "agy --dangerously-skip-permissions mcp list" lists MCP servers
+# rather than starting a chat.
+#
+# No system_prompt: agy has no option for the text. Its --settings takes a
+# JSON object of settings.json keys and refuses one it does not know
+# ("unknown setting"), and it refused each name tried for the text
+# (systemPrompt, appendSystemPrompt, customInstructions, rules and others).
+# It reads instructions from GEMINI.md and AGENTS.md files instead.

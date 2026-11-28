@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+# Builds sandvault2: sv2/target/release/sv2 and sv2-helper.
+# (v1's `sv` is a bash script and needs no build.)
+[[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
+if ! command -v cargo >/dev/null; then
+    echo >&2 "build: cargo not found; install Rust (https://rustup.rs)"
+    exit 1
+fi
+
+QUIET=(--quiet)
+[[ "$VERBOSE" -ne 0 ]] && QUIET=()
+
+cargo build --locked --release --manifest-path sv2/Cargo.toml "${QUIET[@]+"${QUIET[@]}"}"

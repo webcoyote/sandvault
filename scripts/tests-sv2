@@ -1,0 +1,72 @@
+#!/bin/bash
+# sandvault2 (sv2) tests: build, lint, unit tests, then the privileged
+# integration suite when sv2 is installed on this machine.
+#
+# The integration suite needs the helper this checkout builds to be the one
+# installed (sv2/target/release/sv2 install). Without it the suite is SKIPPED,
+# which is reported as such and is a failure under SV_TESTS_FAIL_ON_SKIP=1.
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+
+# Nothing here reads the terminal. With it as standard input, sudo would put
+# it in raw mode for every session of the integration suite: Ctrl-C would
+# not stop the run, and a run that is killed would leave the terminal raw.
+exec </dev/null
+
+# step NAME: said at every level of VERBOSE, with the time since the start,
+# so that what is running, and what was slow, can be seen while it runs.
+step() { printf '[%4ss] %s\n' "$SECONDS" "$1"; }
+
+# Everything is in a function, called from the last line: bash reads a script
+# as it runs it, so a script that is saved while it runs would go on from
+# the same offset in other text. A function is read whole before it starts.
+main() {
+    local SCRIPT_DIR SV2_DIR QUIET TEST_QUIET
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SV2_DIR="$SCRIPT_DIR/../sv2"
+
+    [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
+
+    if ! command -v cargo >/dev/null; then
+        echo >&2 "sv2 tests: cargo not found; install Rust (https://rustup.rs)"
+        exit 1
+    fi
+
+    # QUIET is for cargo, TEST_QUIET for the tests cargo runs: a dot for
+    # each test in place of its name.
+    QUIET=(--quiet)
+    TEST_QUIET=(--quiet)
+    [[ "$VERBOSE" -ne 0 ]] && QUIET=() && TEST_QUIET=()
+
+    cd "$SV2_DIR"
+    # The guest launcher is compiled into sv2 and run inside every session; the
+    # agents' scripts run inside the sandbox too.
+    if command -v shellcheck >/dev/null; then
+        step "shellcheck: the guest scripts and the test scripts"
+        shellcheck guest/launch.sh guest/deploy-key.sh guest/git-ssh.sh agents/*/*.sh tests/profile-probes.sh tests/integration tests/root-checks tests/mutation-checks
+    else
+        echo >&2 "sv2 tests: shellcheck not found; the guest scripts were NOT LINTED"
+        [[ "${SV_TESTS_FAIL_ON_SKIP:-0}" != "1" ]] || exit 1
+    fi
+    step "cargo fmt --check"
+    cargo fmt --all --check
+    step "cargo clippy"
+    cargo clippy --locked --all-targets "${QUIET[@]+"${QUIET[@]}"}" -- -D warnings
+    # cargo itself is not quieted here, only the tests: cargo then names the
+    # crate over each block of output ("Running unittests ... sv2_helper-...",
+    # "Doc-tests sv2_common"), which it does not when it is quiet.
+    step "unit tests"
+    cargo test --locked -- "${TEST_QUIET[@]+"${TEST_QUIET[@]}"}"
+    # The sandbox profile, probed as the current user (no root). Uses the network.
+    step "profile probes as the current user (uses the network)"
+    cargo test --locked -p sv2-helper -- --ignored profile_probes "${TEST_QUIET[@]+"${TEST_QUIET[@]}"}"
+    step "release build"
+    VERBOSE="$VERBOSE" "$SCRIPT_DIR/build"
+
+    step "integration suite (real accounts and sessions)"
+    "$SV2_DIR/tests/integration" "$SV2_DIR/target/release"
+}
+
+# In braces, so that the call and the exit are read together before main
+# starts and nothing is read from the file after it.
+{ main "$@"; exit $?; }

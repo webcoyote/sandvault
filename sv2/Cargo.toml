@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/common", "crates/helper", "crates/cli"]
+
+[workspace.package]
+version = "0.1.1"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# The only third-party crate. Everything in sv2-helper runs as root, so adding
+# a dependency here is a security decision, not a convenience (see
+# docs/SANDVAULT2.md, "Language and structure").
+libc = "0.2"
+
+[profile.release]
+panic = "abort"
+overflow-checks = true

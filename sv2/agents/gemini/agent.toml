@@ -1,0 +1,23 @@
+# Google Gemini CLI
+# Taken from sandvault v1's working wrapper (guest/home/bin/gemini) and its
+# install step in sv. Checked on 2026-11-27 against gemini 0.71.1 (npm), and
+# run from sv2 that day.
+schema = 1
+
+# No [install.host]: Homebrew deprecated its gemini-cli formula on
+# 2026-06-18 ("unsupported", pointing to the antigravity-cli cask, a
+# different program). So gemini is installed with npm in the sandbox home,
+# and "sv2 gemini" uses that install without --native.
+[install.guest]
+script = "install.sh"
+binary = ["~/.local/bin/gemini"]
+
+[run]
+bypass_flag = "--yolo"
+grants = "it acts without asking"
+# gemini knows a subcommand only when no option comes before it:
+# "gemini --yolo mcp list" starts a chat with "mcp list" as its first
+# message. And the subcommands reject --yolo. So they run without it.
+# Checked against 0.71.1: these are its six commands and their aliases, and
+# "gemini --yolo NAME --help" prints the top-level usage for each.
+no_inject = ["mcp", "extensions", "extension", "skills", "skill", "hooks", "hook", "gemma", "models"]

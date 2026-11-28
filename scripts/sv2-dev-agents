@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Copies the agent definitions of this checkout (sv2/agents) into
+# ~/.config/sandvault2/agents, so that a development build of sv2 can run
+# them.
+#
+# Why: sv2 refuses a definition that a sandbox could change, and a checkout
+# under /Users/Shared, or in a sandbox workspace, is such a place. The copy
+# in your own config directory is not, and takes precedence over built-ins.
+#
+# What you copy is what sv2 will then install with Homebrew and run for you.
+# If a sandboxed agent works in this checkout, read sv2/agents before you run
+# this.
+#
+# Usage: sv2-dev-agents [--force]
+#   --force   also replace definitions that this script did not put there
+set -Eeuo pipefail
+trap 'echo >&2 "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC="$SCRIPT_DIR/../sv2/agents"
+DST="$HOME/.config/sandvault2/agents"
+# Left in each copy, so that a later run knows the directory is its own.
+MARKER=".copied-by-sv2-dev-agents"
+
+FORCE=0
+case "${1:-}" in
+    "") ;;
+    --force) FORCE=1 ;;
+    *)
+        echo >&2 "usage: sv2-dev-agents [--force]"
+        exit 2
+        ;;
+esac
+
+[[ -d "$SRC" ]] || { echo >&2 "sv2-dev-agents: no definitions in $SRC"; exit 1; }
+/bin/mkdir -p "$DST"
+
+STATUS=0
+for dir in "$SRC"/*/; do
+    name="$(basename "$dir")"
+    [[ -f "$dir/agent.toml" ]] || continue
+    if [[ -e "$DST/$name" && ! -e "$DST/$name/$MARKER" && "$FORCE" -eq 0 ]]; then
+        echo >&2 "sv2-dev-agents: kept $DST/$name: it was not copied by this script (--force replaces it)"
+        STATUS=1
+        continue
+    fi
+    # Stage beside the destination, then swap. -P: a link is copied as a
+    # link, never followed; sv2 refuses a definition that contains one.
+    stage="$(/usr/bin/mktemp -d "$DST/.$name.XXXXXX")"
+    /bin/cp -R -P "$dir" "$stage/$name"
+    : > "$stage/$name/$MARKER"
+    # Yours alone to write, and no access list carried over from the checkout.
+    /bin/chmod -R -N "$stage/$name"
+    /bin/chmod -R u+rwX,go-w "$stage/$name"
+    /bin/rm -rf "${DST:?}/$name"
+    /bin/mv "$stage/$name" "$DST/$name"
+    /bin/rmdir "$stage"
+    echo "copied $name to $DST/$name"
+done
+exit "$STATUS"

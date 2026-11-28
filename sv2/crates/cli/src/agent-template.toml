@@ -1,0 +1,73 @@
+# Definition of the agent "{name}" for sandvault2.
+#
+# Run it with:   sv2 {name}        (or: sv2 run {name})
+# Every key sv2 knows is shown here; a key it does not know is an error.
+
+# The version of this format. Leave it.
+schema = 1
+
+# A program can be installed two ways, and each has its own section. A run
+# uses one of them and never the other in its place:
+#   sv2 run {name}            the host's install
+#   sv2 run --native {name}   the program's own install, inside the sandbox
+# Keep the section you have; a definition needs at least one. With only
+# [install.guest], sv2 run {name} uses it, as if --native were given.
+
+# The host's install: sv2 installs the program on this Mac, as you, before
+# the sandbox starts, when it is not there yet.
+[install.host]
+# The Homebrew package, one of the two forms, a plain name:
+#   brew install --formula NAME    or    brew install --cask NAME
+# Leave it out if you install the program yourself.
+#brew = { formula = "{name}" }
+# Where that install leaves the program; the first that exists is run. Each
+# starts with {brew}/ (the Homebrew prefix: /opt/homebrew or /usr/local) or
+# with / (anywhere else outside the sandbox home).
+binary = ["{brew}/bin/{name}"]
+
+# The program's own install, inside the sandbox, as the sandbox user.
+#[install.guest]
+# The installer: a shell script beside this file. It runs when the program
+# is not there yet. Leave it out if you install the program yourself.
+#script = "install.sh"
+# Where that install leaves the program; the first that exists is run. Each
+# starts with ~/ (the sandbox home).
+#binary = ["~/.local/bin/{name}"]
+
+[run]
+# A flag sv2 puts before your arguments, usually the one that turns the
+# agent's own permission questions off: inside the sandbox they protect
+# nothing. Check it against the program's --help. Leave it out for none.
+#bypass_flag = "--yes"
+
+# What the flag (and env, below) lets the agent do, in a few words. sv2 says
+# it each time the agent starts, so that nobody is surprised by it.
+#grants = "it acts without asking"
+
+# Subcommands that must not get the flag (for example ones that only manage
+# the program). Only the first argument is compared.
+#no_inject = ["update"]
+
+# Subcommands that get the flag after their arguments instead of before.
+#inject_last = ["config"]
+
+# Variables set for the agent, for a program that is told by a variable
+# what others are told by a flag.
+#env = { EXAMPLE_VARIABLE = "value" }
+
+# How the agent takes text for its system prompt: a flag whose value is
+# added to it. sv2 uses it to tell the agent about its session (a browser
+# that was started for it, for one), with the flag and the text in front of
+# your arguments. Subcommands in no_inject or inject_last do not get it.
+# Check the flag against the program's --help, and that the subcommands
+# still work with it in front. Leave it out and the agent is not told.
+# A program that takes the text as a setting instead names the option and
+# the setting, and is given KEY="TEXT" with the text as a JSON string:
+#   system_prompt = { config = { flag = "--config", key = "run.system_prompt_append" } }
+#system_prompt = { flag = "--append-system-prompt" }
+
+# A shell script beside this file that runs, inside the sandbox, in the
+# program's place, for a program that needs more than the keys above. It
+# is given the program's path and the arguments (the flag already placed)
+# as "$@", and normally ends with: exec "$@"
+#wrapper = "run.sh"

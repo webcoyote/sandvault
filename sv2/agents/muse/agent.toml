@@ -1,0 +1,38 @@
+# Muse Code (https://dev.meta.ai)
+# Taken from sandvault v1's working wrapper (guest/home/bin/muse) and its
+# install step in sv; not checked again against a current muse.
+schema = 1
+
+[install.host]
+# A cask, and its program has another name: "muse-code" ships "muse".
+brew = { cask = "muse-code" }
+binary = ["{brew}/bin/muse"]
+
+[install.guest]
+script = "install.sh"
+binary = ["~/.local/bin/muse"]
+
+[run]
+# muse's own switch for both of its guards: approval prompts and a Seatbelt
+# sandbox of its own, both on by default. The sandbox it would nest inside
+# this one adds nothing here and limits it to a proxy for the network and
+# the workspace for writes. It also trusts the workspace for the run, which
+# is what loads a project's own skills and rules.
+bypass_flag = "--yolo"
+grants = "it acts without asking, without its own sandbox, and trusts the project's skills and rules"
+# Measured against muse 1.4.25: a subcommand must be the first word ("`mcp`
+# is a command, not a root option"), so none may have an option in front.
+# exec, resume and attach take --yolo after their arguments; every other
+# subcommand refuses it on either side. (v1 put it in front of all of them.)
+inject_last = ["exec", "resume", "attach"]
+no_inject = [
+    "config", "export", "trace", "model-profile", "skills", "voice",
+    "plugins", "sandbox", "schema", "serve", "mxp", "acp",
+    "session-message", "sessions", "mcp", "auth", "login", "logout",
+    "usage", "init", "help",
+]
+# muse has no option for the text; it takes it as a setting whose value is
+# JSON. A misspelt key is refused ("unknown key: no such setting"). A
+# provider without base instructions (muse's echo provider) refuses the run
+# rather than drop the text.
+system_prompt = { config = { flag = "--config", key = "run.system_prompt_append" } }

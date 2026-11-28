@@ -44,6 +44,24 @@ jobs:
           brew trust --tap lightpanda-io/browser
           ./sv -vvv --lightpanda build
 
+      - name: Install sandvault2
+        run: |
+          # scripts/tests-sv2 lints the guest scripts, and the integration
+          # suite runs tmux in a session; with SV_TESTS_FAIL_ON_SKIP a
+          # missing tool is a failure, not a skipped check.
+          brew install shellcheck tmux
+          ./scripts/build
+          sv2/target/release/sv2 install
+          # The suite has a sandbox account try to log in over SSH; with
+          # Remote Login off that check cannot run.
+          sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist
+
+      - name: SandVault2 Tests
+        env:
+          VERBOSE: 1
+          SV_TESTS_FAIL_ON_SKIP: 1
+        run: ./scripts/tests-sv2
+
       - name: SandVault Tests
         env:
           VERBOSE: 1

@@ -1,0 +1,254 @@
+;; Sandbox profile for sandvault2. Rendered by sv2-helper; the placeholders
+;; are filled in by sandbox.rs.
+;;
+;; Default deny. Every allow below names the probe in
+;; tests/profile-probes.sh that fails without it, measured under this
+;; profile; a rule no probe needs is removed (review-guidelines §3). Later
+;; rules win over earlier ones, so the broad allows come first and the denies
+;; that cut pieces out of them after.
+;;
+;; Two things are still as wide as they were, by decision and not by
+;; measurement: reading files (everything but the places denied below) and
+;; the network (everything but this Mac's own SSH port). Narrowing either
+;; further is separate work.
+(version 1)
+;; sv2-profile-version: __PROFILE_VERSION__
+(deny default)
+
+;; Reading files. Without it nothing starts at all: the dynamic linker
+;; cannot read a program.
+(allow file-read*)
+
+;; The network, unrestricted but for the rule after this one. Probes: DNS,
+;; https with curl, git over https, listen on localhost, "own listener on
+;; localhost".
+(allow network*)
+
+;; Not this Mac's own SSH port. sshd refuses the sandbox accounts whoever
+;; connects; this keeps a session from reaching sshd at all, so from trying
+;; any other account of this Mac. "localhost" is every address of this Mac,
+;; not only the loopback ones (measured: 127.0.0.1, ::1, fe80::1, the LAN
+;; address and the link-local ones of every other interface are refused
+;; with EPERM), and no address of another host: probe "port 22 of a remote
+;; host answers", which is git over ssh. Probe "this Mac's SSH port".
+;; One rule a port: 22 always, and the ports the helper finds this Mac's
+;; sshd to have (sv2-common, "This Mac's SSH ports"). The helper reads
+;; these rules back before every session.
+__SSH_PORT_RULES__
+
+;; kill and the shell's job control. Probe "signals to own processes": kill
+;; fails with "Operation not permitted". Whom a signal may go to is the
+;; kernel's ordinary rule: processes of the same user.
+(allow signal)
+
+;; Scheduling priority: nice, renice, and zsh, which lowers the priority of
+;; every background job and says "nice(5) failed" at each one when it may
+;; not. Probe "lower own priority". Whose priority, and that it only goes
+;; down, is the kernel's ordinary rule.
+(allow system-sched)
+
+;; Terminals: tmux, script, an editor's terminal, an agent's shell tool.
+;; Probes "open a pty" and "tmux server" (forkpty fails without it).
+(allow pseudo-tty)
+;; ioctl on devices the session can open: terminal sizes and modes. Probe
+;; "open a pty".
+(allow file-ioctl
+    (subpath "/dev"))
+
+;; POSIX shared memory and semaphores. Probe "shared memory and semaphores
+;; (python)": multiprocessing's Lock and Queue fail to be created.
+(allow ipc-posix-shm*)
+(allow ipc-posix-sem*)
+
+;; No reading of /Volumes, where removable and network disks appear; the
+;; main disk stays readable under its name there. Probe "read /Volumes".
+(deny file-read*
+    (subpath "/Volumes"))
+(allow file-read*
+    (subpath "/Volumes/Macintosh HD"))
+
+;; Mach services: only the ones a session needs. Sessions run in the
+;; sandvault user's own launchd domain (user/<uid>), which sv2-helper enters
+;; with "launchctl asuser". So a per-user agent name allowed here reaches the
+;; sandvault user's own agent, not the host user's; launchctl manageruid in
+;; a session prints the sandvault uid.
+;;
+;; Each name was measured by removing it and running the probes. Removed on
+;; 2026-11-26 because no probe failed without them: com.apple.cfprefsd
+;; (defaults falls back to the file), com.apple.ocspd, com.apple.dnssd,
+;; com.apple.mDNSResponder, com.apple.networkd and
+;; com.apple.SystemConfiguration (names resolve and connections are made
+;; without them).
+(allow mach-lookup
+  ;; opendirectoryd's libinfo, which carries user and group names. Probes
+  ;; "id shows names" (id prints a number) and "ssh-keygen" ("No user exists
+  ;; for uid").
+  ;; This one name, not the com.apple.system. prefix: the prefix also
+  ;; admits com.apple.system.opendirectoryd.api, which dscl talks to, and
+  ;; through it a session could test the password of any account of this
+  ;; Mac (dscl . -authonly) and read its record. Probes "check a password
+  ;; (dscl)" and "read an account's record (dscl)".
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  ;; opendirectoryd's membership service, which answers whether a user is
+  ;; in a group; it checks no password. Probe "defaults write and read":
+  ;; without it defaults write reports nothing and writes nothing, and the
+  ;; read says "The domain/default pair ... does not exist".
+  (global-name "com.apple.system.opendirectoryd.membership")
+  ;; TLS trust evaluation for curl, git and python. Probe "https with curl
+  ;; (TLS trust)": (60) unable to get local issuer certificate; a dozen
+  ;; other probes fail with it.
+  (global-name "com.apple.TrustEvaluationAgent")
+  ;; The same for Go programs, which verify through the per-user trustd
+  ;; agent. Probe "Go program verifies TLS (gh)": x509: OSStatus -26276.
+  ;; Only the agent's name, not the com.apple.trustd prefix.
+  (global-name "com.apple.trustd.agent")
+  ;; Keychains, by security and by agents that keep credentials in one.
+  ;; securityd is a system daemon and keys its state on the caller's audit
+  ;; session, which in user/<uid> is the sandvault user's own. Probe
+  ;; "keychain create and use": SecKeychainCreate fails.
+  (global-name "com.apple.SecurityServer")
+  ;; File system change notifications. fseventsd is a root system daemon,
+  ;; not a per-user host service. Probe "file watcher sees a change
+  ;; (FSEvents)": the watcher starts and never fires.
+  (global-name "com.apple.FSEvents"))
+
+;; Chromium run headless, as Playwright runs it: its "headless shell" build,
+;; started with --no-sandbox. (The browser's own sandbox cannot be set up
+;; inside this one, "sandbox initialization failed", and this one is what
+;; confines it.) Probe "Playwright's headless Chromium loads a page".
+;;
+;; The browser process and its children (renderer, GPU, utility) find each
+;; other through a Mach service the browser registers under its bundle id
+;; and process ID. Without the registration, which default deny refuses
+;; like any other, the browser stops at "bootstrap_check_in
+;; org.chromium.Chromium.MachPortRendezvousServer.N: Permission denied
+;; (1100)"; without the lookup its children cannot reach it. The names are
+;; made up per launch and carry no authority of the host user.
+;;
+;; Google Chrome itself, started headless with a debugging port, which is
+;; what "sv2 --chrome" does: the same rendezvous under its own bundle id,
+;; and LaunchServices, which it checks in with at startup. Probe "Google
+;; Chrome with a debugging port loads a page": without the first it stops
+;; at bootstrap_check_in as above; without the second it aborts and says
+;; nothing. LaunchServices starts nothing for a session: probe "open an
+;; application" still fails with it.
+;;
+;; What no rule here changes (measured in a session on 2026-11-27, also
+;; with (allow default) added): Chrome opens real windows even when
+;; headless, and crashes when one closes, because a sandbox account is not
+;; logged in at the screen and has no window server. Closing a tab of the
+;; first window is fine; closing the last page of a browser context, or
+;; having Playwright launch Chrome itself, ends the browser. See "Full
+;; Chrome" in docs/SANDVAULT2.md.
+(allow mach-lookup mach-register
+  (global-name-prefix "org.chromium.Chromium.MachPortRendezvousServer.")
+  (global-name-prefix "com.google.Chrome.MachPortRendezvousServer."))
+(allow mach-lookup
+  (global-name "com.apple.coreservices.launchservicesd"))
+
+;; The iOS simulator, only for a session started with "sv2 run --ios": the
+;; helper passes SV2_IOS as 1 for that session and as 0 for every other.
+;; (Without the parameter this file does not load, so a session cannot
+;; start with the question unanswered.)
+;;
+;; simctl and iosef talk to CoreSimulatorService, the user's own service
+;; for its simulators, and to simdiskimaged, the system daemon that mounts
+;; the runtimes' disk images. Probe "simulator: simctl lists the runtimes
+;; (--ios)": without the rule, "Connection refused" and no runtimes; probe
+;; "simulator: its services are closed without --ios" is the other half.
+;; With it, measured on 2026-11-27 (macOS 26.7.3, Xcode 27.2): create, boot,
+;; install, launch, screenshot, and iosef's describe, tap and swipe.
+;;
+;; What it grants is more than its size: CoreSimulatorService is started by
+;; launchd in the sandvault user's domain, not by the session, so it and
+;; everything it starts (the simulated device, every app in it) run as the
+;; sandvault user WITHOUT this profile. A session with this rule can run
+;; code that the denies below do not bind. The account still binds it. See
+;; "iOS simulator" in docs/SANDVAULT2.md.
+(if (string=? (param "__IOS_PARAM__") "1")
+    (allow mach-lookup
+      (global-name-prefix "com.apple.CoreSimulator.")))
+
+;; Keep these four denied explicitly, after the allow above, so that widening
+;; the allow later cannot quietly re-admit them.
+;; diskarbitrationd -- diskutil mount, hdiutil attach, Finder disk handling
+;; NetAuthAgent     -- NetFS: 'open smb://...', Connect to Server
+;; NetAuthSysAgent
+;; appleeventsd     -- disallow osascript telling Finder to do it
+(deny mach-lookup
+  (global-name "com.apple.DiskArbitration.diskarbitrationd")
+  (global-name "com.apple.NetAuthAgent")
+  (global-name "com.apple.NetAuthSysAgent")
+  (global-name "com.apple.appleeventsd"))
+
+;; Block raw disk and packet-capture devices regardless of the broader
+;; /dev write allow below. Defense in depth: /dev/*disk* is already
+;; root:operator 640, but this removes reliance on POSIX perms alone.
+(deny file-read* file-write*
+    (regex #"^/dev/r?disk")
+    (regex #"^/private/dev/r?disk")
+    (regex #"^/dev/bpf"))
+
+;; Default-deny reads under /Users, then re-allow only the sandvault
+;; user's home and its workspace. Catches the host user's home plus any
+;; other accounts on the machine (other users, /Users/Guest, /Users/Shared,
+;; the other workspaces under the workspace root) without enumeration.
+;; Last-match-wins, so the re-allows below must follow this deny.
+;;
+;; The literal re-allows on /Users and the two root-owned parents of the
+;; workspace grant lookup of those directory entries themselves so that
+;; path resolution into the allowed subpaths works. Without them, mkdir -p
+;; and open() under the allowed subtrees fail because path traversal
+;; touches the denied parent components.
+(deny file-read*
+    (subpath "/Users"))
+(allow file-read*
+    (literal "/Users")
+    (literal "__WORKSPACE_ROOT__")
+    (literal "__WORKSPACE_USER_DIR__")
+    (subpath "__WORKSPACE__")
+    (subpath "__HOME__"))
+
+;; Deny /Library/Keychains, then re-allow only System.keychain.
+;; The other keychains there hold user and system secrets, and unlike
+;; /dev/*disk* they are not protected by restrictive file permissions
+;; (System.keychain itself is mode 644), so this deny is the only thing
+;; keeping the sandvault user out of them.
+;; System.keychain is re-allowed because it holds the CA trust anchors
+;; that tools like LightPanda need to validate TLS connections; its
+;; contents are public certificates, not secrets.
+(deny file-read*
+    (subpath "/Library/Keychains"))
+(allow file-read*
+    (literal "/Library/Keychains/System.keychain"))
+
+;; Writing: the sandbox home, the workspace, and the temporary directories.
+;; Probes "write in the home", "write in the workspace", "write in TMPDIR",
+;; "write in /tmp"; "write outside" checks that nothing else is writable.
+;; /dev: writing to /dev/null and to the session's terminal. Probe
+;; "/dev/null, /dev/urandom"; without it nothing can discard output. Which
+;; devices can be written is the devices' own permissions, apart from the
+;; raw disks and bpf denied above.
+(allow file-write*
+    (subpath "__WORKSPACE__")
+    (subpath "__HOME__")
+    (subpath "/tmp")
+    (subpath "/private/tmp")
+    (subpath "/var/folders")
+    (subpath "/private/var/folders")
+    (subpath "/dev"))
+
+;; Reading kernel state: the number of processors, the page size, the OS
+;; version. Probe "sysctl reads"; and without it nothing runs at all (every
+;; program fails in sysconf).
+(allow sysctl-read)
+
+;; Starting programs. Probe "fork and exec, pipes".
+(allow process*)
+
+;; /bin/ps is setuid root and does not run under a sandbox: probe "ps shows
+;; this process" fails with "Operation not permitted". It runs without one;
+;; it shows what any user of this Mac can see.
+(allow process-exec
+    (literal "/bin/ps")
+    (with no-sandbox))

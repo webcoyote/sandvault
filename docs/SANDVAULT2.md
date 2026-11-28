@@ -1,7 +1,9 @@
 # Sandvault 2 design
 
-Status: design, nothing implemented. Decisions marked **Decided** were made on
-2026-11-24. Open items are listed at the end.
+Status: milestone 1 (shell sessions) is implemented in `sv2/`; see
+"Milestone 1" near the end for what exists and what it decided. Everything
+else is design. Decisions marked **Decided** were made on 2026-11-24. Open
+items are listed at the end.
 
 Section references such as §1 are to `docs/review-guidelines.md`. "Finding N"
 refers to `docs/security-review-2026-11-24.md`.
@@ -9,7 +11,7 @@ refers to `docs/security-review-2026-11-24.md`.
 ## Goals
 
 1. Rewrite in Rust as a single compiled binary plus one small root helper.
-2. Need `sudo` only for install, uninstall, and sudoers setup. Creating and
+2. Need `sudo` only for install, uninstall, and allowing or denying a user. Creating and
    deleting sandboxes needs no password, and works for users without admin
    rights.
 3. Make account and workspace names impossible to confuse between users.
@@ -29,7 +31,12 @@ So v2 starts from this rule:
 > The host user and root never read, write, or run tools inside the workspace
 > or the sandbox home. The sandbox user does every operation there.
 
-The one stated exception is the iOS bridge (see "iOS bridge").
+The rule binds sandvault's own code (`sv2` and the helper), not the person:
+the host user still edits files in the workspace by hand.
+
+There is one stated exception: `sv2 repair` (see "Workspace permissions").
+A second, an iOS bridge on the host, was designed, built and taken out
+again on 2026-11-27 (see "iOS bridge").
 
 Of the 19 findings in the security review, about 12 no longer have a code
 path under this rule and the feature removals below.
@@ -77,18 +84,34 @@ happens only when a profile is added.
 launchd daemon is a planned follow-up.
 
 - The helper is installed outside the Homebrew prefix, which an admin user can
-  write: `sudo sv2 install` copies it to a root-owned path. `sv2` and the
-  helper check each other's version.
-- One sudoers line, for example
-  `%sandvault-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper`.
-  There is no per-user sudoers file.
+  write. `sv2 install` is run without `sudo` and refuses to run as root. It
+  runs `sudo <prefix>/sv2-helper install` itself, which asks for the
+  password; the helper copies its own executable to a root-owned path and
+  writes the other root-owned artifacts. `sv2` itself never runs as root.
+- `sv2` and the helper compare artifact versions, not the application
+  version (see "Artifact versions" under "Milestone 1").
+- The helper is not setuid, because Homebrew cannot install a setuid binary.
+- One sudoers line:
+  `%sv2-users ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/sv2-helper call *`.
+  There is no per-user sudoers file. The helper's first argument is a mode.
+  `call` (the profile verbs and `launch`) is what the line covers. `install`,
+  `uninstall`, `user-allow` and `user-deny` are in `admin` mode, which the
+  line does not match, so sudo itself asks for a password and requires general
+  sudo rights. The helper cannot tell whether a password was typed; sudo can.
+  The same file sets `use_pty` for the helper, so every session runs on a
+  terminal of its own (see "Milestone 1").
 - The helper's interface is designed as a wire protocol so it can move behind
   a daemon without redesign:
   - narrow verbs only: `profile-add NAME`, `profile-remove NAME`,
-    `profile-list`, `launch NAME -- ARGV`;
+    `profile-list`, `launch NAME -- ARGV`, `user-allow USER`,
+    `user-deny USER`, `install`, `uninstall`;
   - no path arguments;
-  - the caller is identified by real UID, never by an argument or an
-    environment variable;
+  - the caller is identified by `SUDO_UID`. Under sudo the helper's real UID
+    is 0, so this is the only identity available; sudo sets the variable
+    itself and the caller cannot override it. The helper refuses to run
+    unless its real UID is 0 and `SUDO_UID` is set, rejects a `SUDO_UID` that
+    is a sandbox account, and takes identity from no argument and no other
+    variable;
   - root never opens a host-owned file. The guest payload is embedded in the
     binary.
 - A per-user limit on the number of profiles, since each one is a real
@@ -121,14 +144,12 @@ The launch sequence in v2:
 1. `sv2` runs `sudo sv2-helper launch NAME -- ARGV`.
 2. The helper looks up the profile and its UID in the registry.
 3. The helper runs `/bin/launchctl asuser <uid>` on a second stage of itself.
-4. The second stage allocates a pty, sets groups and UID, clears the
-   environment, applies the sandbox profile, and executes the command.
+4. The second stage sets groups and UID, clears the environment, applies the
+   sandbox profile, and executes the command.
 
 Consequences:
 
 - The sandbox profile is always applied. There is no `--no-sandbox`.
-- The session has its own pty and does not share the host's terminal
-  (finding 8).
 - No inner `sudo --login`, so no login shell re-parses arguments or sources
   `.zshenv` and `.zprofile` twice.
 - No per-user launcher script and no launcher version stamp; the UID comes
@@ -140,6 +161,30 @@ Consequences:
 
 Acceptance test, carried over from the branch: inside a session,
 `launchctl manageruid` equals `id -u`.
+
+### Terminal multiplexers
+
+tmux and screen work without SSH, in two ways:
+
+- **On the host.** Run `sv2` inside a host tmux pane. To tmux this is an
+  ordinary program in a terminal; nothing is needed.
+- **Inside the sandbox.** Run `sv2 run shell tmux new -A -s main`, then detach,
+  close the terminal, and reattach later with the same command. The server
+  runs as the sandbox user, under the sandbox profile, in the sandbox user's
+  launchd domain.
+
+The second way needs one thing from the launch: **detached processes may
+outlive `sv2 run`.** The helper does not kill the session's process group when
+the command exits. This grants nothing new: the trust model already assumes
+the sandbox runs code at all times, and the sandbox profile is inherited
+across `fork`, so a tmux server stays confined. In exchange, `profile-remove`
+kills every process of the sandbox UID before it deletes the account.
+
+The sandbox profile must allow tmux's socket directory
+(`/private/tmp/tmux-<uid>`), measured the same way as other allow rules (§3).
+The pasteboard service is denied, so copying to the host clipboard from inside
+tmux needs OSC 52 (`set -g set-clipboard on`), which goes through the host
+terminal.
 
 ## Names and ownership
 
@@ -155,9 +200,22 @@ separates user from profile unambiguously.
   `sv2-pat-work`. The `sv2-` prefix keeps v2 accounts distinct from v1's
   `sandvault-<user>-<profile>` accounts, so both versions can be installed
   side by side and v2 never adopts or modifies a v1 account.
-- **Workspace:** `/Users/Shared/sv2/<user>/<profile>/`. The directories `sv2/`
+- **Workspace:** `/Users/sv2/<user>/<profile>/`. The directories `sv2/`
   and `sv2/<user>/` are root-owned and not world-writable, so no sandbox can
-  pre-create the name of a future profile (finding 5).
+  pre-create the name of a future profile (finding 5). They are in `/Users`,
+  where only root can create a name, and not in `/Users/Shared`, where
+  anybody can (see "The workspace root" under "Milestone 1").
+- **The name `sv2` is reserved** by a hidden account that `install` creates,
+  so that no new account is given `/Users/sv2` as its home folder.
+- **Decided (2026-11-27): `/Users/sv2`, not `/sv2`.** The reason to move at
+  all was `/Users/Shared`: anybody can write it, so another user could take
+  the name first. `/Users` solves that with a plain `mkdir` as root. `/sv2`
+  would need an `/etc/synthetic.conf` entry, a reboot or `apfs.util -t`, and
+  probably a symbolic link whose real path differs from the one users type,
+  which the sandbox profile, `sv2 repair` and the session's working
+  directory all compare. Shorter paths were not worth that. Workspaces from
+  earlier builds are moved by hand (see "The workspace root" under
+  "Milestone 1").
 - **Ownership is recorded, not parsed.** A root-owned registry, keyed by host
   UID, lists each user's profiles. The helper reads the registry and never
   derives ownership from a name. This replaces v1's collision guard, its
@@ -173,7 +231,30 @@ separates user from profile unambiguously.
 - New files and directories get access through inherited ACL entries, as
   today.
 - Files moved in from elsewhere keep their old permissions. The host user owns
-  them and can fix them without root: `sv2 share PATH` does this explicitly.
+  them and can fix them without root: `sv2 repair PATH` does this explicitly.
+- `sv2 repair PATH` only fixes ownership and permissions, and only inside
+  the caller's own workspace tree; any other path is an error. It runs as the
+  host user, never as root. Because it is a host operation on
+  sandbox-writable paths, it is an exception to the rule and is held to §1:
+  it walks the tree without following links, changes each entry through an
+  open file descriptor rather than by path, and skips (with a warning, and a
+  failing exit status) a file that has more than one hard link and anything
+  that belongs to another account. See "`sv2 repair`" under "Milestone 1" for
+  what was built.
+- **Decided (2026-11-27):** what the sandbox account owns and the host user
+  has no way into is handed back by the sandbox account, not taken by root.
+  The account adds an ACL entry for the host user to what it owns; `sv2
+  repair` asks for that in a session, and `profile remove` does it before
+  the account is deleted. This is §1's rule 2: the write happens on the
+  sandbox's side of the boundary.
+- **Decided (2026-11-25):** the same pass runs by itself, as the host user,
+  after `sv2 profile add` and `sv2 profile remove`, and it makes the host
+  user the owner of what the sandbox account owned. A kept workspace is the
+  host user's own files after a remove, and works with the new account after
+  an add.
+- `sv2 profile remove` never deletes the user's files. The helper removes the
+  workspace directory only if it is empty. Otherwise it leaves it, says so,
+  and a later `profile add` of the same name reuses it.
 - Nothing managed by sandvault lives in the workspace. v1's `_sandvault/`
   directory (setup scripts, state files, scratch space) is gone (finding 1).
   State that grants access lives in host-only or root-only locations (§2).
@@ -181,28 +262,39 @@ separates user from profile unambiguously.
 ## Sandbox profile
 
 - Each sandvault profile has its own `sandbox-exec` profile file, so profiles
-  can later be given different capabilities, as defined by the host user.
+  can be given different rules by the host user. What the host user chooses
+  is a policy; see `docs/SANDVAULT2-POLICIES.md`, which is decided and not
+  yet built.
 - The files are root-owned and live outside the workspace and the sandbox
   home, for example `/Library/Application Support/sandvault2/profiles/<user>/<profile>.sb`.
   The helper writes one on `profile-add` and deletes it on `profile-remove`.
   The sandbox user cannot edit its own file.
 - Root never opens a host-owned file, so `sv2` sends the host user's
-  capability choices to the helper on stdin. The helper validates them and
-  renders the file from the embedded base profile. The input format is an open
-  item.
+  policy to the helper on stdin. The helper validates it and renders the
+  file from the policies embedded in it.
+- **Decided:** the first milestone ported v1's profile unchanged
+  (allow-default with its deny list). It is default deny since 2026-11-26;
+  see "Default deny" under "Milestone 1".
 - Default deny (finding 11). Each allow rule is written in the source next to
   the tool that needs it and the symptom without it, measured as the sandbox
   user under the rendered profile (§3). The probes are kept as tests.
 - The Mach service allow list stays short, and each entry is re-measured in
   the sandbox user's own domain.
-- A stated position on localhost networking. At minimum, deny local port 22.
+- **Decided (2026-11-27), localhost networking:** a session may connect to
+  every port of this Mac except TCP port 22, at any of the Mac's addresses.
+  The rest of localhost stays open because a session's own servers are
+  there, on ports chosen when they start (a development server, the browser
+  of `--chrome` and `--lightpanda`), and a profile rule can name a port but
+  not who listens on it. What follows: a service of the host user, or of
+  another session, that listens on this Mac and asks for no credentials is
+  open to every sandbox. Besides 22, the ports this Mac's sshd is found
+  to listen on are closed too. See "Local port 22" under "Milestone 1".
 
 ## Closing other routes out of the sandbox
 
-The profile only confines processes that sandvault starts. Removing SSH mode
-does not close the SSH route: if Remote Login is on for all users, the sandbox
-user can connect to its own account, because `authorized_keys` is in its own
-writable home.
+The profile only confines processes that sandvault starts. If Remote Login is
+on for all users, the sandbox user can connect to its own account, because
+`authorized_keys` is in its own writable home.
 
 `sv2 install` therefore:
 
@@ -212,28 +304,43 @@ writable home.
 - gives sandbox accounts no usable password;
 - never adds them to `com.apple.access_ssh`.
 
-Other routes to audit before release: cron, `at`, launchd agents, Screen
-Sharing.
+This is built; see "SSH lockdown" under "Milestone 1".
 
 ## Command line
 
 ```
-sv2 install                       # needs sudo, once per machine
-sv2 uninstall                     # needs sudo
-sv2 build [OPTIONS]
-sv2 profile add NAME
+sv2 install                       # asks for sudo, once per machine
+sv2 uninstall                     # asks for sudo; refuses while profiles exist
+sv2 uninstall --all-profiles      # asks for sudo; removes every profile too
+sv2 user allow USER               # asks for sudo
+sv2 user deny USER                # asks for sudo
+sv2 profile add NAME              # [--policy POLICY] is not built
 sv2 profile remove NAME
 sv2 profile list
+sv2 profile set NAME --policy POLICY    # not built; see SANDVAULT2-POLICIES.md
+sv2 policy list                         # not built, nor the six below
+sv2 policy show NAME [--expanded]
+sv2 policy new NAME [--from POLICY]
+sv2 policy edit NAME
+sv2 policy check NAME
+sv2 policy rename OLD NEW
+sv2 policy remove NAME
 sv2 run [OPTIONS] NAME [ARGS...]
 sv2 [OPTIONS] NAME [ARGS...]      # shorthand for sv2 run
-sv2 share PATH
+sv2 repair PATH
 sv2 doctor
+sv2 agent new NAME [--from AGENT]
+sv2 deploy-key [--profile NAME] OWNER/REPO [--write]
+sv2 gh-token [--profile NAME] [login | status | logout]
 ```
 
+- `sv2 user allow USER` and `sv2 user deny USER` add a user to, or remove one
+  from, the `sv2-users` group named in the sudoers line. `sv2 install`
+  adds the admin who runs it.
 - Options come before `NAME`. Everything after `NAME` is passed to the agent
   unchanged; no `--` is needed.
 - `sv2 run` creates the `default` profile on first use.
-- `sv2 run --profile work claude` selects a profile.
+- `sv2 run --profile work claude` selects a profile; `-p` is the short form.
 - One uninstall path, which removes only what the
   registry lists (finding 17).
 
@@ -247,6 +354,23 @@ sv2 doctor
   user's agent cannot change what `sv2 install` or `sv2 uninstall` does.
 - A first argument that is neither a subcommand nor a known agent is an error
   ("unknown command or agent"). `sv2` never searches `PATH` for it.
+
+**Decided (2026-11-25):** names may be shortened. A subcommand, a verb after
+`user` or `profile`, and an agent name are each accepted as any prefix that
+fits exactly one name: `sv2 s` and `sv2 sh` are `sv2 shell`, and `sv2 p l` is
+`sv2 profile list`.
+
+- A whole name is always itself, even when a longer name starts with it.
+- A prefix that fits several names runs nothing, and the error lists them
+  (`sv2 r`: `run`, `repair`). The first word is matched against subcommands
+  and agents together, so a prefix shared by one of each is ambiguous too.
+  A subcommand or agent added later can therefore turn a prefix that worked
+  into an error, but never into a different command.
+- `uninstall` and `profile remove` delete things without asking, and must be
+  written in full: `sv2 un` and `sv2 profile r NAME` are refused.
+- After `run` or an option only an agent can follow, so only agent names are
+  matched there.
+- Options and profile names are not shortened.
 
 ## Agents
 
@@ -270,18 +394,22 @@ adding one definition; `sv2` does not change.
   names the Homebrew package that `sv2` installs as the host user, and
   Homebrew formulae run arbitrary code, so a definition the sandbox can edit
   gives the sandbox code execution as the host user. Before reading a
-  directory, `sv2` refuses it if it lies under the workspace root or if any
-  directory on its path is writable by anyone other than the host user and
-  root. Ownership alone is not enough, because the sandbox can move
-  host-owned directories into place. This applies to the development fallback
+  directory, `sv2` refuses it if it lies under a workspace or a sandbox home,
+  or if any directory on its path is writable by a sandbox account
+  (world-writable, or writable through a group or ACL entry that includes
+  one). A directory owned by another host user is accepted: for a non-admin
+  user the Homebrew prefix belongs to an admin, and that admin can already
+  replace `sv2` itself. Ownership alone is not enough inside the workspace,
+  because the sandbox can move host-owned directories into place. This applies to the development fallback
   too: a checkout inside the workspace is refused (finding 7). The rule covers
   the whole definition directory, including guest scripts, so there is one
   rule rather than one per file.
 - **Versioning:** each definition carries a schema version that `sv2` checks.
   `sv2 doctor` reports missing or incompatible built-ins.
 - **How they reach the sandbox:** `sv2` reads the definition, including its
-  guest scripts, as the host user and passes it to the session over a pipe.
-  Root never opens it, and the sandbox cannot edit it.
+  guest scripts, as the host user and passes it to the session on the
+  command line, as it does the guest launcher (see "Guest launcher" under
+  "Milestone 1"). Root never opens it, and the sandbox cannot edit it.
 - **Names** match `^[a-z0-9][a-z0-9-]*$` and are looked up only in the places
   above, never on `PATH`.
 - `shell` is a built-in definition, embedded in the binary (see above).
@@ -325,13 +453,14 @@ Example (values are illustrative):
 
 ```toml
 schema = 1
-binary = ["~/.local/bin/claude", "{brew}/bin/claude"]
 
 [install.host]          # data only; sv2 builds the argv
-brew = { formula = "claude-code" }
+brew = { cask = "claude-code" }
+binary = ["{brew}/bin/claude"]      # where that install leaves it
 
 [install.guest]
 script = "install.sh"
+binary = ["~/.local/bin/claude"]    # where that install leaves it
 
 [run]
 bypass_flag = "--dangerously-skip-permissions"
@@ -361,20 +490,25 @@ Why not the alternatives:
   to `--native`.
 - A native install runs the agent's own installer inside the sandbox, into the
   sandbox home.
-- A native binary already present in the sandbox home is preferred, so
-  `--native` is needed only the first time.
+- **Decided (2026-11-26):** the two installs are never mixed. Without
+  `--native` a run uses the host's install and nothing else; with it, the
+  sandbox's own and nothing else. (At first one list named both, and a
+  native copy, once present, was preferred from then on; which program ran
+  then depended on the order of the list and on what happened to be
+  installed.) Each install section of a definition has its own `binary`
+  list.
 
 ## Features removed
 
 | Removed | Reason | Replacement |
 |---|---|---|
-| SSH mode (`--ssh`, `authorized_keys.d`) | Findings 8, 9, 12; the account password; half the test matrix. Its one isolation benefit now applies to every session. | None |
+| SSH mode (`--ssh`, `authorized_keys.d`) | Findings 8, 9, 12; the account password; half the test matrix. Its one isolation benefit (own login context) now applies to every session. | None needed for tmux or screen: see "Terminal multiplexers". Inbound SSH from other machines (v1's `authorized_keys.d`) is out of scope for v2. |
 | `sv-clone` and the `/sv` skill | Findings 3, 4, 13, 16, 18: host git and host writes in the workspace | Deploy-key script, below |
 | `sv-agentsview-setup` | Finding 2; about 1,600 lines including vendored code | None |
 | `--no-sandbox` | The profile is mandatory | None |
 | Nested `sv` | Trusted an environment variable to detect nesting | None |
 | `SANDVAULT_ARGS` | Second argument parser with different quoting | Shell alias |
-| `uninstall --all`, `--fix-permissions` | Root passes over the workspace | `sv2 uninstall`, `sv2 share` |
+| `uninstall --all`, `--fix-permissions` | Root passes over the workspace | `sv2 uninstall`, `sv2 repair` |
 | Installing Homebrew via `curl \| bash` | Finding 19 | Require Homebrew or use `--native` |
 | Host-written files in the workspace | Findings 1, 15 | Embedded guest payload |
 
@@ -413,17 +547,27 @@ the top of this document, so it is opt-in and held to these requirements:
 - the bridge runs as the host user under `sv2`, never from the root helper;
 - the README states exactly what trust `--ios` grants.
 
+**Superseded on 2026-11-27.** The bridge was built to these requirements
+(TASK-0007) and met them. Building it led to the measurement of open item
+2: a simulator app is an unconfined process of whoever runs the simulator,
+so a bridge that installs the sandbox's app in the host user's simulator
+gives the sandbox code execution as the host user, whatever the bridge
+checks. The simulator now runs in the sandbox account instead and there is
+no bridge (TASK-0025); see "iOS simulator" under "Milestone 1".
+
 ## Installed artifacts and upgrades
 
 v2 installs four things as root: the helper, one sudoers line, the sshd
 drop-in, and the registry. The helper also writes one `sandbox-exec` profile
-file per sandvault profile. Each of these carries a version and has an upgrade
-path, and each is written to a temporary file, validated, then renamed into
-place (§2, §5). Upgrading the base profile means re-rendering every profile
+file per sandvault profile. Each of these carries a version (see "Artifact
+versions" under "Milestone 1") and has an upgrade path, and each is written
+to a temporary file, validated, then renamed into place (§2, §5). Upgrading the base profile means re-rendering every profile
 file listed in the registry.
 
-There are no generated root scripts (finding 10) and no per-launch setup. The
-guest side unpacks the embedded payload only when its version stamp changes.
+There are no generated root scripts (finding 10) and no per-launch setup as
+root. The guest side has no installed copy to upgrade: the launcher travels
+on the command line of every session (see "Guest launcher" under
+"Milestone 1").
 
 ## Tests
 
@@ -439,19 +583,1023 @@ guest side unpacks the embedded payload only when its version stamp changes.
 
 A checkout inside the workspace lets a sandboxed agent edit the source of the
 root helper (finding 7). A helper build must be reviewed, and built from a
-checkout the sandbox cannot write, before `sudo sv2 install`.
+checkout the sandbox cannot write, before `sv2 install`.
 
-## Open items
+Decisions this milestone made:
 
-1. **Quarantine.** v1 clears quarantine by running freshly installed agent
-   binaries as the host user. Find a way that does not execute them (remove
-   the attribute, or install without quarantine).
-2. **Simulator trust.** Confirm from the host side whether simulator apps run
-   unconfined as the host user, then document what `--ios` grants.
-3. **Daemon follow-up.** Scope and timing of the move from the sudoers helper
-   to a launchd daemon.
-4. **Per-profile capabilities.** The format the host user uses to define a
-   profile's capabilities: a fixed set of named capabilities the helper maps
-   to rules it already contains, or raw SBPL rules added to the base profile.
-   Named capabilities keep root's parser small and every rule reviewed. Raw
-   SBPL is more flexible, but the helper then has to parse and validate it.
+- **Helper modes.** See the sudoers line under "Privileged helper".
+- **Registry format (open item 6).** A line-oriented text file, documented at
+  the top of `crates/helper/src/registry.rs`. Each entry has a state:
+  `adding`, `active`, or `removing`. The state is written before the first
+  system change and every later step is idempotent, so a killed
+  `profile-add` or `profile-remove` is finished by running it again.
+  `next-id` only grows: an account ID is never reused, so files a removed
+  sandbox left in `/tmp` are never owned by a later sandbox. Reuse would go
+  wrong in two ways: a later sandbox, perhaps another user's, could read
+  what the earlier one left behind; and an earlier sandbox could leave files
+  for a later one to trust, such as a poisoned cache.
+  **Decided (2026-11-25):** `uninstall` therefore leaves the registry in
+  place, holding no profiles and the `next-id` it reached, without comment; a
+  later `install` carries on from it. IDs run from 600 to 2^31-1, the
+  largest value that is positive as a signed 32-bit number (the limit was
+  60000 at first, for no measured reason). There is no wraparound: if the
+  range were used up, `profile add` would fail with a message that says
+  why. Nothing reclaims IDs. An admin who accepts that old files may change hands
+  starts again at 600 by deleting the registry after `sv2 uninstall`.
+- **Launch (part of open item 5).** The helper takes no environment and no
+  path from its caller. A session gets a fixed environment (`HOME`, `USER`,
+  `LOGNAME`, `SHELL`, a system `PATH`, `TMPDIR`, `SV2_HOST_USER`,
+  `SV2_PROFILE`, `SV2_WORKSPACE`). Whatever else `sv2` wants (terminal
+  variables, the starting directory) it puts in the command line, as
+  `/usr/bin/env NAME=value ... /bin/zsh -c 'cd ...'`, which runs as the
+  sandbox user. The command must be an absolute path: it follows
+  `sandbox-exec -f FILE`, where a leading `-p` would replace the profile.
+- **Workspace access.** ACL entries name the sandbox user and the host user
+  directly, so the host user joins no group. The entry on the workspace
+  directory itself omits `delete`, `writesecurity` and `chown`: the sandbox
+  cannot remove, move, or re-permission the workspace. Inherited entries for
+  files omit `search` (the execute bit), as in v1.
+- **Sandbox home.** Mode 0700, owned by the sandbox user. On
+  `profile remove` the sandbox user empties it and root removes the empty
+  directory; root never walks it. macOS refuses that rmdir (EPERM) while the
+  account exists, and for a moment after its record is deleted: measured on
+  2026-11-25, 3 of 8 removals were refused and each succeeded a second
+  later. The helper retries a refused rmdir for up to 15 seconds. Why the
+  refusal outlasts the record, and whether it is the same privacy
+  permission as open item 10, is not known.
+- **Removal and launch.** `launch` holds the registry lock (shared) until its
+  process has become the sandbox user; `profile-remove` takes it exclusively
+  before it kills the account's processes.
+- **Terminal (open item 4).** A session does not share the host's terminal.
+  sudo runs the helper on a new pty and relays input, output and window size.
+  On a shared terminal the sandbox could queue keystrokes with `TIOCSTI` for
+  the host shell to run after the session ends; the integration suite plants
+  that attack, with a control that shows it works when the terminal is
+  shared. sudo 1.9.14 and later do this by default; the sudoers file says
+  `Defaults!<helper> use_pty` so it does not depend on the sudo version or on
+  another sudoers file turning the default off. tmux needs nothing further:
+  the base profile allows writes under `/private/tmp`, where its socket
+  directory is.
+- **`sv2 repair` (implemented after the rest of the milestone).** It lives in
+  `crates/cli/src/repair.rs`. It uses the helper for one thing only, to run
+  a command as the sandbox account (see *Hand-back* below).
+  - *Ownership.* An entry owned by this profile's sandbox account, or by a
+    UID with no account (a removed sandbox), becomes the host user's. This
+    needs no root: the inherited ACL entry gives the host user the right to
+    take ownership (measured). Set-user-ID and set-group-ID bits are cleared
+    before and after the change. Afterwards the sandbox cannot set them: the
+    kernel lets only a file's owner do that, whatever the ACL says
+    (measured). The sandbox can still `chmod +x` such a file through its ACL
+    entry. Entries of any other existing account are skipped. Other mode
+    bits and the group are not changed.
+  - *ACL.* Each file and directory gets the ACL the kernel would have given
+    it by inheritance, replacing whatever ACL it had. That ACL is computed
+    from the workspace directory's own, which the helper writes and the
+    sandbox cannot change, so the rights are listed in one place
+    (`ops::workspace_aces`). The workspace directory itself is not changed.
+    Whether an entry already has that ACL is decided on the ACL's binary
+    form (`acl_copy_ext_native`), not its text: as text every entry carries
+    an account name, which the system looks up for each ACL it prints.
+  - *When it runs.* `sv2 repair PATH` does both steps under PATH. `sv2`
+    also runs it over the whole workspace after the helper returns from
+    `profile-add` (both steps) and from `profile-remove` (ownership only: the
+    ACLs then name an account that is gone and a UID that is never used
+    again). The first-use creation of `default` counts as an add. A problem
+    in the automatic pass is reported and does not fail the add or remove.
+  - *PATH.* Checked as text first (inside `sv2/<caller>/<profile>`, no `..`),
+    then opened one component at a time without following links. A link
+    named by PATH or on the way to it is an error; links found during the
+    walk are left alone.
+  - *Hand-back (2026-11-27).* An entry the sandbox account owns that has no
+    ACL is closed to the host user: no opening it, no taking it over, and a
+    directory in that state cannot be emptied. It needs no hostile sandbox.
+    A file an agent moves in from the sandbox home arrives like that
+    (measured: owned by the account, no ACL, `Permission denied` for the
+    host user). Only the owner can change it, so the owner does. The
+    command is `find` over the workspace, for entries of the account's UID:
+    `chmod +a` of an entry that lets the host user open the file or
+    directory, take ownership and write its ACL, and `chmod u+rx` first on
+    a directory the account closed to itself. It is in
+    `sv2_common::hand_back_argv`. Links are neither followed nor changed,
+    files and directories get different rights, and none is `search` on a
+    file.
+    - `sv2 repair`, and the automatic pass after `profile add`: when the
+      walk skips entries of the sandbox account that refused the host user,
+      `sv2` runs the command through `launch` (as the sandbox user, under
+      the profile) and walks once more. Nothing is launched when there is
+      after the account's processes are killed and before the account is
+      deleted (helper version 7). `sv2`'s ownership pass afterwards takes
+      the entries over. After the account is gone nobody but root could.
+    - What the command adds is an entry for the host user on things the
+      account owns, which the account could add itself. The whole
+      workspace is covered, not only PATH: the helper takes no path.
+  - *Limits.* What its owner cannot change either is still reported and
+    left: a file with the immutable flag (measured), and presumably one
+    under a deny entry (not tried). Files that belong to an account
+    removed before helper version 7 are in that state for good and need
+    `sudo rm`.
+  - *Cost (measured 2026-11-27, 202,021 entries, development Mac).* With
+    every entry already correct the walk took 22 seconds while ACLs were
+    compared as text, and 5 to 6 seconds compared in binary form. With
+    every ACL missing and written, 7 to 8 seconds. `find` alone over the
+    tree took 0.4 seconds. The hand-back command was not timed on a tree
+    that size.
+- **SSH lockdown (implemented after the rest of the milestone).**
+  - *Group.* `install` creates `sv2-sandboxes` (RealName
+    `sandvault2 sandbox accounts`; a group of that name it did not create is
+    refused). Its ID comes from the registry's allocator, so it is never an
+    ID a removed sandbox had. `profile-add` puts the account in the group
+    right after creating it and fails if the group is missing;
+    `profile-remove` takes the account out before deleting it, because the
+    group lists members by name and a later profile gets the same name.
+    Sessions carry the group. It owns no file and appears in no ACL.
+  - *Drop-in.* `/etc/ssh/sshd_config.d/000-sandvault2.conf`, root-owned,
+    mode 0644. It holds a global `DenyGroups sv2-sandboxes` and a
+    `Match Group sv2-sandboxes` block that turns off public-key, password,
+    keyboard-interactive and host-based authentication, sets
+    `AuthorizedKeysFile none`, turns off forwarding and the terminal, and
+    forces `/usr/bin/false`. Measured against real logins with a private
+    sshd (OpenSSH 10.5, macOS 26.7): a key that is accepted without the file
+    is refused with it, refused with `DenyGroups` alone, and runs no command
+    with `ForceCommand` alone. The name sorts first because the first `Match`
+    block to set a keyword wins. The block ends where the file ends
+    (measured, and a unit test), so macOS's `100-macos.conf` after it is
+    still global.
+  - *Validation.* The file is checked with `sshd -G -f` before it is renamed
+    into place. `-G` needs no host keys; `sshd -t` fails on a Mac that never
+    had Remote Login on, because it has none. `-G` is a recent option
+    (measured on OpenSSH 10.5 only); on an sshd without it `install` fails
+    with sshd's usage message. The
+    temp file's name starts with a dot, which the `Include` glob skips. After
+    the rename `install` runs `sshd -G` on the system configuration and fails
+    unless it parses and lists the group under `DenyGroups`: a main
+    configuration without the `Include` line, or one that was already
+    broken, stops the install. The drop-in is left in place in that case.
+  - *Launch.* `launch` refuses to start a session when the drop-in is
+    missing or stale (see "Artifact versions" below).
+  - *Upgrade.* `install` adds every `active` account in the registry to the
+    group. (The application version went to 0.1.1 for this, which was the
+    only way then to make an old install notice.)
+  - *Uninstall* removes the drop-in and the group after the accounts.
+  - *Limits.* The helper does not check that sshd sees an account as a
+    member (the integration suite does, from the host side, with
+    `sshd -T -C user=ACCOUNT`); nothing re-checks the drop-in after install
+    except its version line at launch; and an admin's own `Match` block that
+    sets `DenyGroups` replaces the global list for the logins it matches.
+    `sv2 doctor` asks sshd about each of the caller's accounts.
+- **Artifact versions (implemented after the rest of the milestone).** What
+  `sv2 install` puts on a machine changes only when `sv2 install` is run
+  again, with sudo. Whether that is needed no longer follows from the
+  application version.
+  - *Numbers.* `crates/common/src/lib.rs` has one for the helper itself
+    (`HELPER_VERSION`) and one for each file the helper writes
+    (`SUDOERS_VERSION`, `SSHD_DROPIN_VERSION`, `SANDBOX_PROFILE_VERSION`).
+    Bumping any of them makes every installed machine ask for
+    `sv2 install`; a release that bumps none needs no reinstall.
+  - *Comparison.* `sv2` passes all four as one word
+    (`helper=5,sudoers=2,sshd=1,profile=3`) where it used to pass the
+    application version, and the helper refuses a word that is not its own,
+    with exit status 3. `sv2 --version` prints the word on a second line.
+    The numbers reach a machine only inside a new helper, because the
+    helper holds the text of every file, so one comparison covers them all.
+  - *In the files.* Each file carries its number in a comment line
+    (`# sv2-sudoers-version: N`, `# sv2-sshd-version: N`,
+    `;; sv2-profile-version: N`). Before `launch` and `profile-add` the
+    helper reads the sudoers file and the drop-in back, and `launch` also
+    reads the profile's sandbox file; a missing file, another number, or no
+    number is refused with the command that fixes it (`sv2 install`, or
+    `sv2 profile add NAME` for the sandbox file). This catches an install
+    that replaced the helper and then stopped. `profile-remove` and
+    `profile-list` do not check, so a stale machine can still be cleaned up.
+  - *Forgetting to bump.* A unit test pins the text of each generated file
+    to its number and fails when one changes without the other. Nothing
+    does that for `HELPER_VERSION`: a change to the helper's code that
+    installed machines need must be bumped by hand.
+  - *Not covered.* The registry has its own format number in its header.
+    The two groups and the directories have none; `install` checks and
+    repairs them each time it runs.
+- **Agent definitions (2026-11-26).** Built as designed under "Agents",
+  in `crates/cli/src/agent.rs`, with one built-in, `sv2/agents/claude`.
+  What the build decided or changed:
+  - *Schema 1* has `install.host.brew` (one `formula` or one `cask`; Claude
+    Code is a cask), `install.host.binary`, `install.guest.script`,
+    `install.guest.binary`, and under `run`:
+    `bypass_flag`, `no_inject`, `inject_last` (subcommands that take the
+    flag after their arguments: pi), `env` (variables set for the agent:
+    opencode is told by a variable what others are told by a flag) and
+    `grants` (a few words on what the flag and variables allow, which the
+    banner repeats; a unit test requires it of every built-in that has
+    either). The last three came with the definitions that needed them,
+    before any release, so the schema number did not change; nor did it
+    for `system_prompt` and `wrapper`, added on 2026-11-27 (see below). A
+    key sv2 does not know is an error, so adding one after a release is a
+    schema change and not a silent difference between versions.
+  - *The wrapper (2026-11-27).* `run.wrapper` names a `.sh` file in the
+    definition's directory, read and limited like `install.sh` and
+    covered by the same rule on who may write the directory. It was added
+    to schema 1 without a new number, as `env` was: nothing has been
+    released. The launcher runs it with `/bin/bash -c`, in the login
+    shell's environment, as the sandbox user under the sandbox profile,
+    with the program sv2 found as `$1` and the arguments (the flag already
+    placed) after it; it normally ends with `exec "$@"`. It grants nothing
+    a guest install script does not. The banner says when a wrapper
+    starts the agent, since it decides what runs. The built-ins' scripts,
+    wrappers included, are linted by `scripts/tests-sv2`; a user's own
+    are not.
+  - *muse and herdr (2026-11-27)* are built-ins, taken from v1's wrappers
+    and install steps. muse is data only (`--yolo`, and its text for the
+    system prompt as a setting: see "Text as a setting"). herdr has no
+    flag and no text for a system prompt (it is a multiplexer, not an
+    agent), and a wrapper that refuses a session with a browser: its
+    server outlives the session, as a tmux server does (see "Terminal
+    multiplexers"), and its panes would keep `SV_BROWSER_ENDPOINT` after the browser has
+    stopped. v1 refused `--chrome` for this; in sv2 Lightpanda is stopped
+    with the session too, so both are refused. v1's other refusal, of
+    `--no-sandbox`, has nothing to apply to. Neither has been run under
+    sv2: they need a Mac where sv2 is installed. To measure there: that
+    herdr's server starts and is found again by a second `sv2 herdr` (its
+    sockets are in `~/.config/herdr`, in the home the profile lets the
+    session write, and the profile allows `network*`); and that the
+    server, which moves itself to the per-user Mach bootstrap
+    (`bootstrap_look_up_per_user` and `task_set_bootstrap_port` are in
+    herdr 0.9.5), ends up in the sandbox user's domain and not the host
+    user's (`launchctl manageruid` in a pane equals `id -u`). The profile
+    is inherited either way and still limits which services it can look
+    up.
+  - *codex, gemini, opencode and pi (checked 2026-11-27)* were written
+    from v1. They were checked against the programs themselves, installed
+    with npm into scratch in a v1 sandbox (codex 0.172.0, gemini 0.71.1,
+    opencode 1.19.6, pi 1.7.0), and against Homebrew's API and the
+    opencode tap. No definition was found wrong. Each bypass flag is in
+    the program's `--help`; each `no_inject` and `inject_last` still
+    names exactly the subcommands that need it (codex: none, since all 28
+    of its subcommands take the flag in front); opencode still reads
+    `OPENCODE_PERMISSION`. Each was then run from `sv2` on the
+    development Mac, with Homebrew and with `--native`, and all worked.
+    What came out of it:
+    - Homebrew deprecated `gemini-cli` on 2026-06-18, so gemini's
+      definition has no `[install.host]` any more and is installed with
+      npm in the sandbox home (see "Two installs, never mixed").
+    - opencode 2 (homebrew-core's `opencode`, the tap's `opencode-v2`)
+      does not read `OPENCODE_PERMISSION` and has `--auto` instead. The
+      tap's `opencode` and opencode's own installer still give opencode 1.
+    - Homebrew now requires trust for a tap's formula. `brew install
+      anomalyco/tap/opencode`, given the full name, trusts the formula
+      itself (`brew info` with the same name refuses it), so sv2 needs
+      no change.
+    Not run, for any agent: a Mac without Homebrew or with a prefix
+    the user cannot write, and a user definition in
+    `~/.config/sandvault2/agents` on a real machine.
+  - *agy (2026-11-28)*, the Antigravity CLI, is Google's CLI after
+    gemini's and the one that offers Gemini 4 Neon. Its definition was
+    written against agy 1.5.18, the build of Homebrew's
+    `antigravity-cli` cask (SHA-256 checked against the cask's), run
+    with a scratch `HOME`. No account was signed in, and it has not been
+    run from `sv2`. The definition names no model: agy makes Neon the
+    default for a plan that has it, and `--model` for one without it
+    would fail.
+    - `--dangerously-skip-permissions` is the flag; agy's own sandbox
+      (`--sandbox`) is off unless asked for. All 14 subcommands take the
+      flag in front (each `--help` is the same, `acp`'s shows it applied,
+      and `agy --dangerously-skip-permissions mcp list` lists servers), so
+      `no_inject` is empty.
+    - No `system_prompt`. agy has no option for the text, and its
+      `--settings` refuses a key it does not know; every name tried for
+      the text was refused. It reads `GEMINI.md` and `AGENTS.md` instead.
+    - Google's installer ends with `agy install`, which appends a `PATH`
+      line to `~/.zshrc` and `~/.zprofile` even when `~/.local/bin` is on
+      `PATH`, and the installer cannot pass on its `--skip-path`. So
+      `install.sh` runs it with `HOME` set to scratch (where those edits
+      and its staging land, and are removed) and `--dir ~/.local/bin`.
+      Run with umask 077 and GNU tools first on `PATH`, it installed
+      1.5.19 there and left both files unchanged.
+  - *What a definition may say* is checked when it is read: binaries start
+    with `~/`, `{brew}/` or `/` and are plain paths; a package is a plain
+    name, or `user/repository/name` from a tap (opencode); a variable is
+    upper case and none of those sv2 sets or forwards; the flag is one long
+    option; the script is a `.sh`
+    file in the definition's directory, at most 64 KB.
+  - *Who can write it.* Before a definition is read its resolved directory
+    is refused if it is in a workspace or a sandbox home, or if any
+    directory on the way to it, or any file in it, is writable by everyone
+    (sticky or not, so `/tmp` and `/Users/Shared` are out), belongs to a
+    sandbox account, is writable by a sandbox group, or has an access list
+    that lets a sandbox account, a sandbox group or `everyone` write. A
+    symbolic link in the directory is refused too. Sandbox accounts and
+    groups are recognised by name, v2's (`sv2-`) and v1's (`sandvault-`):
+    a v1 sandbox is as hostile as a v2 one. A checkout in a v1 workspace is
+    therefore refused as a source of built-ins; the integration suite runs
+    agents from a copy of the build in host-only scratch, and
+    `scripts/sv2-dev-agents` copies the checkout's definitions into
+    `~/.config/sandvault2/agents` for a development build to use.
+  - *Two installs, never mixed (2026-11-26).* `[install.host]` and
+    `[install.guest]` each have a `binary` list: paths under `{brew}/` or
+    `/` for the first, under `~/` for the second, and a path of the wrong
+    kind is refused. A definition needs at least one of the sections.
+    Without `--native`, `sv2` looks only at the host's paths, which it can
+    see, and runs `brew install --formula|--cask NAME` (as the host user,
+    from `/`, shown first) when none is a program. With `--native`, only
+    the sandbox's paths count, and the launcher runs the definition's
+    script when none exists. A definition with only `[install.guest]`
+    (gemini, since 2026-11-27) is run as if `--native` were given: there
+    is no other install to mix it with. `sv2` no longer asks the sandbox what it has:
+    the launcher's `probe` and its extra launch are gone.
+  - *The flag.* `sv2` puts `bypass_flag` before the user's arguments unless
+    the first is listed in `no_inject`; the banner says which happened.
+    Claude Code 2.1.326 knows its commands for background sessions
+    (`attach`, `logs`, `respawn`, `rm`, `stop`, `kill`) only as the first
+    word: with any option in front, `claude --model x stop ID` starts a
+    chat whose first message is "stop ID". They are in its `no_inject`.
+    Its other subcommands take the flag in front. (Until 2026-11-27 the
+    list was empty, on a check that had missed those six.)
+  - *Text for the system prompt (2026-11-27).*
+    `system_prompt = { flag = "--append-system-prompt" }` names the long
+    option whose value the agent adds to its system prompt. When `sv2` has
+    text for a session it puts the flag and the text, as one argument,
+    after the bypass flag and before the user's arguments. A first
+    argument listed in `no_inject` or in `inject_last` gets neither: those
+    lists name commands that manage the program, and a subcommand that
+    takes the bypass flag only after its arguments would not know this one
+    in front of them. With no text, or no key, the command line is what it
+    was. The value is a table so that another way of giving text (codex
+    reads a file named in its configuration, gemini a directory) is a new
+    key in it. The first text is the browser's ("Telling the agent" under
+    "Browsers"); a session without a browser option has none, and its
+    command line is what it was. Unit tests cover the argument vector, and
+    a text of several lines through the real launcher and login shell,
+    run as the current user.
+    Of the built-ins `claude` and `pi` have the key. Measured against
+    Claude Code 2.1.326: every subcommand not in `no_inject` prints the
+    same `--help` with both flags and a two-line text in front as without.
+    Measured against pi 1.6.1: `pi --approve --append-system-prompt TEXT`
+    is accepted with a two-line text, where a misspelt option is reported
+    as "Unknown option"; with the flag in front each of pi's eight
+    subcommands prints the main help in place of its own, and all eight
+    are in `no_inject` or `inject_last`, so none gets it. pi reads a value
+    that names an existing file as that file's contents. pi had no
+    provider signed in, so no text was seen to reach a model. `codex`,
+    `gemini` and `opencode` take text another way than a flag.
+  - *Text as a setting (2026-11-27).* muse 1.4.25 has no option for the
+    text; it takes it as a setting, `--config run.system_prompt_append=V`
+    with V a JSON value. A definition says so with
+    `system_prompt = { config = { flag = "--config", key = "KEY" } }`, and
+    `sv2` passes the option and `KEY="TEXT"` as two arguments, the text
+    as a JSON string with every control character escaped (so also a TOML
+    basic string, which codex's `--config` would read). A table holds
+    either `flag` or `config`, never both; both name a long option, not the
+    bypass flag. Measured against muse 1.4.25: the key with a value of two
+    lines, quotes, `${...}` and `\u` escapes is accepted, and is not
+    substituted as a secret; a misspelt key is refused ("unknown key: no
+    such setting"), and so is a value that is not JSON. Its echo provider
+    refuses a run that has the setting ("provider does not support base
+    instructions"), which shows the text goes to the system prompt; no
+    provider was signed in, so no text was seen to reach a model, and a
+    provider other than Meta's may refuse the run in the same way. Found
+    on the way: muse knows a subcommand only as the first word, and
+    refuses any option in front of one, so until then `sv2 muse exec` and
+    every other subcommand failed with `--yolo` in front (v1 had the same
+    fault). `exec`, `resume` and `attach` take `--yolo` after their
+    arguments and are in `inject_last`; the other 21 refuse it on either
+    side and are in `no_inject`. None of them gets the text. herdr is a
+    multiplexer, has no system prompt, and has no key: the agents in its
+    panes get their own text.
+  - *The launcher* gets the agent as arguments: name, whether to install,
+    the script's text, the wrapper's text (empty for none), a counted list
+    of paths, then the agent's arguments.
+  - *Measured on 2026-11-26:* Homebrew's `claude` runs in a session;
+    `--native claude` installed and ran 2.1.332 in a throwaway profile.
+    (The next run without the option used that copy, as the first design
+    had it; it would now use Homebrew's.)
+- **Quarantine (2026-11-26; open item 1).** Homebrew marks what a cask
+  downloads with `com.apple.quarantine`, and Gatekeeper judges such a
+  program when it starts. v1 ran each freshly installed program once as the
+  host user to get past that.
+  - *Measured* on macOS 26.7, in a session, with fresh copies of programs
+    and the attribute set by hand to what Homebrew writes (`0181;...`):
+    Claude Code, which Apple has notarized, starts, on its first run and
+    with the attribute untouched afterwards. A program that is not
+    notarized is killed as it starts (exit status 137; `syspolicyd` logs
+    "Terminating process due to Gatekeeper rejection") unless the
+    attribute's flags carry `0x40`, approved by the user, or the attribute
+    is absent. The flags `0001`, `0081`, `0101`, `0181`, `0201` and `0281`
+    were all killed; `0041` ran. Running the program on the host first did
+    not help, and did not change the attribute.
+  - *Decided.* sv2 does nothing for a notarized program, because nothing is
+    needed. For one that is not, it does not run it on the host and does not
+    remove the attribute: that is Gatekeeper's verdict on something
+    downloaded, and overriding it is the user's decision. What sv2 does is
+    say so at the one moment it knows the program is new, right after its
+    own `brew install`: that macOS will stop the agent, why, and the
+    `xattr -d` command that approves it.
+  - *How it knows.* The attribute is read with `getxattr`; notarization
+    with `codesign --verify -R=notarized`, which reads the signature and
+    runs nothing (0.2 s for Claude Code's 200 MB, which is why it is not
+    done on every launch).
+  - *Limits.* A program that was already installed and is not approved
+    gets no such message; it is killed with "Killed: 9" and nothing else.
+    `sv2 doctor` checks every definition's program and says so. The
+    rule is measured on one macOS version with Gatekeeper on.
+- **Guest launcher (2026-11-25; most of open item 5).** What a session needs
+  done before its program starts is done by `sv2/guest/launch.sh`, a bash
+  script run as the sandbox user under the sandbox profile.
+  - *How it gets there.* Its text is compiled into `sv2` and passed on the
+    command line: `/bin/bash -c TEXT sv2-launch DIR KIND ARGS...`. There is
+    no payload unpacked into the sandbox home and so no version stamp: every
+    session runs the launcher of the `sv2` that started it, and one session
+    cannot change it for the next. The design first had an unpacked payload;
+    sudo passes only standard input, output and error, and standard input
+    has to stay the terminal. The cost: sudo logs the command line, so the
+    script (under 4 KB; a unit test caps it at 16) is in the log once per
+    session. Nothing secret may ever go this way (§2).
+  - *What it does.* Sets `PATH` (the account's `~/.local/bin` and `~/bin`,
+    then Homebrew, then the system), writes the startup files below, changes
+    to DIR, and starts the program: for KIND `shell` a login zsh, or ARGS as
+    a command in a login zsh's environment. ARGS stay positional parameters
+    from `sv2` to the program and are never parsed as shell text.
+  - *Startup files.* A login zsh runs `/etc/zprofile`, whose `path_helper`
+    puts the system directories first again, so the order has to be restored
+    from a file zsh reads later. The launcher writes `~/.zprofile` (Homebrew
+    and the bin directories) and an empty `~/.zshrc`, each only when nothing
+    has that name. From then on the file is the user's: `sv2` never rewrites
+    it, so a later change to the text does not reach an existing home.
+- **Holding the lock (2026-11-25).** The registry lock is shared by every
+  user, and the caller controls a good deal about the helper that holds it.
+  Three things keep one caller from making everyone else wait:
+  - *Output.* Nothing is written to standard output while a verb runs;
+    lines are queued and written after the lock is released. The caller
+    chooses what standard output is, and a pipe that is already full blocks
+    the writer for as long as the caller likes. Measured against the helper
+    before this: `profile-list` into a full pipe blocked with the lock held,
+    and another command waited behind it. The integration suite plants this.
+  - *Suspension.* The helper ignores the terminal's stop signals (`^Z`, and
+    background reads and writes). The launch restores them just before the
+    session starts, or `^Z` would do nothing inside it. SIGSTOP cannot be
+    ignored, but only root can send it to the helper.
+  - *Waiting.* A verb waits at most 30 seconds for the lock, says after 3
+    what it is waiting for, and then fails naming the holder (its PID, user
+    and verb, which an exclusive holder writes into the lock file). This is
+    also what a caller sees while another user's `profile remove` sits
+    behind the privacy prompt of open item 10.
+- **Killing an account's processes (2026-11-25).** `profile remove` signals
+  every process of the account from a child that has become the account
+  (`kill(-1, ...)`: the kernel does the matching).
+  - A pass of SIGKILL reaches what exists when it starts. Measured: against
+    400 processes that fork and exit without pause, 20 passes a tenth of a
+    second apart left 391 and the removal failed; against 80 it succeeded.
+  - So the child sends SIGSTOP first, 16 times, and SIGKILL after. A stopped
+    process cannot fork and frees no process slot. Measured: one pass of
+    SIGSTOP stopped all of a storm of 73.
+  - On macOS `kill(-1, sig)` signals the caller too (measured). The child is
+    stopped by its own SIGSTOP; the helper, as root, continues it, a bounded
+    number of times, so an account that stops the child itself cannot keep
+    the helper waiting.
+  - The helper repeats the whole thing until no process is left, for at
+    most 10 seconds; then the removal fails and can be run again.
+- **The workspace root (2026-11-27, helper version 9, profile version 8).**
+  Until then workspaces were in `/Users/Shared/sv2`. `/Users/Shared` is
+  writable by everyone, so another user could create `sv2` there first:
+  `install` replaced an empty directory or a link and refused anything else,
+  and a user who kept a directory with a file in it there blocked `install`
+  for good. A per-user name (`sv2-<user>`) would only have narrowed that to
+  one user. The root is now `/Users/sv2`, and the "taken name" handling is
+  gone: only root can create a name in `/Users`, so `install` accepts a
+  root-owned directory there and refuses anything else.
+  - *The name `sv2`.* What is left is an account named `sv2`, whose home
+    folder would be the root. Making one takes an administrator, so it is a
+    mistake, not an attack; but System Settings offers a folder that is
+    already there to the new account, and accepting may give it every
+    workspace. So `install` creates a hidden account `sv2` first: no usable
+    password, shell `/usr/bin/false`, home `/var/empty`, primary group
+    `nobody`, and an ID from the registry, like the sandbox group's. Its
+    `RealName`, `sandvault2 reserved name`, marks it as sandvault2's, and is
+    written right after the record, so a killed install leaves a record with
+    the mark or with no attributes at all; both are completed. An account
+    named `sv2` that is anything else stops `install`, which names it.
+  - `uninstall` deletes the account only once `/Users/sv2` is gone; while
+    workspaces with files keep the directory, the account stays and
+    `uninstall` says so. `sv2 user allow sv2` is refused.
+  - The sandbox profile no longer re-allows reading the `/Users/Shared`
+    entry: nothing a session reaches is there now. The probe "read inside
+    another home" now covers `/Users/Shared` and skips `/Users/sv2`, whose
+    listing is user names, not anybody's files.
+  - *Upgrade.* sv2 has no release, so nothing moves workspaces made by an
+    earlier build. On such a Mac, run `sudo mv /Users/Shared/sv2 /Users/sv2`
+    before installing this one: the directories stay root's, and their
+    ACLs name accounts, not paths.
+  - Verified 2026-11-27 on the development Mac: `scripts/tests-sv2`,
+    `tests/root-checks` (with the section "the name sv2"),
+    `tests/integration` and `tests/mutation-checks` passed. Not known:
+    whether System Settings refuses a name taken by a hidden account (it
+    should; `sysadminctl` and `dscl` see the record).
+- **Repository credentials (2026-11-26).** Built as decided under
+  "Repository credentials", in `crates/cli/src/credentials.rs`.
+  - *`sv2 deploy-key OWNER/REPO [--write]`.* The sandbox user makes an
+    ed25519 key in its home (`guest/deploy-key.sh`, passed on the command
+    line like the launcher) and prints the public key. `sv2` accepts that
+    answer only if it is exactly one ed25519 public key on one line, drops
+    its comment, and writes its own copy to
+    `~/.local/state/sandvault2/deploy-keys/PROFILE/`. It then prints
+    `gh repo deploy-key add FILE --repo OWNER/REPO --title ...`, with
+    `--allow-write` only when `--write` was given, for the user to run. The
+    repository is the one the user typed; the file is one the sandbox
+    cannot write (§1 rule 6). `sv2` adds nothing to GitHub itself.
+  - *In the sandbox,* everything is in `~/.ssh/sv2-deploy-keys/`: the key
+    pairs, GitHub's ed25519 host key, pinned (an agent cannot answer ssh's
+    question, and should not accept whatever answers), and an `ssh` that
+    chooses the key (`guest/git-ssh.sh`). git tells ssh the exact
+    repository; that program offers the repository's own key and no other,
+    and is plain ssh for everything else. The guest launcher sets
+    `GIT_SSH_COMMAND` to it when it exists. Nothing is written to
+    `~/.gitconfig` or `~/.ssh/config`, which are the user's and which a
+    later feature will copy in from the host. `docs/DEPLOY-KEYS.md`
+    describes all of it for a user.
+  - *Dropped on the way:* `url.insteadOf` rules to an ssh alias. They match
+    the start of an address, so a key for `acme/api` caught `acme/api-docs`
+    too, and they lived in the two files above.
+  - *`sv2 gh-token [login|status|logout]`* is v1's `sv-gh-token`: it opens
+    GitHub's fine-grained token form filled in with read-only permissions,
+    tells the user to choose "Only select repositories" and names the
+    repository of the directory it was run in (the form cannot be given
+    one; the name is read from the checkout's git config without running
+    git, since a sandbox may write there), reads the token without echo (or from a pipe), refuses classic and app
+    tokens, and hands it to the sandbox's `gh auth login --with-token` on
+    standard input, never on a command line.
+  - `profile remove` forgets the host's copies of that profile's keys.
+  - *Measured:* with a key that GitHub does not know, in a session:
+    git reached GitHub through the key ("using the deploy key", then
+    "Permission denied (publickey)"), and a public repository of the same
+    owner still cloned over `https://`.
+  - *Measured with a real key (2026-11-27),* in a throwaway profile, against
+    two private repositories made for it, `sv2-deploy-key-test` and
+    `sv2-deploy-key-test-docs`. With the printed command run as it stands
+    (`--write`): clone and push succeeded, and so did an address in other
+    capitals without `.git`. The same key added again read-only: clone
+    succeeded, and push was refused ("marked as read only"). The key
+    deleted on GitHub: "Permission denied (publickey)". The second
+    repository, which had no key, got plain ssh ("Host key verification
+    failed", no "using the deploy key" line); the first one's `https://`
+    address asked for a user name; a public repository still read over
+    `https://`. All as `docs/DEPLOY-KEYS.md` says.
+  - *Measured with a real token (2026-11-27),* given to the same profile
+    with `sv2 gh-token login`: in a session `gh api user` named the
+    account, a private repository was read, and making an issue in it was
+    refused ("Resource not accessible by personal access token", 403).
+- **Browsers (2026-11-27).** `sv2 --lightpanda AGENT` and
+  `sv2 --chrome AGENT` start a headless browser in the sandbox for the
+  session, as v1's options of the same names do. One or the other.
+  - *Who starts it.* The guest launcher, as the sandbox user under the
+    sandbox profile (KIND `browser NAME PROGRAM`, in front of the
+    session's own kind). It waits up to 15 seconds for the browser to say
+    where it listens, on a port of the browser's choosing on localhost,
+    and sets `SV_BROWSER_ENDPOINT` (v1's name, so what was written for v1
+    finds it). A process of its own watches the session's process and
+    stops the browser and removes its directory when that ends. A browser
+    that does not start stops the session before the agent runs.
+  - *Which program.* One installed on the host where a sandbox can read
+    it, found by `sv2` and passed as a full path: Google Chrome in
+    `/Applications`, Lightpanda in the Homebrew prefix. Lightpanda is
+    installed with Homebrew when it is missing, as an agent is (decided
+    2026-11-27; the formula is in its makers' tap, and there is no build
+    for Intel Macs). Chrome is the user's to install. Either way a browser
+    that cannot be had is said before any profile is made. The install
+    itself has not run: Lightpanda was already on the development Mac.
+    The sessions of `deploy-key`, `gh-token` and the copy of the user's
+    configuration get no browser.
+  - *Lightpanda needs nothing from the profile.* Measured in a session
+    under profile version 5, Playwright attached over CDP: pages,
+    navigation, closing a context and opening another. v1 starts it with
+    `--ca-cert /etc/ssl/cert.pem`; with Lightpanda 1.0.5 that failed on
+    `https://example.com` ("PeerFailedVerification"), outside a sandbox
+    too, and without the option it passed. sv2 does not pass it.
+  - *Chrome needs two rules and has a limit:* a window that closes ends
+    it. See "Google Chrome" under "Default deny".
+  - *`--chrome` prefers the headless shell, and installs it (both decided
+    2026-11-27).* When the sandbox home has one of Playwright's, the
+    launcher starts the newest in place of Google Chrome, and says which
+    it started. When it has none and Homebrew's `npx` is there, the
+    launcher first runs `npx --yes playwright install --only-shell
+    chromium`: in the sandbox, as the sandbox user, like an agent's own
+    installer, so what npm fetches runs with the session's access and no
+    more. Google Chrome is what is left when that cannot be done or
+    fails. Measured in a session: the first `--chrome` in a home without
+    it took 10 seconds and ended with the shell running; the second, 0.6.
+    When `npx` is missing, `sv2` first installs node with Homebrew on the
+    host, as it installs Lightpanda (decided 2026-11-27; not run, node
+    was there); a failure of that is told and is not the end.
+    `SV2_NO_BROWSER_INSTALL` in `sv2`'s environment skips both installs;
+    the unit tests and the integration suite set it. It has
+    no windows and no such limit. Only the launcher can look: the cache
+    is in the sandbox home, and the host user's own is under `/Users`,
+    which a sandbox cannot read. So `sv2` no longer checks on the host
+    that Chrome is there; the launcher says when neither is. With Google
+    Chrome it names the limit and the command. Measured in a session
+    under profile version 5, Playwright attached over CDP: closing the
+    only page of a context, both pages of one, and ten contexts in a row
+    left the browser running, which each ends Google Chrome. Homebrew has
+    no package of the headless shell, so sv2 does not install it.
+  - *Tested:* unit tests run the launcher with a stand-in browser (the
+    endpoint reaches the session, the browser and its directory are gone
+    after it, one that does not start stops the session); the integration
+    suite starts each browser that is installed and asks its endpoint
+    what it is, then looks for leftovers.
+  - *Not run when this was written:* `--chrome` in a session, and the
+    suite, which wait for `sv2 install` of profile version 6.
+  - *Telling the agent (2026-11-27).* With a browser option `sv2` gives
+    the agent text for its system prompt through its definition's
+    `system_prompt` (`crates/cli/src/browser-prompt.md`, from v1's
+    `prompts/browser.md`): a browser is at `$SV_BROWSER_ENDPOINT`, connect
+    to it over CDP and do not launch one, check it with
+    `curl "$SV_BROWSER_ENDPOINT/json/version"`, and leave it running
+    (Playwright's `browser.close()` over CDP stops it, commit 7bc1094;
+    Puppeteer has `disconnect()`). Then a line for the browser asked for:
+    for Lightpanda its narrower CDP and `sv2 --chrome`; for Chrome the
+    limit of Google Chrome, said as a possibility, because the launcher
+    chooses between the headless shell and Google Chrome in the sandbox,
+    after the command line is made. The text names the variable and not
+    the address, which only the launcher knows. The banner says whether
+    the agent was told; when it was not (no `system_prompt`: agy,
+    codex, gemini, opencode; or a subcommand in `no_inject` or `inject_last`), it
+    says why and where the browser is. herdr refuses a browser anyway.
+    Measured: Claude Code 2.1.326, run directly with the text of a
+    Lightpanda session and asked without tools whether its system prompt
+    names a browser, answered "SV_BROWSER_ENDPOINT, Lightpanda", and "NO"
+    without it. The text's Playwright example (playwright-core 1.59.1)
+    loaded a page through Lightpanda 1.0.6 and left it running. The user
+    ran `sv2 --lightpanda` and `sv2 --chrome` sessions with it on a Mac
+    with sv2 installed. Not seen: pi and muse reading it (no provider
+    signed in).
+- **iOS simulator (2026-11-27).** `sv2 --ios AGENT` lets the session run
+  an iOS simulator itself, as the sandbox account. There is no bridge and
+  nothing of it runs as the host user. No `--ios-gui`, no `-i`.
+  - *Why not the bridge.* A host bridge was built first (TASK-0007:
+    token, `Host` check, installs copied out of the workspace through
+    descriptors) and worked. With it an app was measured, on macOS 26.7.3
+    (25G342) with Xcode 27.2 (27B52) in an iOS 27.0 simulator: installed
+    and launched by a sandboxed session, it ran as the host user (uid 501,
+    seen in `ps` on the host), listed the host home (123 entries) and wrote
+    a file there. A simulator is not a virtual machine: an app in it is an
+    ordinary process of the account that runs the simulator, on the Mac's
+    own kernel, and its container is a convention. So the bridge gave the
+    sandbox code execution as the host user, and no check in the bridge
+    could change that. It was removed the same day.
+  - *What was measured before building this.* As the sandbox account in
+    its own launchd domain, without the profile (`sudo launchctl asuser`):
+    `simctl` lists the runtimes, creates a device, boots it in 39 seconds
+    with no login session and no window, launches Settings and takes a
+    screenshot; a device is 1.8 GB. Under the profile, as the developer
+    with `sandbox-exec`: `simctl` fails ("Connection refused" from
+    `CoreSimulatorService`, and `simdiskimaged` unreachable) until
+    `mach-lookup` of names starting `com.apple.CoreSimulator.` is allowed;
+    with that one rule create, boot, launch, screenshot, `spawn`,
+    `listapps` and delete work, and so do iosef's `describe`, `tap` and
+    `swipe`. `iosef view` aborts (it captures a window); `simctl io
+    screenshot` is used instead.
+  - *One profile file, one parameter.* The rule is in `base.sb` inside
+    `(if (string=? (param "SV2_IOS") "1") ...)`. The helper always passes
+    `-D SV2_IOS=1` or `=0` to `sandbox-exec`; without the parameter the
+    file does not load, so no session starts with the question unanswered.
+    `launch NAME ios -- COMMAND` is how `sv2` asks; the word is carried to
+    the second stage. There is no second file to write, version or remove,
+    and the file is validated both ways before it is renamed into place.
+    Helper version 10, profile version 9.
+  - *What `--ios` grants (open item 2).* `CoreSimulatorService` is started
+    by launchd in the sandbox account's domain, not by the session, so it,
+    the simulated device and every app in it run as the sandbox account
+    **without the sandbox profile**. A session with `--ios` can therefore
+    run code that the profile's denies do not bind; this is open item 7's
+    route, opened on purpose and only for such a session. The account
+    still binds that code: the host home is closed to it by its mode
+    (750), as is everything else the account has no right to. Lost for it
+    are the profile's own denials: reads under `/Users` that permissions
+    allow, `/Volumes`, the other keychains in `/Library/Keychains`, and
+    this Mac's SSH port (sshd still refuses the account). The banner and
+    `README-SV2.md` say so.
+  - *Who makes the simulator.* The guest launcher (KIND `ios XCRUN`, after
+    a browser's), as the sandbox user. It deletes devices named
+    `sv2-ios-<process ID>` whose process is gone, creates one for the
+    newest available iOS runtime, trying iPhone types from the newest down
+    until `simctl create` takes one, boots it, and sets
+    `SV_IOS_SIMULATOR_UDID`. A process of its own watches the session's
+    process and shuts the device down and deletes it when that ends. The
+    session does not wait for the boot. `sv2` checks that `simctl` exists
+    before it creates a profile, and still becomes the session with `exec`.
+  - *Accessibility, before the boot.* The launcher writes the two keys
+    into the device's own `com.apple.Accessibility` settings file before
+    it boots the device. v1 set them after the boot and restarted
+    `com.apple.CoreSimulator.bridge`; done here by the launcher's
+    background process, that restart ran at the moment the session
+    installed its app, and the install failed with "Mach error -308,
+    server died" (seen in the first real run). Set before the boot, there
+    is nothing to restart, and `describe` sees an app at its first launch.
+  - *Measured in a real session, 2026-11-27*, helper 10 installed, as
+    `sv2-pat-default` under its profile: the simulator boots with no
+    window; install, launch and screenshot work; iosef, installed by the
+    launcher, describes and taps. The app is a process of the sandbox
+    account in the host's `ps` and reports that account's uid; it could
+    not list the host home, nor list or write a host-only directory, and
+    the host found nothing written there. Without `--ios` the same
+    `simctl` reaches nothing. Afterwards no `launchd_sim` of the account
+    is left and the device's directory is gone. (CoreSimulator gives an
+    account a set of some eighty devices of its own the first time it is
+    asked; they are small until one is booted.)
+  - *iosef.* Each sandbox home needs its own; the launcher installs it
+    with Homebrew's `uv` (`uv tool install iosef`) when it is missing, as
+    it installs Playwright's headless shell, and `sv2` installs `uv` with
+    Homebrew like node.
+  - *The launcher's size.* The test's limit went from 16 KB to 20 KB; the
+    launcher is 18 KB.
+  - *herdr.* Its wrapper refuses a session with a simulator as it refuses
+    one with a browser.
+  - *Tests.* Unit tests: the helper's argument parsing with the word, the
+    profile not loading without its parameter, the pinned profile text and
+    its list of Mach services; the launcher against a stand-in `xcrun`
+    (which runtime and iPhone, stale devices, shutdown and delete). The
+    profile probes run twice, without the parameter (the services are
+    closed) and with it. `tests/integration` runs a real session with
+    `--ios` when Xcode and a runtime are there, with an app built from
+    `tests/ios-probe` that reports who it is and what it can reach; the
+    host looks at whose process the app is and at the directory it tried
+    to write.
+  - *Not done.* Real devices; a window to watch; per-profile control of
+    the option (TASK-0005).
+- **The user's configuration (2026-11-26).** What the user puts in
+  `~/.config/sandvault2/home` (shell startup files, a `.gitconfig`) is
+  copied into the home of a profile's sandbox account when `sv2 run` starts
+  a session there, if it has changed (`crates/cli/src/home.rs`). It takes
+  the place of v1's `user/` directory in the workspace, which the sandbox
+  could write.
+  - *Who writes.* The host user packs its own directory with `tar`. The
+    archive goes on standard input to a session of its own, before the real
+    one, in which the launcher (KIND `unpack`) has the sandbox account
+    unpack it into its home, under the sandbox profile. `sv2` writes nothing
+    in a sandbox home (§1). The helper is unchanged.
+  - *What.* Everything in the directory. Links are followed, so a link to a
+    file kept elsewhere arrives as the file. A file of the same name in the
+    sandbox home is replaced; nothing is ever deleted there, so what is
+    taken out of the directory stays in the homes it was copied to. The
+    directory itself is not in the archive: its mode would become the
+    home's. The directory must resolve to a place in the user's own home.
+    Whatever is in it reaches every sandbox of the user: no place for a
+    secret.
+  - *When.* A listing of the directory (names, kinds, modes, sizes, times)
+    is kept for each profile in `~/.local/state/sandvault2/home`, with the
+    ID of the account it was copied to, and a session copies only when
+    either differs. Account IDs are not reused, so a profile made again
+    under the same name gets a copy. A change made in the sandbox to a
+    copied file lasts until the user's own copy changes. An unchanged
+    directory costs one walk of it and no extra launch.
+  - *Failure.* A copy that fails is reported and the session starts; the
+    next session tries again. `deploy-key` and `gh-token` sessions do not
+    copy.
+  - *A `.zprofile` of the user's own replaces the one the launcher wrote*,
+    which puts Homebrew and the account's bin directories ahead of the
+    system's in a login shell. An agent is still started by its full path.
+  - *`SV2_NO_HOME_COPY`*, set to anything in `sv2`'s environment, copies
+    nothing. The integration suite and root-checks set it. Without it the
+    suite's throwaway profile was given the configuration of whoever ran
+    the suite, and three checks failed on the first such run: a
+    `.gitconfig` that names a hooks directory the sandbox cannot execute,
+    the check that `deploy-key` leaves `~/.gitconfig` alone, and a check
+    that read the "copied" message as a session's output.
+  - *Tested:* unit tests run the whole of it against a stand-in for the
+    session; the integration suite sends an archive through the installed
+    helper to the launcher and looks at the sandbox home. By hand: `sv2 run
+    shell` with a real `~/.config/sandvault2/home` copied it and said so.
+  - *Not tested by the suite:* `sv2 run` itself doing the copy. The suite
+    does not make a `~/.config/sandvault2/home`, because every profile of
+    the user would be given what is in it.
+- **Doctor (2026-11-26).** `sv2 doctor` looks and reports; it changes
+  nothing, asks for no password, and runs as the host user
+  (`crates/cli/src/doctor.rs`). Each line is `ok`, `note` or `PROBLEM`, a
+  problem says what to run, and the exit status is 1 when there is one.
+  - *The installation:* the helper is there, answers, and matches this
+    `sv2`; the caller is in `sv2-users`.
+  - *The caller's profiles:* one left `adding` or `removing` is a problem,
+    with the command that finishes it; an active one whose account is gone
+    is too. Other users' profiles are theirs: the helper lists only the
+    caller's.
+  - *sshd:* the drop-in is there, and for each of the caller's accounts
+    `sshd -T -C user=ACCOUNT` (with a throwaway host key, as the host user)
+    reports all four refusals. This is the check the SSH lockdown's limits
+    asked for: it catches a main configuration without the `Include`, and
+    an administrator's own `Match` block that replaces `DenyGroups`.
+  - *Agents:* every definition is loaded as it would be to run, so one
+    that is refused or does not parse is a problem; a name that is also a
+    command gets a note; an installed program that is quarantined and not
+    notarized is a problem, with the `xattr` command (see "Quarantine");
+    one that is not installed gets a note.
+  - *The user's configuration (2026-11-26):* whether
+    `~/.config/sandvault2/home` exists and has anything in it, and for each
+    profile whether its sandbox home has what is there now or the next
+    `sv2 run` will copy it. A directory that cannot be copied (a link that
+    leads nowhere, a place outside the user's home) is a problem. It is
+    also the only place `sv2` itself tells a user the directory exists.
+  - *Not looked at:* whether a session actually starts; the sandbox
+    profile files; other users.
+- **Default deny (2026-11-26; finding 11).** The base profile starts with
+  `(deny default)`. Profile version 2; `sv2 install` re-renders every
+  profile.
+  - *Probes.* `sv2/tests/profile-probes.sh` is what a session must be able
+    to do (about 40 things: files, processes, terminals, the network, git,
+    a C compile, python, node, keychains, a file watcher, tmux, claude) and
+    must not (other homes, keychains, raw disks, the pasteboard,
+    AppleScript, opening an application, DiskArbitration, launchd jobs,
+    the screen). Each allow in `base.sb` names the probe that fails
+    without it. The probes run in a real session in the integration suite,
+    and under `sandbox-exec` as the current user in a unit test of the
+    helper (`profile_probes`), which needs no root and is how the profile
+    is worked on.
+  - *What is allowed*, each measured by taking it out: reading files,
+    the network, signals, pseudo-terminals, ioctl on `/dev`, POSIX shared
+    memory and semaphores, `sysctl` reads, starting programs, `/bin/ps`
+    outside the sandbox, the writable places as before, and six Mach
+    names: `com.apple.system.opendirectoryd.libinfo` (user and group
+    names) and `com.apple.system.opendirectoryd.membership` (`defaults`
+    writes), not the `com.apple.system.` prefix, which let `dscl` test
+    account passwords,
+    `TrustEvaluationAgent` (TLS for curl, git, python), `trustd.agent`
+    (TLS for Go programs), `SecurityServer` (keychains), `FSEvents` (file
+    watchers).
+  - *Removed*, because no probe failed without them: the two Mach names
+    the review called unmeasured, `com.apple.cfprefsd` (`defaults` works
+    from the file) and `com.apple.ocspd`; `com.apple.dnssd`,
+    `com.apple.mDNSResponder`, `com.apple.networkd` and
+    `com.apple.SystemConfiguration` (names resolve and connections are
+    made without them); `process-info*`; the denies that default deny
+    made redundant (all writes, mounting); and what only the full browser
+    applications asked for (`com.apple.coreservices.launchservicesd`, the
+    Chrome and Crashpad prefixes). The first two came back with
+    `sv2 --chrome` and a probe: see "Google Chrome".
+  - *A consequence:* a session can no longer push keystrokes into a
+    terminal's input queue at all. The kernel asks the sandbox for
+    `hid-control` before `TIOCSTI`, and nothing allows it (seen in the
+    first installed run: the ioctl fails with "Operation not permitted").
+    The session's own pty is still there as the second defence.
+  - *Scheduling priority (2026-11-26, profile version 4).* `system-sched`
+    is allowed. Without it `nice` and `renice` fail, and zsh, which lowers
+    the priority of every background job, prints "nice(5) failed: operation
+    not permitted" at each one. It was found when a `.zshrc` of the user's
+    own, copied into a sandbox home, started a background job. Probe "lower
+    own priority". Passes under `sandbox-exec` as the current user; not yet
+    run in a session, which needs `sv2 install` for the new version.
+  - *Headless Chromium (2026-11-26, profile version 3).* v1 gained two
+    Mach name prefixes on `main` (285dd0e) so that Playwright's Chromium
+    builds start. Under default deny the same builds need more: the
+    browser also has to register its rendezvous name, which
+    `(allow default)` had let through unseen. Measured with Playwright's
+    `chromium_headless_shell-1255`, started with `--no-sandbox` as
+    Playwright starts it: with lookup and registration of
+    `org.chromium.Chromium.MachPortRendezvousServer.` a page loads, 6 times
+    of 6; without it the browser stops at `bootstrap_check_in`. That is the
+    one rule added, with a probe that the unit test runs when this user
+    has that build. In a real session, under the installed profile
+    (2026-11-27): the same build loaded a page with `--dump-dom`, and
+    Playwright drove it through a longer sequence (two pages, one closed,
+    a navigation, a second context) 3 times of 3.
+  - *Google Chrome (2026-11-27, profile version 6).* Two rules, for
+    `sv2 --chrome`: lookup and registration of
+    `com.google.Chrome.MachPortRendezvousServer.`, and lookup of
+    `com.apple.coreservices.launchservicesd`. Probe "Google Chrome with a
+    debugging port loads a page", which starts Chrome as `--chrome` does
+    and asks for the page over the port. Taken out one at a time under
+    `sandbox-exec` as the current user: without the first Chrome stops at
+    `bootstrap_check_in`, without the second it aborts and says nothing.
+    Probe "open an application" still fails with LaunchServices allowed,
+    as the current user and in a session.
+    - *What Chrome cannot do in a sandbox, whatever the profile allows.*
+      Google Chrome and Chrome for Testing run headless (`--headless` is
+      their "new" mode; the old one is the headless shell) still open real
+      windows, and crash in `-[NSWindow _close]` when one closes without a
+      window server connection. A sandbox account is not logged in at the
+      screen and has none. Measured in real sessions, in v1 (sv 1.41.0,
+      Chrome 158) with Chrome started as `sv --chrome` starts it and
+      Playwright attached over CDP: opening pages, navigating, reading,
+      closing a tab of the first window, and closing one of two pages of a
+      context all work; closing the last page of a context, or the
+      context, ends the browser. With Playwright launching the browser
+      itself, in sv2 sessions from helpers built for the measurement: both
+      browsers died at the first navigation, under their rendezvous names
+      and LaunchServices, under those and every Mach lookup and
+      registration, and under those and `(allow default)`. The headless
+      shell passed in each.
+    - *The window server name is not allowed.* As the current user under
+      `sandbox-exec`, `com.apple.windowserver.active` stops the crash (10
+      of 10 with Playwright launching, both browsers) and lets the process
+      list every window on screen. In a session it does neither: the
+      crash is the same, and listing windows, screen capture, the
+      pasteboard and opening an application fail with it as without.
+      Nothing needs it. Nor are the IOKit clients and
+      `org.chromium.crashpad.` of the first measurement needed.
+    - Sandbox denials of a session's processes did not appear in
+      `log show`, also not as root; those of `sandbox-exec` run by the
+      current user do.
+    - Profile version 5 changed no rule, only the comment in `base.sb`
+      about these browsers; a profile's text is pinned to its version.
+  - *Local port 22 (2026-11-27, profile version 7).* One rule after the
+    network allow: `(deny network-outbound (remote tcp "localhost:22"))`.
+    The sshd drop-in refuses a login as a sandbox account whoever
+    connects; this rule keeps a session from reaching sshd at all, so from
+    trying any other account of this Mac.
+    - *Measured* as the current user under `sandbox-exec` (macOS 26.7.3,
+      Remote Login on): with the rule, a connection to port 22 fails with
+      EPERM at 127.0.0.1, `::1`, `fe80::1` and the Mac's address on the
+      network (192.168.1.67 that day), also by its `.local` name;
+      `github.com` port 22 and another port on 127.0.0.1 connect.
+      "localhost" in a rule is therefore every address of this Mac and no
+      other host's. Without the rule all the local ones connect. Tried
+      then at every address `ifconfig` listed, 14 on 11 interfaces (the
+      link-local ones of `awdl0`, `llw0` and eight `utun` interfaces
+      besides those above): EPERM at each. Not tried: a second routable
+      address, as a second network card or a VPN with IPv4 gives.
+    - *Probes.* "this Mac's SSH port" requires EPERM at the two loopback
+      addresses and at the address on the network, so it also means
+      something where Remote Login is off; "port 22 of a remote host
+      answers" (git over ssh) and "own listener on localhost" are the
+      controls. With the rule taken out, the first fails and names the
+      three addresses.
+    - *The integration suite's login attempt moved to the host side.* It
+      had the sandbox log in to its own account from a session, which the
+      rule now stops before sshd. The suite makes a key, has the sandbox
+      authorize its public half, and tries the login itself: sshd cannot
+      tell who connects, so the drop-in is tested as before.
+    - *Other ports (helper version 8).* One rule a port: 22 always, and
+      the ports this Mac says its sshd has. Two places say. The first is
+      the `ssh` line of `/etc/services`: on macOS launchd holds the
+      listening socket (`ssh.plist`, `SockServiceName` `ssh`) and hands
+      it to sshd, so this is the port Remote Login is on. The second is
+      the `Port` and `ListenAddress` lines `sshd -G` prints, which count
+      for an sshd started by hand. Both are root's files; the parsing is
+      in `sv2-common` ("This Mac's SSH ports"). On the development Mac
+      both give 22.
+      - *When.* The helper looks at `profile add` and at `install`,
+        which write the sandbox files, and again before every session:
+        `launch` reads the rules back from the profile's file and refuses
+        when a port found now is not among them, with
+        `sv2 profile add NAME` as the fix. A file that closes more ports
+        than are found now is accepted. The look costs about 6 ms
+        (measured as the user: `sshd -G` 5.4 ms, the file under 1 ms).
+      - *An sshd configuration that does not parse* is not an error at
+        `launch` or `profile add`: a typing mistake in `sshd_config`
+        would otherwise stop every sandbox. Port 22 and what
+        `/etc/services` gives are used; `profile add` says so, and
+        `sv2 doctor` reports it as a problem. `sshd -G` is given 5
+        seconds.
+      - *`sv2 doctor`* makes the same comparison for each of the caller's
+        profiles, as the user: the sandbox files are readable by all.
+      - *Tests.* Unit tests for the parsing, the rules as rendered and
+        read back, the refusal's message, and doctor's lines; one starts
+        a listener and shows, under `sandbox-exec`, that a profile which
+        names its port refuses it and one which does not reaches it. No
+        test moves the SSH port of the Mac it runs on: that means
+        editing `/etc/services` or `sshd_config`. So the refusal at
+        `launch` has not been seen with a real moved port.
+    - *Limits.* Not found: an sshd started with `-p`, and a launchd job
+      of the user's own with a port number in it; the drop-in is then the
+      only defence. The rules bind processes under the profile, like
+      every rule. They do not stop a session from reaching this Mac's
+      sshd by way of another host that forwards to it.
+    - *In a session (2026-11-27, helper version 8 installed).* The
+      integration suite passed (174 of 174), with the probes, the
+      host-side login attempt, both browsers at their endpoints, and
+      doctor's new line. By hand in a session of the `default` profile:
+      port 22 gave EPERM at 127.0.0.1, `::1` and 192.168.1.67, and
+      `github.com` port 22 answered `SSH-`. Before the install, the same
+      suite against helper version 7 and profile version 6 failed in one
+      check, the probe "this Mac's SSH port", which named all three
+      addresses as connecting.
+  - *Not narrowed, by decision:* file reads are still everything but
+    `/Users`, `/Volumes`, `/Library/Keychains` and raw disks, and the
+    network is still everything but this Mac's port 22: every other port
+    of localhost is open (see "Sandbox profile" for why). Narrowing file
+    reads was deferred, with per-profile capabilities (open item 8).
+  - *How it was measured.* As the current user under `sandbox-exec`, in
+    the host user's launchd domain, with a scratch home. The probes
+    themselves were run in a real session under the old profile and all
+    passed there. The new profile in a real session waits for
+    `sv2 install`.
+- **Uninstall and profiles (2026-11-26).** `sv2 uninstall` used to remove
+  every profile of every user, with the sandbox homes and what the agents
+  kept in them (logins, native installs), behind nothing but the sudo
+  password. It now refuses while any profile exists, in whatever state,
+  and lists them with their owners. They go by each user's own
+  `profile remove`, or all at once with `sv2 uninstall --all-profiles`,
+  which is not shortened. The helper decides (it alone can list every
+  user's profiles), so the password is asked for before the refusal is
+  shown.
+- **Installing from a path (2026-11-25): not a gap.** `install` copies the
+  helper to its root-owned place by opening its own path again, so whoever
+  can write the directory it was run from (the Homebrew prefix, a checkout)
+  could swap the file between sudo's exec and the copy, and have a helper
+  of their choosing installed. This is not defended against. The same
+  person could replace the file before sudo runs it, with no race to win,
+  and be root at once with the password just typed: the attack starts on
+  the far side of the door it claims to open (Raymond Chen's "other side of
+  this airtight hatchway"). What does help is outside this code: install
+  from a place only a trusted admin can write, and review a helper build
+  first (see "Development").
+- **Allowed-users group.** It is `sv2-users`; `install` refuses a group of
+  that name it did not create (it checks the group's RealName). It was
+  `sandvault-users` at first, which is also what v1 names the sandbox group
+  of a host user called `users`. The rename bumped the helper and sudoers
+  versions to 2 but has no upgrade path: the one machine that had sv2 was
+  uninstalled first.

