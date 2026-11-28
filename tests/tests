@@ -69,7 +69,7 @@ PARALLEL_JOBS=0
 
 # Suites exit with this code when a prerequisite (browser, simulator tooling,
 # pnpm, Xcode) is missing; see README "Running the tests". CI sets
-# SV_TESTS_STRICT=1 so a missing prerequisite there is a failure, not a skip.
+# SV_TESTS_FAIL_ON_SKIP=1 so a missing prerequisite there is a failure, not a skip.
 readonly SKIP_STATUS=77
 TEST_PIDS=()
 
@@ -174,7 +174,7 @@ collect_results() {
             if [[ "$VERBOSE" -ne 0 ]]; then
                 echo -e "  ${GREEN}PASS${NC}: $(basename "$dir")${suffix}"
             fi
-        elif [[ "$status" -eq "$SKIP_STATUS" && "${SV_TESTS_STRICT:-0}" == "0" ]]; then
+        elif [[ "$status" -eq "$SKIP_STATUS" && "${SV_TESTS_FAIL_ON_SKIP:-0}" == "0" ]]; then
             ((SKIPPED++)) || true
             reason=$(sed -n 's/^SKIP: //p' "$output_file" 2>/dev/null | tail -n 1)
             echo -e "  ${YELLOW}SKIP${NC}: $(basename "$dir") (${reason:-missing prerequisite})"
