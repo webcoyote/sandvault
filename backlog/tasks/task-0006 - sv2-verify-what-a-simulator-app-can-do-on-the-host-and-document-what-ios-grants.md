@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-27T17:59:06Z'
+updated_date: '2026-11-27T23:42:00Z'
 labels:
   - sv2
 dependencies: []
@@ -29,3 +30,9 @@ Open item 2 in the design doc, and finding 6 of the security review, which marke
 - [ ] #2 The result is recorded in the design doc under open item 2, with the macOS and Xcode versions measured
 - [ ] #3 The doc states in one sentence what trust `--ios` grants, ready for the README
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-27, while TASK-0007 was built: measured on macOS 26.7.3 (25G342), Xcode 27.2 (27B52), iOS 27.0 simulator. A test app installed and launched by a sandboxed session through the sv2 iOS bridge ran as the host user (uid 501, seen in ps on the host), listed the host home directory (123 entries) and wrote files in the host home and in /private/tmp, owned by the host user. Recorded in docs/SANDVAULT2.md under open item 2 and under 'iOS bridge' in 'Milestone 1'; README-SV2.md states the trust. This task's criteria were not checked off: that is for whoever owns it.
+<!-- SECTION:NOTES:END -->

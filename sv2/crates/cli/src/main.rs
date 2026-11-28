@@ -20,7 +20,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use sv2_common::{
     install_version, ALLOWED_GROUP, DEFAULT_PROFILE, EXIT_VERSION_MISMATCH, HELPER_PATH,
-    MODE_ADMIN, MODE_CALL, UNINSTALL_ALL_PROFILES, VERSION,
+    LAUNCH_IOS, MODE_ADMIN, MODE_CALL, UNINSTALL_ALL_PROFILES, VERSION,
 };
 
 use args::Cmd;
@@ -50,6 +50,7 @@ Options (before AGENT):
   -p, --profile NAME                    profile to use (default: default)
       --native                          use the agent's own install
       --chrome, --lightpanda            start that browser in the sandbox
+      --ios                             let it run an iOS simulator
 
 Names can be shortened: 'sv2 s' is 'sv2 shell'.
 ";
@@ -525,11 +526,53 @@ fn told_line(def: &agent::Definition, args: &[OsString], browser: shell::Browser
             "{agent} is told in its system prompt that {name} is at $SV_BROWSER_ENDPOINT"
         );
     }
-    let why = match (&def.prompt, args.first()) {
+    let why = not_told_why(def, args);
+    format!("{agent} is not told about {name} ({why}); it is at $SV_BROWSER_ENDPOINT")
+}
+
+/// Why an agent that gets no text for its system prompt gets none.
+fn not_told_why(def: &agent::Definition, args: &[OsString]) -> String {
+    match (&def.prompt, args.first()) {
         (Some(_), Some(sub)) => format!("'{}' takes no system prompt", sub.to_string_lossy()),
         _ => "its definition has no system_prompt".to_string(),
-    };
-    format!("{agent} is not told about {name} ({why}); it is at $SV_BROWSER_ENDPOINT")
+    }
+}
+
+/// The same for the simulator of --ios.
+fn ios_told_line(def: &agent::Definition, args: &[OsString]) -> String {
+    let agent = &def.name;
+    if def.prompt_for(args).is_some() {
+        return format!("{agent} is told in its system prompt how to use the simulator");
+    }
+    format!(
+        "{agent} is not told about the simulator ({}); it is $SV_IOS_SIMULATOR_UDID, for xcrun simctl and iosef",
+        not_told_why(def, args)
+    )
+}
+
+/// What --ios lets a session do, said before it starts.
+fn ios_trust_line(account: &str) -> String {
+    format!(
+        "--ios: this session can run an iOS simulator. The simulator and the apps in it run as the sandbox account ({account}), but outside the sandbox profile: see \"An iOS simulator\" in README-SV2.md"
+    )
+}
+
+/// Whether Xcode's simctl is there: the session would find out later, and
+/// less clearly.
+fn check_simctl() -> Result<(), String> {
+    let found = Command::new(shell::XCRUN)
+        .args(["--find", "simctl"])
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if found {
+        Ok(())
+    } else {
+        Err("--ios needs Xcode and an iOS simulator runtime; the Command Line Tools alone have no simctl. Install Xcode, then: sudo xcode-select -s /Applications/Xcode.app".to_string())
+    }
 }
 
 fn run(
@@ -537,6 +580,7 @@ fn run(
     profile: &str,
     native: bool,
     browser: Option<shell::Browser>,
+    ios: bool,
     agent: &str,
     agent_args: &[OsString],
 ) -> ExitCode {
@@ -573,6 +617,23 @@ fn run(
         Some(Err(e)) => return fail(&e),
     };
 
+    // And a simulator: Xcode has to be there, and uv, with which the
+    // launcher installs iosef in the sandbox home, is installed like node.
+    if ios {
+        if let Err(e) = check_simctl() {
+            return fail(&e);
+        }
+        if let Some(brew) = agent::brew_prefix() {
+            if !is_program(&format!("{brew}/bin/uv"))
+                && std::env::var_os("SV2_NO_IOSEF_INSTALL").is_none()
+            {
+                if let Err(e) = brew_install_formula(brew, "uv (which installs iosef)", "uv") {
+                    eprintln!("sv2: {e}; going on without it");
+                }
+            }
+        }
+    }
+
     let p = match ensure_profile(profile) {
         Ok(p) => p,
         Err(code) => return code,
@@ -586,30 +647,44 @@ fn run(
     if browser.is_some() && std::env::var_os("SV2_NO_BROWSER_INSTALL").is_some() {
         env.push("SV2_NO_BROWSER_INSTALL=1".into());
     }
+    if ios && std::env::var_os("SV2_NO_IOSEF_INSTALL").is_some() {
+        env.push("SV2_NO_IOSEF_INSTALL=1".into());
+    }
     // What the definition sets for its agent, beside the terminal's.
     if let Some(def) = &def {
         env.extend(def.env_pairs());
     }
     let launch = |kind: &shell::Kind, args: &[OsString]| {
-        // The browser is for the session itself, not for the one before it
-        // that unpacks the user's configuration.
-        let browser = match kind {
-            shell::Kind::Unpack => None,
-            _ => browser.as_ref().map(|(b, path)| (*b, path.as_str())),
+        // The browser and the simulator are for the session itself, not
+        // for the one before it that unpacks the user's configuration:
+        // that one runs under the profile as every other session has it.
+        let (browser, ios) = match kind {
+            shell::Kind::Unpack => (None, false),
+            _ => (browser.as_ref().map(|(b, path)| (*b, path.as_str())), ios),
         };
         let mut cmd = call_command("launch");
-        cmd.arg(profile).arg("--").args(shell::argv_with_browser(
-            &env,
-            OsStr::new(&dir),
-            browser,
-            kind,
-            args,
-        ));
+        // The word tells the helper to open the simulator's services in
+        // the session's sandbox profile.
+        cmd.arg(profile)
+            .args(ios.then_some(LAUNCH_IOS))
+            .arg("--")
+            .args(shell::argv_with(
+                &env,
+                OsStr::new(&dir),
+                browser,
+                ios.then_some(shell::XCRUN),
+                kind,
+                args,
+            ));
         cmd
     };
     // Before the session, in one of its own: the user's configuration.
     home::sync(profile, &p.account, &|| launch(&shell::Kind::Unpack, &[]));
+    let ios_trust = ios_trust_line(&p.account);
     let Some(def) = def else {
+        if ios {
+            eprintln!("sv2: {ios_trust}");
+        }
         let err = launch(&shell::Kind::Shell, agent_args).exec();
         return fail(&format!("cannot run {SUDO}: {err}"));
     };
@@ -632,7 +707,11 @@ fn run(
     }
     // What sv2 tells the agent about its session, through the definition's
     // system_prompt: that it has a browser, and how to use it.
-    let told = browser.as_ref().map(|(b, _)| b.told());
+    let mut told: Vec<String> = browser.iter().map(|(b, _)| b.told()).collect();
+    if ios {
+        told.push(shell::IOS_TOLD.to_string());
+    }
+    let told = (!told.is_empty()).then(|| told.join("\n"));
     let args = def.final_args(agent_args, told.as_deref());
     // What the session is trusted with, as it is on this code path.
     match def.trust_line(agent_args) {
@@ -644,6 +723,10 @@ fn run(
     eprintln!("sv2: definition: {}", def.dir.display());
     if let Some((b, _)) = &browser {
         eprintln!("sv2: {}", told_line(&def, agent_args, *b));
+    }
+    if ios {
+        eprintln!("sv2: {ios_trust}");
+        eprintln!("sv2: {}", ios_told_line(&def, agent_args));
     }
     if let Some((file, _)) = &def.wrapper {
         // It decides what runs, so the banner says that it is there.
@@ -721,9 +804,10 @@ fn main() -> ExitCode {
             profile,
             native,
             browser,
+            ios,
             agent,
             args,
-        } => run(&sources, &profile, native, browser, &agent, &args),
+        } => run(&sources, &profile, native, browser, ios, &agent, &args),
         Cmd::Repair(path) => match repair::run(&path) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::FAILURE,
@@ -879,6 +963,37 @@ mod tests {
         );
     }
 
+    /// The banner of --ios says which account the simulator runs in and
+    /// that the profile does not hold it, and whether the agent was told.
+    #[test]
+    fn the_banner_says_what_ios_grants() {
+        let line = ios_trust_line("sv2-pat-work");
+        assert!(
+            line.contains(
+                "run as the sandbox account (sv2-pat-work), but outside the sandbox profile"
+            ),
+            "{line}"
+        );
+        assert!(line.contains("README-SV2.md"), "{line}");
+        assert_eq!(
+            ios_told_line(&builtin("claude"), &[]),
+            "claude is told in its system prompt how to use the simulator"
+        );
+        assert_eq!(
+            ios_told_line(&builtin("codex"), &[]),
+            "codex is not told about the simulator (its definition has no system_prompt); it is $SV_IOS_SIMULATOR_UDID, for xcrun simctl and iosef"
+        );
+        for word in [
+            "$SV_IOS_SIMULATOR_UDID",
+            "bootstatus",
+            "iosef",
+            "outside the sandbox profile",
+        ] {
+            assert!(shell::IOS_TOLD.contains(word), "{word}");
+        }
+        assert!(!shell::IOS_TOLD.starts_with('-'));
+    }
+
     /// The help stays short: one line a command, nothing wider than a
     /// terminal, the agents on one line.
     #[test]
@@ -900,7 +1015,7 @@ mod tests {
             assert_eq!(mentions, 1, "{name}");
         }
         assert!(
-            text.lines().count() <= 23,
+            text.lines().count() <= 24,
             "the help has grown: {} lines",
             text.lines().count()
         );

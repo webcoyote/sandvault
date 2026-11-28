@@ -419,14 +419,21 @@ fn ensure_workspace(entry: &Entry, account: &str, host_gid: u32) -> Res<()> {
 }
 
 fn validate_sandbox_profile(path: &str) -> Res<()> {
-    let out = sys::run("/usr/bin/sandbox-exec", ["-f", path, "/usr/bin/true"])?;
-    if out.status.success() {
-        return Ok(());
+    // Both ways a session can be started: without the simulator and with.
+    for ios in [false, true] {
+        let [d, param] = sandbox::ios_param(ios);
+        let out = sys::run(
+            "/usr/bin/sandbox-exec",
+            [d.as_str(), param.as_str(), "-f", path, "/usr/bin/true"],
+        )?;
+        if !out.status.success() {
+            return Err(format!(
+                "rendered sandbox profile does not load: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
     }
-    Err(format!(
-        "rendered sandbox profile does not load: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    ))
+    Ok(())
 }
 
 /// Root-owned, outside the workspace and the sandbox home, world-readable
@@ -1160,7 +1167,7 @@ mod tests {
         let pinned = [
             ("sudoers", 2, 2_912_536_391_597_273_097u64),
             ("sshd drop-in", 1, 1_053_182_674_171_491_837),
-            ("sandbox profile", 8, 9_823_659_607_425_949_229),
+            ("sandbox profile", 9, 10_712_932_736_384_161_368),
         ];
         assert_eq!(
             now, pinned,

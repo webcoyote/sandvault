@@ -136,6 +136,29 @@ __SSH_PORT_RULES__
 (allow mach-lookup
   (global-name "com.apple.coreservices.launchservicesd"))
 
+;; The iOS simulator, only for a session started with "sv2 run --ios": the
+;; helper passes SV2_IOS as 1 for that session and as 0 for every other.
+;; (Without the parameter this file does not load, so a session cannot
+;; start with the question unanswered.)
+;;
+;; simctl and iosef talk to CoreSimulatorService, the user's own service
+;; for its simulators, and to simdiskimaged, the system daemon that mounts
+;; the runtimes' disk images. Probe "simulator: simctl lists the runtimes
+;; (--ios)": without the rule, "Connection refused" and no runtimes; probe
+;; "simulator: its services are closed without --ios" is the other half.
+;; With it, measured on 2026-11-27 (macOS 26.7.3, Xcode 27.2): create, boot,
+;; install, launch, screenshot, and iosef's describe, tap and swipe.
+;;
+;; What it grants is more than its size: CoreSimulatorService is started by
+;; launchd in the sandvault user's domain, not by the session, so it and
+;; everything it starts (the simulated device, every app in it) run as the
+;; sandvault user WITHOUT this profile. A session with this rule can run
+;; code that the denies below do not bind. The account still binds it. See
+;; "iOS simulator" in docs/SANDVAULT2.md.
+(if (string=? (param "__IOS_PARAM__") "1")
+    (allow mach-lookup
+      (global-name-prefix "com.apple.CoreSimulator.")))
+
 ;; Keep these four denied explicitly, after the allow above, so that widening
 ;; the allow later cannot quietly re-admit them.
 ;; diskarbitrationd -- diskutil mount, hdiutil attach, Finder disk handling

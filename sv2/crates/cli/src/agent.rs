@@ -1762,7 +1762,8 @@ no_inject = ["update"]
                 "a b",
                 "--session",
             ])
-            .env_remove("SV_BROWSER_ENDPOINT");
+            .env_remove("SV_BROWSER_ENDPOINT")
+            .env_remove("SV_IOS_SIMULATOR_UDID");
             if let Some(e) = endpoint {
                 c.env("SV_BROWSER_ENDPOINT", e);
             }
@@ -1775,6 +1776,19 @@ no_inject = ["update"]
         assert_eq!(out.status.code(), Some(2));
         assert_eq!(String::from_utf8_lossy(&out.stdout), "");
         assert!(String::from_utf8_lossy(&out.stderr).contains("--lightpanda"));
+        // And one with a simulator, which is deleted when the session ends.
+        let out = std::process::Command::new("/bin/bash")
+            .args(["-c", &text, "sv2-wrapper-herdr", "/bin/echo", "a b"])
+            .env_remove("SV_BROWSER_ENDPOINT")
+            .env(
+                "SV_IOS_SIMULATOR_UDID",
+                "AAAAAAAA-0000-4000-8000-00000000ABCD",
+            )
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--ios"));
     }
 
     /// The two installs are separate lists, and a run reads one of them.

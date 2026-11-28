@@ -172,15 +172,36 @@ pub fn initial_dir(cwd: Option<&std::path::Path>, workspace: &str) -> OsString {
 /// `args` go to the launcher as positional parameters and from there to the
 /// program, unchanged.
 pub fn argv(env: &[OsString], dir: &OsStr, kind: &Kind, args: &[OsString]) -> Vec<OsString> {
-    argv_with_browser(env, dir, None, kind, args)
+    argv_with(env, dir, None, None, kind, args)
 }
 
 /// The same, with a browser started first: the program at `path`, which
 /// the sandbox must be able to read.
+#[cfg(test)]
 pub fn argv_with_browser(
     env: &[OsString],
     dir: &OsStr,
     browser: Option<(Browser, &str)>,
+    kind: &Kind,
+    args: &[OsString],
+) -> Vec<OsString> {
+    argv_with(env, dir, browser, None, kind, args)
+}
+
+/// Where `xcrun` is; `sv2` gives the launcher this one.
+pub const XCRUN: &str = "/usr/bin/xcrun";
+
+/// What an agent is told about the simulator of `--ios`, for its system
+/// prompt.
+pub const IOS_TOLD: &str = include_str!("ios-prompt.md");
+
+/// The same, with what the session has besides its program: a browser, an
+/// iOS simulator (`ios` is the `xcrun` to make one with), both or neither.
+pub fn argv_with(
+    env: &[OsString],
+    dir: &OsStr,
+    browser: Option<(Browser, &str)>,
+    ios: Option<&str>,
     kind: &Kind,
     args: &[OsString],
 ) -> Vec<OsString> {
@@ -190,6 +211,9 @@ pub fn argv_with_browser(
     v.push(dir.to_owned());
     if let Some((browser, path)) = browser {
         v.extend(["browser", browser.name(), path].map(OsString::from));
+    }
+    if let Some(xcrun) = ios {
+        v.extend(["ios", xcrun].map(OsString::from));
     }
     v.extend(kind.words());
     v.extend(args.iter().cloned());
@@ -302,7 +326,10 @@ mod tests {
             ])
         );
         // The launcher travels on every command line, and sudo logs it.
-        assert!(LAUNCHER.len() < 16 * 1024, "the launcher has grown large");
+        // The limit was 16 KB until the simulator of --ios (2026-11-27).
+        // It is a tripwire against growth nobody notices, not a bound of
+        // the system's, which takes about a megabyte.
+        assert!(LAUNCHER.len() < 20 * 1024, "the launcher has grown large");
     }
 
     /// A scratch home and starting directory for running the real launcher
@@ -800,6 +827,236 @@ exec "$@"
         let out = run("lightpanda");
         assert_eq!(out.status.code(), Some(127));
         assert_eq!(text(&out.stdout), "");
+    }
+
+    /// A stand-in for xcrun: it prints what simctl prints, in simctl's
+    /// own shape, writes down what it was asked, and refuses to create an
+    /// iPhone 18, which the newest runtime here does not take.
+    fn stand_in_xcrun(s: &Scratch, dead: u32, runtimes: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = s.root.join("xcrun");
+        let (log, me) = (s.root.join("xcrun.log"), std::process::id());
+        let text = format!(
+            r#"#!/bin/sh
+[ "$1" = simctl ] || exit 64
+shift
+echo "$*" >> '{log}'
+case "$1 $2" in
+"list devices") cat <<'END'
+== Devices ==
+-- iOS 26.4 --
+    iPhone 17 (11111111-1111-4111-8111-111111111111) (Shutdown) 
+    sv2-ios-{dead} (22222222-2222-4222-8222-222222222222) (Shutdown) 
+    sv2-ios-{me} (33333333-3333-4333-8333-333333333333) (Booted) 
+    sv2-ios-x (44444444-4444-4444-8444-444444444444) (Shutdown) 
+END
+;;
+"list runtimes") cat <<'END'
+== Runtimes ==
+{runtimes}
+END
+;;
+"list devicetypes") cat <<'END'
+== Device Types ==
+iPhone 9 (com.apple.CoreSimulator.SimDeviceType.iPhone-9)
+iPhone 17 (com.apple.CoreSimulator.SimDeviceType.iPhone-17)
+iPhone 18 Pro (com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro)
+iPhone Air (com.apple.CoreSimulator.SimDeviceType.iPhone-Air)
+iPad Pro 13-inch (M5) (com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5-12GB)
+END
+;;
+create\ *) case "$3" in *iPhone-18*) echo "Incompatible device" >&2; exit 1;; esac
+    echo AAAAAAAA-0000-4000-8000-00000000ABCD ;;
+esac
+"#,
+            log = log.display()
+        );
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    const RUNTIMES: &str = "iOS 9.3 (9.3 - 13E233) - com.apple.CoreSimulator.SimRuntime.iOS-9-3
+iOS 26.4 (26.4.1 - 23E254a) - com.apple.CoreSimulator.SimRuntime.iOS-26-4
+iOS 26.10 (26.10 - 23K10) - com.apple.CoreSimulator.SimRuntime.iOS-26-10
+iOS 27.0 (27.0 - 24A434) - com.apple.CoreSimulator.SimRuntime.iOS-27-0 (unavailable, runtime path not found)
+watchOS 30.1 (30.1 - 23S36) - com.apple.CoreSimulator.SimRuntime.watchOS-30-1";
+
+    /// A process ID that is not running.
+    fn dead_pid() -> u32 {
+        let mut child = Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    /// With --ios the launcher makes the session a simulator of its own
+    /// (the newest runtime that is there, the newest iPhone it takes),
+    /// deletes what a killed session left, and takes its own away again
+    /// when the session has ended.
+    #[test]
+    fn a_simulator_is_made_for_the_session_and_deleted_after_it() {
+        let s = Scratch::new("ios");
+        let dead = dead_pid();
+        let xcrun = stand_in_xcrun(&s, dead, RUNTIMES);
+        let v = argv_with(
+            &[],
+            s.dir.as_os_str(),
+            None,
+            Some(&xcrun),
+            &Kind::Shell,
+            &os(&[
+                "/bin/sh",
+                "-c",
+                r#"printf '%s %s' "$SV_IOS_SIMULATOR_UDID" "$$""#,
+            ]),
+        );
+        let out = s
+            .command(&v)
+            .env("SV2_NO_IOSEF_INSTALL", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let said = text(&out.stdout);
+        let (udid, pid) = said.split_once(' ').unwrap();
+        assert_eq!(udid, "AAAAAAAA-0000-4000-8000-00000000ABCD");
+        assert!(text(&out.stderr).contains("is booting for this session"));
+
+        let log = || std::fs::read_to_string(s.root.join("xcrun.log")).unwrap_or_default();
+        // Shut down and deleted soon after the session has ended.
+        let mut waited = 0;
+        while !log().contains(&format!("delete {udid}")) && waited < 80 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            waited += 1;
+        }
+        let log = log();
+        let lines: Vec<&str> = log.lines().collect();
+        // The one whose session is gone, and neither the one of a session
+        // that is alive (this test's process) nor one named otherwise.
+        assert!(
+            lines.contains(&"delete 22222222-2222-4222-8222-222222222222"),
+            "{log}"
+        );
+        assert!(
+            !log.contains("33333333") && !log.contains("44444444"),
+            "{log}"
+        );
+        // 26.10 is newer than 26.4 and than 9.3; 27.0 is not there. The
+        // iPhone 18 is refused, so it is the 17; never the iPad.
+        let created: Vec<&&str> = lines.iter().filter(|l| l.starts_with("create ")).collect();
+        let runtime = "com.apple.CoreSimulator.SimRuntime.iOS-26-10";
+        assert_eq!(
+            created,
+            [
+                &format!("create sv2-ios-{pid} com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro {runtime}").as_str(),
+                &format!("create sv2-ios-{pid} com.apple.CoreSimulator.SimDeviceType.iPhone-17 {runtime}").as_str(),
+            ],
+            "{log}"
+        );
+        for wanted in [
+            format!("boot {udid}"),
+            format!("shutdown {udid}"),
+            format!("delete {udid}"),
+        ] {
+            assert!(lines.contains(&wanted.as_str()), "{wanted}\n{log}");
+        }
+        let at = |what: &str| lines.iter().position(|l| *l == what).unwrap();
+        assert!(at(&format!("shutdown {udid}")) < at(&format!("delete {udid}")));
+        // Accessibility is set in the device's own settings before it
+        // boots, and nothing of the simulator's is restarted after.
+        assert!(
+            !log.contains("spawn") && !log.contains("bootstatus"),
+            "{log}"
+        );
+        let prefs = s.home.join(format!(
+            "Library/Developer/CoreSimulator/Devices/{udid}/data/Library/Preferences/com.apple.Accessibility.plist"
+        ));
+        assert!(prefs.is_file(), "{}", prefs.display());
+    }
+
+    #[test]
+    fn without_a_runtime_or_xcrun_a_session_with_ios_does_not_start() {
+        let s = Scratch::new("noios");
+        let run = |xcrun: &str| {
+            let v = argv_with(
+                &[],
+                s.dir.as_os_str(),
+                None,
+                Some(xcrun),
+                &Kind::Shell,
+                &os(&["/bin/echo", "the session ran"]),
+            );
+            s.command(&v)
+                .env("SV2_NO_IOSEF_INSTALL", "1")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        // Only a runtime that is not there, and one for a watch.
+        let xcrun = stand_in_xcrun(
+            &s,
+            1,
+            "iOS 27.0 (27.0 - 24A434) - com.apple.CoreSimulator.SimRuntime.iOS-27-0 (unavailable, runtime path not found)\nwatchOS 30.1 (30.1 - 23S36) - com.apple.CoreSimulator.SimRuntime.watchOS-30-1",
+        );
+        let out = run(&xcrun);
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(text(&out.stdout), "");
+        assert!(
+            text(&out.stderr).contains("no iOS simulator runtime"),
+            "{}",
+            text(&out.stderr)
+        );
+        assert!(!std::fs::read_to_string(s.root.join("xcrun.log"))
+            .unwrap()
+            .contains("create"));
+        for bad in ["/nonexistent/xcrun", "xcrun"] {
+            let out = run(bad);
+            assert_eq!(out.status.code(), Some(127), "{bad}");
+            assert_eq!(text(&out.stdout), "");
+        }
+        // Without the option a session has none of it.
+        assert_eq!(
+            s.stdout(&[
+                "/bin/sh",
+                "-c",
+                r#"printf '%s' "${SV_IOS_SIMULATOR_UDID-unset}""#
+            ]),
+            "unset"
+        );
+    }
+
+    #[test]
+    fn a_simulator_goes_after_a_browser_on_the_command_line() {
+        let v = argv_with(
+            &[],
+            OsStr::new("/ws"),
+            Some((Browser::Chrome, "/chrome")),
+            Some(XCRUN),
+            &Kind::Shell,
+            &os(&["x"]),
+        );
+        assert_eq!(
+            v[5..],
+            os(&[
+                "/ws",
+                "browser",
+                "chrome",
+                "/chrome",
+                "ios",
+                "/usr/bin/xcrun",
+                "shell",
+                "x"
+            ])
+        );
+        // The launcher wants a KIND after it.
+        let out = Command::new("/bin/bash")
+            .args(["-c", LAUNCHER, "sv2-launch", "/", "ios", "/usr/bin/true"])
+            .env_clear()
+            .env("HOME", "/nonexistent")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
     }
 
     #[test]

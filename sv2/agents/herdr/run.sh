@@ -13,4 +13,10 @@ if [[ -n "${SV_BROWSER_ENDPOINT:-}" ]]; then
     echo >&2 "sv2: herdr cannot run with --chrome or --lightpanda: its server outlives this session, and its panes would keep the address of a browser that stops when the session ends. Run herdr without one, and an agent that needs a browser in a session of its own (sv2 --lightpanda claude)."
     exit 2
 fi
+# The same holds for the simulator of --ios, which is deleted when the
+# session ends.
+if [[ -n "${SV_IOS_SIMULATOR_UDID:-}" ]]; then
+    echo >&2 "sv2: herdr cannot run with --ios: its server outlives this session, and its panes would keep the name of a simulator that is deleted when the session ends. Run herdr without it, and an agent that needs a simulator in a session of its own (sv2 --ios claude)."
+    exit 2
+fi
 exec "$@"

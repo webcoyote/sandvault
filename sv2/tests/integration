@@ -27,6 +27,7 @@ SV2="$BIN_DIR/sv2"
 BUILT_HELPER="$BIN_DIR/sv2-helper"
 HELPER="/Library/PrivilegedHelperTools/sv2-helper"
 STAT=/usr/bin/stat
+TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; ORANGE='\033[38;5;208m'; NC='\033[0m'
 
@@ -718,6 +719,152 @@ if "$SV2" --profile "$P" --chrome --lightpanda shell /usr/bin/true >/dev/null 2>
     fail "browser: two browsers at once are refused"
 else
     pass "browser: two browsers at once are refused"
+fi
+
+###############################################################################
+# iOS simulator
+###############################################################################
+# --ios: the helper opens the simulator's services in the session's sandbox
+# profile, and the session runs a simulator itself, as the sandbox account.
+# Nothing of it runs as the host user.
+check "ios: a session without --ios has no simulator" "unset" \
+    "$(sb /bin/sh -c 'echo "${SV_IOS_SIMULATOR_UDID-unset}"')"
+if "${CALL[@]}" launch "$P" other -- /usr/bin/true >/dev/null 2>&1; then
+    fail "helper: only the word ios may stand before the command"
+else
+    pass "helper: only the word ios may stand before the command"
+fi
+check "helper: the word ios starts a session like any other" "$ACCOUNT" \
+    "$("${CALL[@]}" launch "$P" ios -- /usr/bin/id -un 2>&1)"
+
+# The rest needs Xcode and an iOS runtime, and takes a minute or two: the
+# session boots a simulator, installs and launches an app built here, and
+# the app reports what it is and what it can reach.
+ios_checks() {
+    local build="$SCRATCH/ios-build" victim="$SCRATCH/ios-victim" d="$WS/ios"
+    local sdk sv2_pid n=0
+    sdk="$(/usr/bin/xcrun --sdk iphonesimulator --show-sdk-path)"
+    /bin/mkdir -p "$build/Probe.app" "$victim" "$d"
+    /usr/bin/xcrun --sdk iphonesimulator clang -arch "$(/usr/bin/uname -m)" \
+        -isysroot "$sdk" -mios-simulator-version-min=16.0 -fobjc-arc \
+        -framework UIKit -framework Foundation \
+        "$TESTS_DIR/ios-probe/main.m" -o "$build/Probe.app/Probe"
+    /bin/cp "$TESTS_DIR/ios-probe/Info.plist" "$build/Probe.app/Info.plist"
+    /usr/bin/codesign -s - --force "$build/Probe.app" 2>/dev/null
+    /bin/cp -R "$build/Probe.app" "$d/Probe.app"
+
+    # Without the option the same tool reaches nothing.
+    check "ios: without --ios the simulator's services are closed" "closed" \
+        "$(sb /bin/sh -c '/usr/bin/xcrun simctl list devicetypes 2>/dev/null | /usr/bin/grep -q iPhone && echo open || echo closed')"
+
+    /bin/cat > "$d/session.sh" <<'SESSION'
+set -u
+D="$1"; VICTIM="$2"; HOST_HOME="$3"
+U="${SV_IOS_SIMULATOR_UDID:-}"
+S="/usr/bin/xcrun simctl"
+out() { echo "$1=$2" >> "$D/results"; }
+until_deadline() { [[ "$(/bin/date +%s)" -lt "$1" ]]; }
+# No command here waits longer than this. (alarm survives exec.)
+bounded() { /usr/bin/perl -e 'alarm shift; exec @ARGV' "$@"; }
+
+out account "$(/usr/bin/id -un)"
+[[ "$U" =~ ^[0-9A-F-]{36}$ ]] && out udid yes || out udid "no: $U"
+bounded 400 $S bootstatus "$U" -b > /dev/null 2>&1 && out booted yes || out booted no
+bounded 120 $S install "$U" "$D/Probe.app" > "$D/install.log" 2>&1 && out install yes || out install "no: $(/usr/bin/tail -1 "$D/install.log")"
+# The simulator says it has booted before it can launch anything.
+deadline=$(($(/bin/date +%s) + 90))
+until SIMCTL_CHILD_SV2_PROBE_REPORT="$D/report" SIMCTL_CHILD_SV2_PROBE_HOME="$HOST_HOME" \
+    SIMCTL_CHILD_SV2_PROBE_VICTIM="$VICTIM" \
+    bounded 60 $S launch "$U" com.sandvault.sv2test.probe > /dev/null 2>&1 \
+    || ! until_deadline "$deadline"; do /bin/sleep 3; done
+/bin/sleep 3
+[[ -s "$D/report" ]] && out launch yes || out launch no
+bounded 120 $S io "$U" screenshot "$D/screen.png" > /dev/null 2>&1
+out screenshot "$(/usr/bin/head -c 8 "$D/screen.png" 2>/dev/null | /usr/bin/xxd -p)"
+
+# iosef, when the launcher could install it in this home.
+I="$HOME/.local/bin/iosef"
+if [[ -x "$I" ]]; then
+    describe() { bounded 90 "$I" describe --device="$U" 2>/dev/null || true; }
+    deadline=$(($(/bin/date +%s) + 150))
+    until tree="$(describe)"; [[ "$tree" == *"Hello from sv2 probe"* ]] || ! until_deadline "$deadline"; do /bin/sleep 2; done
+    [[ "$tree" == *"Hello from sv2 probe"* && "$tree" == *"Press me"* ]] && out describe yes || out describe "no: ${tree:0:200}"
+    bounded 60 "$I" tap --device="$U" --name="Press me" > /dev/null 2>&1 && out tap yes || out tap no
+    deadline=$(($(/bin/date +%s) + 60))
+    until tree="$(describe)"; [[ "$tree" == *"Pressed"* ]] || ! until_deadline "$deadline"; do /bin/sleep 2; done
+    [[ "$tree" == *"Pressed"* ]] && out pressed yes || out pressed no
+else
+    out iosef missing
+fi
+
+echo "$U" > "$D/for-host"
+n=0
+until [[ -e "$D/host-done" || "$n" -ge 120 ]]; do /bin/sleep 1; n=$((n + 1)); done
+SESSION
+
+    "$SV2" --profile "$P" --ios shell /bin/bash "$d/session.sh" "$d" "$victim" "$HOME" \
+        < /dev/null > "$SCRATCH/ios-session.log" 2>&1 &
+    sv2_pid=$!
+    # Booting takes most of this; the session gives up on its own.
+    while /bin/kill -0 "$sv2_pid" 2>/dev/null && [[ ! -s "$d/for-host" && "$n" -lt 900 ]]; do
+        /bin/sleep 1
+        n=$((n + 1))
+    done
+    result() { /usr/bin/sed -n "s/^$1=//p" "$d/results" 2>/dev/null; }
+    report() { /usr/bin/sed -n "s/^$1=//p" "$d/report" 2>/dev/null; }
+    if [[ ! -s "$d/for-host" ]]; then
+        fail "ios: the session has a simulator" "$(/usr/bin/tail -5 "$SCRATCH/ios-session.log")"
+    else
+        pass "ios: the session has a simulator"
+        # From the host, while the session waits: whose process the app is.
+        check "ios: the app in the simulator runs as the sandbox account" "$ACCOUNT" \
+            "$(/bin/ps -axww -o user=,command= | /usr/bin/awk '/Probe\.app\/Probe$/ {print $1}' | /usr/bin/sort -u)"
+        check "ios: nothing of it is a simulator of the host user's" "" \
+            "$(/usr/bin/xcrun simctl list devices | /usr/bin/grep 'sv2-ios-' || true)"
+    fi
+    : > "$d/host-done"
+    wait "$sv2_pid" || true
+
+    check "ios: the session is the sandbox account's" "$ACCOUNT" "$(result account)"
+    check "ios: the launcher gives it a simulator" "yes" "$(result udid)"
+    check "ios: the simulator boots, with no window" "yes" "$(result booted)"
+    check "ios: install" "yes" "$(result install)"
+    check "ios: launch" "yes" "$(result launch)"
+    check "ios: a screenshot, as a PNG" "89504e470d0a1a0a" "$(result screenshot)"
+    if [[ "$(result iosef)" == "missing" ]]; then
+        echo "     skip ios: describe and tap: iosef is not in the sandbox home (no uv from Homebrew to install it with)"
+    else
+        check "ios: iosef describes the app" "yes" "$(result describe)"
+        check "ios: iosef taps" "yes" "$(result tap)"
+        check "ios: the tap reached the app" "yes" "$(result pressed)"
+    fi
+    # What --ios grants, measured: the app is outside the sandbox profile
+    # but is the sandbox account, which the host's files are closed to.
+    check "ios: the app's own word for who it is" "uid=$SB_UID" "uid=$(report uid)"
+    check "ios: the app cannot list the host home" "no" "$(report list-home)"
+    check "ios: the app cannot list a directory of the host's" "no" "$(report list-victim)"
+    check "ios: the app cannot write there (its word)" "no" "$(report write-victim)"
+    check "ios: the app did not write there (the host's look)" "" "$(/bin/ls -A "$victim")"
+    # The launcher's watcher shuts the simulator down and deletes it.
+    n=0
+    while /usr/bin/pgrep -u "$ACCOUNT" -f launchd_sim >/dev/null 2>&1 && [[ "$n" -lt 60 ]]; do
+        /bin/sleep 1
+        n=$((n + 1))
+    done
+    check "ios: the simulator is shut down when the session has ended" "" \
+        "$(/usr/bin/pgrep -u "$ACCOUNT" -lf launchd_sim || true)"
+    # Only its own: CoreSimulator makes an account a set of devices of its
+    # own the first time it is asked.
+    check "ios: and deleted" "gone" \
+        "$(sb /bin/sh -c 'test -e "$HOME/Library/Developer/CoreSimulator/Devices/$1" && echo there || echo gone' sh "$(/bin/cat "$d/for-host" 2>/dev/null || echo none)" 2>&1)"
+    /bin/rm -rf "$d"
+}
+if ! /usr/bin/xcrun --find simctl >/dev/null 2>&1; then
+    echo "     skip ios: a simulator in a session: no Xcode (simctl)"
+elif ! /usr/bin/xcrun simctl list runtimes 2>/dev/null | /usr/bin/grep -q '^iOS'; then
+    echo "     skip ios: a simulator in a session: no iOS simulator runtime"
+else
+    ios_checks
 fi
 
 ###############################################################################

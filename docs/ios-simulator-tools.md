@@ -8,6 +8,11 @@ asynchronous boot and screenshot capture).
 This is a reference document. For agent-facing usage instructions see
 `guest/home/bin/prompts/ios-simulator.md`.
 
+It describes v1's bridge (`helpers/sv-ios-bridge`). sv2 has no bridge: a
+session started with `--ios` runs the same two tools itself, as the
+sandbox account. See "iOS simulator" under "Milestone 1" in
+`docs/SANDVAULT2.md`.
+
 ---
 
 ## The three tools

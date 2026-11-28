@@ -26,6 +26,12 @@
 #          SV_BROWSER_ENDPOINT, and go on as KIND. The browser is stopped
 #          when the session's process ends. For chrome, a headless shell
 #          of Playwright's in the home is used in place of PROGRAM.
+#          ios XCRUN KIND...: the session was started with --ios, so its
+#          sandbox profile lets it reach the simulator's services. Create
+#          an iOS simulator with XCRUN's simctl, boot it, put its
+#          identifier in SV_IOS_SIMULATOR_UDID, and go on as KIND. It is
+#          shut down and deleted when the session's process ends. After
+#          browser, when both are given.
 #
 # It must run on /bin/bash 3.2. ARGS are never parsed as shell text.
 set -euo pipefail
@@ -262,6 +268,73 @@ start_browser() {
 }
 
 ###############################################################################
+# iOS simulator
+###############################################################################
+# start_ios XCRUN: everything here is the sandbox user's own. The simulator,
+# and every app in it, is started by this account's launchd and so runs
+# outside the sandbox profile, though inside the account.
+start_ios() {
+    local xcrun="$1" runtime udid="" kind pid old key prefs
+    if [[ "$xcrun" != /* || ! -x "$xcrun" ]]; then
+        warn "--ios: $xcrun is not a program"
+        exit 127
+    fi
+    # iosef taps and reads the screen. Once for a sandbox home, like the
+    # headless shell. SV2_NO_IOSEF_INSTALL: for tests.
+    if [[ ! -x "$HOME/.local/bin/iosef" && -z "${SV2_NO_IOSEF_INSTALL:-}" \
+        && -n "$BREW" && -x "$BREW/bin/uv" ]]; then
+        warn "installing iosef in the sandbox home (once): uv tool install iosef"
+        "$BREW/bin/uv" tool install iosef < /dev/null >&2 \
+            || warn "that install failed; without iosef there are no taps and no accessibility tree"
+    fi
+    # Simulators of sessions that were killed before they deleted theirs.
+    while read -r pid old; do
+        kill -0 "$pid" 2>/dev/null || "$xcrun" simctl delete "$old" > /dev/null 2>&1 || true
+    done < <("$xcrun" simctl list devices 2>/dev/null \
+        | /usr/bin/sed -n 's/^ *sv2-ios-\([0-9]*\) (\([0-9A-F-]*\)) .*/\1 \2/p')
+    # The newest iOS runtime, and the newest iPhone it takes.
+    runtime="$("$xcrun" simctl list runtimes 2>/dev/null \
+        | /usr/bin/sed -n 's/^iOS \([0-9]*\)\.\([0-9]*\).* - \(com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]*\)$/\1 \2 \3/p' \
+        | /usr/bin/sort -k1,1n -k2,2n | /usr/bin/tail -1 | /usr/bin/cut -d' ' -f3)"
+    if [[ -z "$runtime" ]]; then
+        warn "--ios: no iOS simulator runtime was found. Install one in Xcode (Settings, Components)"
+        exit 1
+    fi
+    while read -r _ kind; do
+        udid="$("$xcrun" simctl create "sv2-ios-$$" "$kind" "$runtime" 2>/dev/null)" && break
+        udid=""
+    done < <("$xcrun" simctl list devicetypes 2>/dev/null \
+        | /usr/bin/sed -n 's/^iPhone \([0-9][0-9]*\).* (\(com\.apple\.CoreSimulator\.SimDeviceType\.[A-Za-z0-9-]*\))$/\1 \2/p' \
+        | /usr/bin/sort -k1,1nr -k2,2r)
+    if [[ ! "$udid" =~ ^[0-9A-F-]{36}$ ]]; then
+        warn "--ios: could not create a simulator for $runtime"
+        exit 1
+    fi
+    # Accessibility on, in the device's own settings, before it boots.
+    # iosef otherwise turns it on at the first describe and restarts a
+    # service of the simulator's to do so; an install or a launch made at
+    # that moment fails ("server died"), and apps already running need a
+    # relaunch.
+    prefs="$HOME/Library/Developer/CoreSimulator/Devices/$udid/data/Library/Preferences"
+    /bin/mkdir -p "$prefs" 2>/dev/null || true
+    for key in AccessibilityEnabled ApplicationAccessibilityEnabled; do
+        /usr/bin/defaults write "$prefs/com.apple.Accessibility" "$key" -bool true 2>/dev/null || true
+    done
+    # It boots while the session starts.
+    "$xcrun" simctl boot "$udid" >&2 || warn "--ios: the simulator did not start to boot"
+    # Wait for the session's process to end, as for a browser.
+    (
+        trap '' HUP
+        while kill -0 "$$" 2>/dev/null; do /bin/sleep 1; done
+        "$xcrun" simctl shutdown "$udid"
+        "$xcrun" simctl delete "$udid"
+    ) > /dev/null 2>&1 < /dev/null &
+    SV_IOS_SIMULATOR_UDID="$udid"
+    export SV_IOS_SIMULATOR_UDID
+    warn "the simulator $udid is booting for this session"
+}
+
+###############################################################################
 # Start
 ###############################################################################
 # The helper has already put the session in the workspace or the home.
@@ -275,6 +348,16 @@ if [[ "$KIND" == "browser" ]]; then
     start_browser "$1" "$2"
     KIND="$3"
     shift 3
+fi
+
+if [[ "$KIND" == "ios" ]]; then
+    if [[ $# -lt 2 ]]; then
+        warn "launcher: ios needs XCRUN KIND"
+        exit 2
+    fi
+    start_ios "$1"
+    KIND="$2"
+    shift 2
 fi
 
 case "$KIND" in

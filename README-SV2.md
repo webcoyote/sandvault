@@ -60,13 +60,15 @@ sv2 claude                        # an agent; installed with Homebrew if missing
 sv2 --native claude               # the agent's own install, in the sandbox home
 sv2 -p work claude                # in the profile "work"
 sv2 --lightpanda claude           # with a headless browser in the sandbox
+sv2 --ios claude                  # with an iOS simulator in the sandbox
 sv2 shell ls -la                  # one command, then back
 sv2 herdr                         # many agents in one terminal; reattaches
 ```
 
 herdr's server, and every pane in it, outlives the `sv2` that started it,
-inside the sandbox. So it refuses `--chrome` and `--lightpanda`: the browser
-stops with the session, and the panes would keep its address.
+inside the sandbox. So it refuses `--chrome`, `--lightpanda` and `--ios`: the
+browser and the simulator stop with the session, and the panes would keep
+their names.
 
 `sv2 --help` lists every command and the agents it knows. Names can be
 shortened: `sv2 s` is `sv2 shell`.
@@ -79,8 +81,8 @@ shortened: `sv2 s` is `sv2 shell`.
   inside it. You and the sandbox can both read and write everything there.
   It is the place to put what the agent should work on.
 - The sandbox account is `sv2-YOU-PROFILE`, with its home in `/Users`.
-- Options (`-p`, `--native`, `--lightpanda`, `--chrome`) come before the agent's name. Everything
-  after it goes to the agent unchanged.
+- Options (`-p`, `--native`, `--lightpanda`, `--chrome`, `--ios`) come before
+  the agent's name. Everything after it goes to the agent unchanged.
 
 
 ## What a sandbox can and cannot do
@@ -194,6 +196,69 @@ Also:
   access, which is what the agent has already.
 
 
+## An iOS simulator
+
+```bash
+sv2 --ios claude
+```
+
+The session gets an iOS simulator of its own, running **inside the
+sandbox account**, without a window. The agent drives it with
+`xcrun simctl` and `iosef`, like any other tool. Nothing of it runs as you.
+
+`sv2` creates the simulator when the session starts (the newest iPhone of
+the newest iOS runtime), names it in `$SV_IOS_SIMULATOR_UDID`, and shuts it
+down and deletes it when the session ends. It boots while the session is
+already running, in 30 to 90 seconds.
+
+### What `--ios` grants
+
+- **The simulator, and every app in it, runs as the sandbox account but
+  outside the sandbox profile.** macOS starts them for the account; they
+  are not children of the session, so the profile does not hold them. An
+  app the agent builds and runs there is the agent's own code, free of the
+  profile.
+- **The account still holds it.** Your home directory stays closed to it,
+  by its permissions (mode 750 on current macOS), and so does everything
+  else the sandbox account has no right to. What the profile adds on top
+  is lost for that code: it can connect to this Mac's SSH port (where sshd
+  still refuses the sandbox accounts), and read what any user of this Mac
+  can read, such as `/Users/Shared` and `/Volumes`.
+- **Only a session started with `--ios`.** Without the option the
+  simulator's services are closed to a session, and `xcrun simctl` fails.
+- An iOS app in a simulator is not confined the way it is on a phone: it is
+  an ordinary process of whoever runs the simulator. That is why the
+  simulator runs in the sandbox account and not in yours.
+
+### Using it
+
+You need Xcode with an iOS simulator runtime. `iosef`, which taps and reads
+the screen, is installed in the sandbox home with `uv tool install iosef`
+the first time (`uv` comes from Homebrew, and `sv2` installs it when it is
+missing).
+
+An agent whose definition has a `system_prompt` (claude, pi, muse) is told
+how to use the simulator. For the others, and for you in `sv2 --ios shell`:
+
+```bash
+xcrun simctl bootstatus "$SV_IOS_SIMULATOR_UDID" -b        # wait for the boot
+xcrun simctl install "$SV_IOS_SIMULATOR_UDID" build/My.app
+xcrun simctl launch "$SV_IOS_SIMULATOR_UDID" com.example.my
+iosef describe --device "$SV_IOS_SIMULATOR_UDID"           # what is on the screen
+iosef tap --device "$SV_IOS_SIMULATOR_UDID" --name "Sign In"
+xcrun simctl io "$SV_IOS_SIMULATOR_UDID" screenshot screen.png
+```
+
+- There is no window to watch. A screenshot saved in the workspace is how
+  you see the screen.
+- A simulator takes about 2 GB in the sandbox home while it exists, and a
+  few hundred processes while it runs.
+- `iosef view` does not work without a window; `simctl io ... screenshot`
+  does.
+- If a session is killed before its simulator is deleted, the next
+  `sv2 --ios` in that profile deletes it.
+
+
 ## Your own agent
 
 ```bash
@@ -263,7 +328,7 @@ that folder as a home folder.
 
 ## Not there yet
 
-Homebrew packaging; the iOS simulator bridge; per-profile capabilities.
+Homebrew packaging; per-profile capabilities.
 The list, with what has
 and has not been verified, is under "Remaining work" in
 [docs/SANDVAULT2.md](docs/SANDVAULT2.md).

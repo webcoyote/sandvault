@@ -162,3 +162,16 @@ denied "diskutil list via DiskArbitration" /bin/sh -c 'diskutil list | grep -q d
 denied "launchctl submit" /bin/launchctl submit -l com.sandvault2.probe -- /usr/bin/true
 denied "screen capture" /usr/sbin/screencapture -x "$T/shot.png"
 /bin/rm -rf "$T" 2>/dev/null
+
+# --- the iOS simulator (base.sb: only for a session started with --ios)
+# SV2_PROBE_IOS says which kind of session this is; the services are the
+# user's CoreSimulatorService and the system's simdiskimaged.
+if /usr/bin/xcrun --find simctl >/dev/null 2>&1; then
+    if [[ "${SV2_PROBE_IOS:-0}" == "1" ]]; then
+        allowed "simulator: simctl lists the runtimes (--ios)" /bin/sh -c '/usr/bin/xcrun simctl list devicetypes | /usr/bin/grep -q iPhone'
+    else
+        denied "simulator: its services are closed without --ios" /bin/sh -c '/usr/bin/xcrun simctl list devicetypes 2>/dev/null | /usr/bin/grep -q iPhone'
+    fi
+else
+    echo "skip simulator: no Xcode (simctl)"
+fi

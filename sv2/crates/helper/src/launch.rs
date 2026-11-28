@@ -19,6 +19,7 @@ use std::process::Command;
 
 use sv2_common::{
     account_name, home_path, valid_host_user, valid_profile, workspace_path, HELPER_PATH,
+    LAUNCH_IOS,
 };
 
 use crate::ops::{self, Caller};
@@ -28,15 +29,25 @@ use crate::sys::{self, Res};
 pub const STAGE2: &str = "stage2";
 
 /// Split `NAME -- ARGV...`.
-pub fn split_launch_args(args: &[OsString]) -> Res<(&str, &[OsString])> {
-    const USAGE: &str = "usage: launch NAME -- COMMAND [ARGS...]";
+/// The one word that may stand between the profile's name (or, in stage 2,
+/// the account's details) and `--`: whether the session may use the iOS
+/// simulator. Returns that, and what follows `--`.
+fn split_at_dashes(rest: &[OsString]) -> Option<(bool, &[OsString])> {
+    let word = |i: usize| rest.get(i).and_then(|a| a.to_str());
+    let (ios, after) = match (word(0), word(1)) {
+        (Some("--"), _) => (false, 1),
+        (Some(LAUNCH_IOS), Some("--")) => (true, 2),
+        _ => return None,
+    };
+    (rest.len() > after).then(|| (ios, &rest[after..]))
+}
+
+pub fn split_launch_args(args: &[OsString]) -> Res<(&str, bool, &[OsString])> {
+    const USAGE: &str = "usage: launch NAME [ios] -- COMMAND [ARGS...]";
     let name = args.first().and_then(|a| a.to_str()).ok_or(USAGE)?;
-    if args.get(1).and_then(|a| a.to_str()) != Some("--") || args.len() < 3 {
-        return Err(USAGE.to_string());
-    }
-    let argv = &args[2..];
+    let (ios, argv) = split_at_dashes(&args[1..]).ok_or(USAGE)?;
     check_command(&argv[0])?;
-    Ok((name, argv))
+    Ok((name, ios, argv))
 }
 
 /// The command is the first argument after `sandbox-exec -f FILE`, so one
@@ -52,7 +63,7 @@ fn check_command(cmd: &OsString) -> Res<()> {
 }
 
 pub fn stage1(caller: &Caller, args: &[OsString]) -> Res<()> {
-    let (profile, argv) = split_launch_args(args)?;
+    let (profile, ios, argv) = split_launch_args(args)?;
     if !valid_profile(profile) {
         return Err(format!("invalid profile name '{profile}'"));
     }
@@ -93,6 +104,7 @@ pub fn stage1(caller: &Caller, args: &[OsString]) -> Res<()> {
         .arg(entry.id.to_string())
         .arg(&entry.host_user)
         .arg(&entry.profile)
+        .args(ios.then_some(LAUNCH_IOS))
         .arg("--")
         .args(argv)
         .env_clear()
@@ -105,6 +117,8 @@ pub struct Stage2Args<'a> {
     pub id: u32,
     pub host_user: &'a str,
     pub profile: &'a str,
+    /// The session may use the iOS simulator.
+    pub ios: bool,
     pub argv: &'a [OsString],
 }
 
@@ -112,9 +126,10 @@ pub struct Stage2Args<'a> {
 /// sudoers line covers `call` alone), but it still checks what it is given.
 pub fn parse_stage2_args(args: &[OsString]) -> Res<Stage2Args<'_>> {
     const BAD: &str = "stage2: bad arguments";
-    if args.len() < 5 || args[3].to_str() != Some("--") {
+    if args.len() < 5 {
         return Err(BAD.to_string());
     }
+    let (ios, argv) = split_at_dashes(&args[3..]).ok_or(BAD)?;
     let id_str = args[0].to_str().ok_or(BAD)?;
     if id_str.is_empty() || !id_str.bytes().all(|b| b.is_ascii_digit()) {
         return Err(BAD.to_string());
@@ -125,12 +140,13 @@ pub fn parse_stage2_args(args: &[OsString]) -> Res<Stage2Args<'_>> {
     if !(MIN_ID..=MAX_ID).contains(&id) || !valid_host_user(host_user) || !valid_profile(profile) {
         return Err(BAD.to_string());
     }
-    check_command(&args[4])?;
+    check_command(&argv[0])?;
     Ok(Stage2Args {
         id,
         host_user,
         profile,
-        argv: &args[4..],
+        ios,
+        argv,
     })
 }
 
@@ -183,7 +199,11 @@ pub fn stage2(args: &[OsString]) -> Res<()> {
     }
 
     let mut cmd = Command::new("/usr/bin/sandbox-exec");
-    cmd.arg("-f").arg(&sb).args(a.argv).env_clear();
+    cmd.args(crate::sandbox::ios_param(a.ios))
+        .arg("-f")
+        .arg(&sb)
+        .args(a.argv)
+        .env_clear();
     for (k, v) in session_env(&account, a.host_user, a.profile, tmpdir.as_deref()) {
         cmd.env(k, v);
     }
@@ -206,13 +226,21 @@ mod tests {
     #[test]
     fn launch_args() {
         let a = os(&["work", "--", "/bin/zsh", "-l"]);
-        let (name, argv) = split_launch_args(&a).unwrap();
-        assert_eq!(name, "work");
+        let (name, ios, argv) = split_launch_args(&a).unwrap();
+        assert_eq!((name, ios), ("work", false));
         assert_eq!(argv, &os(&["/bin/zsh", "-l"])[..]);
+
+        // The one word that may come before "--", and only there.
+        let a = os(&["work", "ios", "--", "/bin/zsh", "ios"]);
+        let (name, ios, argv) = split_launch_args(&a).unwrap();
+        assert_eq!((name, ios), ("work", true));
+        assert_eq!(argv, &os(&["/bin/zsh", "ios"])[..]);
+        let a = os(&["work", "--", "/bin/echo", "ios", "--", "x"]);
+        assert!(!split_launch_args(&a).unwrap().1);
 
         // Arguments are passed through untouched, including a later "--".
         let a = os(&["work", "--", "/bin/echo", "--", "a b", "$HOME", ""]);
-        let (_, argv) = split_launch_args(&a).unwrap();
+        let (_, _, argv) = split_launch_args(&a).unwrap();
         assert_eq!(argv, &os(&["/bin/echo", "--", "a b", "$HOME", ""])[..]);
 
         for bad in [
@@ -221,6 +249,13 @@ mod tests {
             &["work", "--"][..],
             &["work", "/bin/zsh"][..],
             &["--", "work", "/bin/zsh"][..],
+            &["work", "ios"][..],
+            &["work", "ios", "--"][..],
+            &["work", "ios", "/bin/zsh"][..],
+            &["work", "IOS", "--", "/bin/zsh"][..],
+            &["work", "ios", "ios", "--", "/bin/zsh"][..],
+            &["work", "other", "--", "/bin/zsh"][..],
+            &["work", "-D", "--", "/bin/zsh"][..],
         ] {
             assert!(split_launch_args(&os(bad)).is_err(), "{bad:?}");
         }
@@ -235,6 +270,10 @@ mod tests {
             assert!(split_launch_args(&a).is_err(), "stage 1 accepted {cmd:?}");
             let a = os(&["600", "pat", "work", "--", cmd, "/bin/zsh"]);
             assert!(parse_stage2_args(&a).is_err(), "stage 2 accepted {cmd:?}");
+            let a = os(&["work", "ios", "--", cmd, "/bin/zsh"]);
+            assert!(split_launch_args(&a).is_err(), "stage 1 accepted {cmd:?}");
+            let a = os(&["600", "pat", "work", "ios", "--", cmd, "/bin/zsh"]);
+            assert!(parse_stage2_args(&a).is_err(), "stage 2 accepted {cmd:?}");
         }
     }
 
@@ -244,6 +283,11 @@ mod tests {
         let p = parse_stage2_args(&a).unwrap();
         assert_eq!((p.id, p.host_user, p.profile), (600, "pat", "work"));
         assert_eq!(p.argv, &os(&["/bin/zsh"])[..]);
+        assert!(!p.ios);
+        let a = os(&["600", "pat", "work", "ios", "--", "/bin/zsh", "x"]);
+        let p = parse_stage2_args(&a).unwrap();
+        assert!(p.ios);
+        assert_eq!(p.argv, &os(&["/bin/zsh", "x"])[..]);
 
         for bad in [
             &["0", "pat", "work", "--", "/bin/zsh"][..],
@@ -253,6 +297,9 @@ mod tests {
             &["600", "pat", "a-b", "--", "/bin/zsh"][..],
             &["600", "pat", "work", "/bin/zsh", "x"][..],
             &["600", "pat", "work", "--"][..],
+            &["600", "pat", "work", "ios", "--"][..],
+            &["600", "pat", "work", "ios", "/bin/zsh"][..],
+            &["600", "pat", "work", "yes", "--", "/bin/zsh"][..],
         ] {
             assert!(parse_stage2_args(&os(bad)).is_err(), "{bad:?}");
         }

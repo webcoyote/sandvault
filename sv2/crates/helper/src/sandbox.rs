@@ -7,7 +7,7 @@
 
 use sv2_common::{
     account_name, home_path, local_port_rule, ssh_ports, valid_host_user, valid_profile,
-    workspace_path, workspace_user_dir, SANDBOX_PROFILE_VERSION, WORKSPACE_ROOT,
+    workspace_path, workspace_user_dir, PROFILE_PARAM_IOS, SANDBOX_PROFILE_VERSION, WORKSPACE_ROOT,
 };
 
 const BASE: &str = include_str!("base.sb");
@@ -37,6 +37,15 @@ pub fn render(host_user: &str, profile: &str, ssh_ports: &[u16]) -> Result<Strin
     )
 }
 
+/// What `sandbox-exec` is given before `-f FILE`: whether the session may
+/// use the iOS simulator. Always given, as 1 or 0; the file reads it.
+pub fn ios_param(ios: bool) -> [String; 2] {
+    [
+        "-D".to_string(),
+        format!("{PROFILE_PARAM_IOS}={}", u8::from(ios)),
+    ]
+}
+
 /// The base profile with these paths filled in.
 fn render_paths(
     workspace_root: &str,
@@ -47,6 +56,7 @@ fn render_paths(
 ) -> Result<String, String> {
     let subs = [
         ("__PROFILE_VERSION__", SANDBOX_PROFILE_VERSION.to_string()),
+        ("__IOS_PARAM__", PROFILE_PARAM_IOS.to_string()),
         ("__WORKSPACE_ROOT__", workspace_root.to_string()),
         ("__WORKSPACE_USER_DIR__", workspace_user_dir.to_string()),
         ("__WORKSPACE__", workspace.to_string()),
@@ -160,6 +170,7 @@ mod tests {
             let path = dir.join(format!("p{}.sb", ports.len()));
             std::fs::write(&path, render("pat", "work", ports).unwrap()).unwrap();
             Command::new("/usr/bin/sandbox-exec")
+                .args(ios_param(false))
                 .arg("-f")
                 .arg(&path)
                 .args(["/usr/bin/nc", "-z", "-G", "5", "127.0.0.1"])
@@ -208,6 +219,8 @@ mod tests {
                 // Google Chrome with a debugging port (sv2 --chrome).
                 "(global-name-prefix \"com.google.Chrome.MachPortRendezvousServer.\"",
                 "(global-name \"com.apple.coreservices.launchservicesd\"",
+                // Only when the helper passes SV2_IOS=1 (sv2 run --ios).
+                "(global-name-prefix \"com.apple.CoreSimulator.\"",
                 // The explicit denies that follow the allow.
                 "(global-name \"com.apple.DiskArbitration.diskarbitrationd\"",
                 "(global-name \"com.apple.NetAuthAgent\"",
@@ -260,38 +273,43 @@ mod tests {
         .expect("the scratch paths do not fit in a profile");
         std::fs::write(root.join("profile.sb"), text).unwrap();
         let user = std::env::var("USER").unwrap_or_else(|_| "nobody".into());
-        let out = Command::new("/usr/bin/sandbox-exec")
-            .arg("-f")
-            .arg(root.join("profile.sb"))
-            .args(["/bin/bash", "-c", probes])
-            .env_clear()
-            .env("HOME", at("home"))
-            .env("USER", &user)
-            .env("LOGNAME", &user)
-            .env("SHELL", "/bin/zsh")
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-            .env("TMPDIR", at("tmp"))
-            .env("SV2_WORKSPACE", at("ws/user/work"))
-            // Outside a session there is no account behind HOME.
-            .env("SV2_PROBE_NO_ACCOUNT", "1")
-            .current_dir(root.join("ws/user/work"))
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-        let report = String::from_utf8_lossy(&out.stdout);
-        let failed: Vec<&str> = report.lines().filter(|l| l.starts_with("FAIL")).collect();
-        let passed = report.lines().filter(|l| l.starts_with("ok ")).count();
-        for line in report.lines().filter(|l| l.starts_with("skip")) {
-            eprintln!("{line}");
+        // As a session without --ios has it, then as one with.
+        for ios in [false, true] {
+            let out = Command::new("/usr/bin/sandbox-exec")
+                .args(ios_param(ios))
+                .arg("-f")
+                .arg(root.join("profile.sb"))
+                .args(["/bin/bash", "-c", probes])
+                .env_clear()
+                .env("HOME", at("home"))
+                .env("USER", &user)
+                .env("LOGNAME", &user)
+                .env("SHELL", "/bin/zsh")
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("TMPDIR", at("tmp"))
+                .env("SV2_WORKSPACE", at("ws/user/work"))
+                // Outside a session there is no account behind HOME.
+                .env("SV2_PROBE_NO_ACCOUNT", "1")
+                .env("SV2_PROBE_IOS", if ios { "1" } else { "0" })
+                .current_dir(root.join("ws/user/work"))
+                .output()
+                .unwrap();
+            let report = String::from_utf8_lossy(&out.stdout);
+            let failed: Vec<&str> = report.lines().filter(|l| l.starts_with("FAIL")).collect();
+            let passed = report.lines().filter(|l| l.starts_with("ok ")).count();
+            for line in report.lines().filter(|l| l.starts_with("skip")) {
+                eprintln!("{line}");
+            }
+            assert!(
+                failed.is_empty(),
+                "probes failed under the profile:\n{}\n{}",
+                failed.join("\n"),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // Not vacuous: the script ran to its end.
+            assert!(passed >= 35, "only {passed} probes passed:\n{report}");
         }
-        assert!(
-            failed.is_empty(),
-            "probes failed under the profile:\n{}\n{}",
-            failed.join("\n"),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        // Not vacuous: the script ran to its end.
-        assert!(passed >= 35, "only {passed} probes passed:\n{report}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The newest `chromium_headless_shell-N` directory in this user's
@@ -321,6 +339,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("sv2-profile-test-{}.sb", std::process::id()));
         std::fs::write(&path, text).unwrap();
         let out = Command::new("/usr/bin/sandbox-exec")
+            .args(ios_param(false))
             .arg("-f")
             .arg(&path)
             .arg("/usr/bin/true")
@@ -334,6 +353,37 @@ mod tests {
         );
     }
 
+    /// The file asks whether the session may use the simulator, and does
+    /// not load when it is not told: no session starts by oversight with
+    /// the rule on, or with a parameter of another name.
+    #[test]
+    fn the_profile_does_not_load_without_its_parameter() {
+        let text = render("pat", "work", &[]).unwrap();
+        assert!(text.contains("(param \"SV2_IOS\")"), "{text}");
+        assert!(!text.contains("__IOS_PARAM__"));
+        let path =
+            std::env::temp_dir().join(format!("sv2-profile-param-{}.sb", std::process::id()));
+        std::fs::write(&path, text).unwrap();
+        let loads = |args: &[&str]| {
+            Command::new("/usr/bin/sandbox-exec")
+                .args(args)
+                .arg("-f")
+                .arg(&path)
+                .arg("/usr/bin/true")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        let (off, on) = (ios_param(false), ios_param(true));
+        assert_eq!(off, ["-D", "SV2_IOS=0"]);
+        assert_eq!(on, ["-D", "SV2_IOS=1"]);
+        assert!(loads(&["-D", "SV2_IOS=0"]) && loads(&["-D", "SV2_IOS=1"]));
+        assert!(!loads(&[]));
+        assert!(!loads(&["-D", "IOS=1"]));
+        std::fs::remove_file(&path).unwrap();
+    }
+
     /// The load test must be able to fail: a broken profile is rejected.
     #[test]
     fn broken_profile_does_not_load() {
@@ -341,6 +391,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("sv2-profile-bad-{}.sb", std::process::id()));
         std::fs::write(&path, text).unwrap();
         let out = Command::new("/usr/bin/sandbox-exec")
+            .args(ios_param(false))
             .arg("-f")
             .arg(&path)
             .arg("/usr/bin/true")

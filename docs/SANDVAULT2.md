@@ -34,8 +34,9 @@ So v2 starts from this rule:
 The rule binds sandvault's own code (`sv2` and the helper), not the person:
 the host user still edits files in the workspace by hand.
 
-There are two stated exceptions: `sv2 repair` (see "Workspace permissions")
-and the iOS bridge (see "iOS bridge").
+There is one stated exception: `sv2 repair` (see "Workspace permissions").
+A second, an iOS bridge on the host, was designed, built and taken out
+again on 2026-11-27 (see "iOS bridge").
 
 Of the 19 findings in the security review, about 12 no longer have a code
 path under this rule and the feature removals below.
@@ -536,6 +537,14 @@ the top of this document, so it is opt-in and held to these requirements:
 - every argument is validated and passed so it cannot be read as an option;
 - the bridge runs as the host user under `sv2`, never from the root helper;
 - the README states exactly what trust `--ios` grants.
+
+**Superseded on 2026-11-27.** The bridge was built to these requirements
+(TASK-0007) and met them. Building it led to the measurement of open item
+2: a simulator app is an unconfined process of whoever runs the simulator,
+so a bridge that installs the sandbox's app in the host user's simulator
+gives the sandbox code execution as the host user, whatever the bridge
+checks. The simulator now runs in the sandbox account instead and there is
+no bridge (TASK-0025); see "iOS simulator" under "Milestone 1".
 
 ## Installed artifacts and upgrades
 
@@ -1207,6 +1216,100 @@ Decisions this milestone made:
     ran `sv2 --lightpanda` and `sv2 --chrome` sessions with it on a Mac
     with sv2 installed. Not seen: pi and muse reading it (no provider
     signed in).
+- **iOS simulator (2026-11-27).** `sv2 --ios AGENT` lets the session run
+  an iOS simulator itself, as the sandbox account. There is no bridge and
+  nothing of it runs as the host user. No `--ios-gui`, no `-i`.
+  - *Why not the bridge.* A host bridge was built first (TASK-0007:
+    token, `Host` check, installs copied out of the workspace through
+    descriptors) and worked. With it an app was measured, on macOS 26.7.3
+    (25G342) with Xcode 27.2 (27B52) in an iOS 27.0 simulator: installed
+    and launched by a sandboxed session, it ran as the host user (uid 501,
+    seen in `ps` on the host), listed the host home (123 entries) and wrote
+    a file there. A simulator is not a virtual machine: an app in it is an
+    ordinary process of the account that runs the simulator, on the Mac's
+    own kernel, and its container is a convention. So the bridge gave the
+    sandbox code execution as the host user, and no check in the bridge
+    could change that. It was removed the same day.
+  - *What was measured before building this.* As the sandbox account in
+    its own launchd domain, without the profile (`sudo launchctl asuser`):
+    `simctl` lists the runtimes, creates a device, boots it in 39 seconds
+    with no login session and no window, launches Settings and takes a
+    screenshot; a device is 1.8 GB. Under the profile, as the developer
+    with `sandbox-exec`: `simctl` fails ("Connection refused" from
+    `CoreSimulatorService`, and `simdiskimaged` unreachable) until
+    `mach-lookup` of names starting `com.apple.CoreSimulator.` is allowed;
+    with that one rule create, boot, launch, screenshot, `spawn`,
+    `listapps` and delete work, and so do iosef's `describe`, `tap` and
+    `swipe`. `iosef view` aborts (it captures a window); `simctl io
+    screenshot` is used instead.
+  - *One profile file, one parameter.* The rule is in `base.sb` inside
+    `(if (string=? (param "SV2_IOS") "1") ...)`. The helper always passes
+    `-D SV2_IOS=1` or `=0` to `sandbox-exec`; without the parameter the
+    file does not load, so no session starts with the question unanswered.
+    `launch NAME ios -- COMMAND` is how `sv2` asks; the word is carried to
+    the second stage. There is no second file to write, version or remove,
+    and the file is validated both ways before it is renamed into place.
+    Helper version 10, profile version 9.
+  - *What `--ios` grants (open item 2).* `CoreSimulatorService` is started
+    by launchd in the sandbox account's domain, not by the session, so it,
+    the simulated device and every app in it run as the sandbox account
+    **without the sandbox profile**. A session with `--ios` can therefore
+    run code that the profile's denies do not bind; this is open item 7's
+    route, opened on purpose and only for such a session. The account
+    still binds that code: the host home is closed to it by its mode
+    (750), as is everything else the account has no right to. Lost for it
+    are the profile's own denials: reads under `/Users` that permissions
+    allow, `/Volumes`, the other keychains in `/Library/Keychains`, and
+    this Mac's SSH port (sshd still refuses the account). The banner and
+    `README-SV2.md` say so.
+  - *Who makes the simulator.* The guest launcher (KIND `ios XCRUN`, after
+    a browser's), as the sandbox user. It deletes devices named
+    `sv2-ios-<process ID>` whose process is gone, creates one for the
+    newest available iOS runtime, trying iPhone types from the newest down
+    until `simctl create` takes one, boots it, and sets
+    `SV_IOS_SIMULATOR_UDID`. A process of its own watches the session's
+    process and shuts the device down and deletes it when that ends. The
+    session does not wait for the boot. `sv2` checks that `simctl` exists
+    before it creates a profile, and still becomes the session with `exec`.
+  - *Accessibility, before the boot.* The launcher writes the two keys
+    into the device's own `com.apple.Accessibility` settings file before
+    it boots the device. v1 set them after the boot and restarted
+    `com.apple.CoreSimulator.bridge`; done here by the launcher's
+    background process, that restart ran at the moment the session
+    installed its app, and the install failed with "Mach error -308,
+    server died" (seen in the first real run). Set before the boot, there
+    is nothing to restart, and `describe` sees an app at its first launch.
+  - *Measured in a real session, 2026-11-27*, helper 10 installed, as
+    `sv2-pat-default` under its profile: the simulator boots with no
+    window; install, launch and screenshot work; iosef, installed by the
+    launcher, describes and taps. The app is a process of the sandbox
+    account in the host's `ps` and reports that account's uid; it could
+    not list the host home, nor list or write a host-only directory, and
+    the host found nothing written there. Without `--ios` the same
+    `simctl` reaches nothing. Afterwards no `launchd_sim` of the account
+    is left and the device's directory is gone. (CoreSimulator gives an
+    account a set of some eighty devices of its own the first time it is
+    asked; they are small until one is booted.)
+  - *iosef.* Each sandbox home needs its own; the launcher installs it
+    with Homebrew's `uv` (`uv tool install iosef`) when it is missing, as
+    it installs Playwright's headless shell, and `sv2` installs `uv` with
+    Homebrew like node.
+  - *The launcher's size.* The test's limit went from 16 KB to 20 KB; the
+    launcher is 18 KB.
+  - *herdr.* Its wrapper refuses a session with a simulator as it refuses
+    one with a browser.
+  - *Tests.* Unit tests: the helper's argument parsing with the word, the
+    profile not loading without its parameter, the pinned profile text and
+    its list of Mach services; the launcher against a stand-in `xcrun`
+    (which runtime and iPhone, stale devices, shutdown and delete). The
+    profile probes run twice, without the parameter (the services are
+    closed) and with it. `tests/integration` runs a real session with
+    `--ios` when Xcode and a runtime are there, with an app built from
+    `tests/ios-probe` that reports who it is and what it can reach; the
+    host looks at whose process the app is and at the directory it tried
+    to write.
+  - *Not done.* Real devices; a window to watch; per-profile control of
+    the option (TASK-0005).
 - **The user's configuration (2026-11-26).** What the user puts in
   `~/.config/sandvault2/home` (shell startup files, a `.gitconfig`) is
   copied into the home of a profile's sandbox account when `sv2 run` starts
@@ -1650,13 +1753,20 @@ None recorded.
   setting"). The first text is the browser's (next item).
 - [x] Telling an agent that its session has a browser; see "Telling the
   agent" under "Browsers".
+- [x] The iOS simulator: `--ios`; see "iOS simulator" under "Milestone 1".
 
 ## Open items
 
 1. **Quarantine.** Decided on 2026-11-26; see "Quarantine" under
    "Milestone 1". sv2 neither runs a fresh program on the host, as v1 did,
    nor removes the attribute.
-2. **Simulator trust.** In TASK-0006.
+2. **Simulator trust.** Measured on 2026-11-27: a simulator app is an
+   unconfined process of whoever runs the simulator. In the host user's
+   simulator it read and wrote the host home, so the host bridge was
+   removed. The simulator now runs as the sandbox account, and `--ios`
+   grants code outside the sandbox profile, inside the account. The
+   measurements, with the macOS and Xcode versions, are under "iOS
+   simulator" in "Milestone 1". TASK-0006 is still open in the backlog.
 3. **Daemon follow-up.** Scope and timing of the move from the sudoers helper
    to a launchd daemon.
 

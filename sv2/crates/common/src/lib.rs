@@ -30,13 +30,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The helper itself: bump on any change to its code that an installed
 /// machine must get (a fix, a new check, a new verb or argument). Nothing
 /// can detect a forgotten bump here.
-pub const HELPER_VERSION: u32 = 9;
+pub const HELPER_VERSION: u32 = 10;
 /// `/etc/sudoers.d/sandvault2`.
 pub const SUDOERS_VERSION: u32 = 2;
 /// The sshd drop-in that refuses sandbox accounts.
 pub const SSHD_DROPIN_VERSION: u32 = 1;
 /// The rendered `sandbox-exec` profile: `base.sb` and how it is filled in.
-pub const SANDBOX_PROFILE_VERSION: u32 = 8;
+pub const SANDBOX_PROFILE_VERSION: u32 = 9;
 
 /// The key of the comment line each file carries: `<key>: <number>`.
 pub const SUDOERS_STAMP: &str = "sv2-sudoers-version";
@@ -121,6 +121,14 @@ pub const MODE_ADMIN: &str = "admin";
 /// The helper's `uninstall` takes this word to mean "and remove every
 /// profile there is"; `sv2 uninstall --all-profiles` passes it.
 pub const UNINSTALL_ALL_PROFILES: &str = "all-profiles";
+
+/// The word after the profile's name in `launch NAME ios -- COMMAND`: the
+/// session may use the iOS simulator (`sv2 run --ios`).
+pub const LAUNCH_IOS: &str = "ios";
+
+/// The parameter of the sandbox profile that the word above sets to 1. The
+/// helper always passes it, as 0 or 1: the profile does not load without.
+pub const PROFILE_PARAM_IOS: &str = "SV2_IOS";
 
 /// Helper exit status for "sv2 and the installed helper differ in an artifact
 /// version" (`install_version`). Only
@@ -629,7 +637,7 @@ mod tests {
     #[test]
     fn install_version_is_one_plain_word() {
         let v = install_version();
-        assert_eq!(v, "helper=9,sudoers=2,sshd=1,profile=8");
+        assert_eq!(v, "helper=10,sudoers=2,sshd=1,profile=9");
         assert!(v
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'=' || b == b','));

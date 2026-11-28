@@ -4,7 +4,8 @@
 //! sv2 install | uninstall [--all-profiles]
 //! sv2 user allow USER | user deny USER
 //! sv2 profile add NAME | profile remove NAME | profile list
-//! sv2 run [OPTIONS] NAME [ARGS...]   OPTIONS: --profile NAME, --native
+//! sv2 run [OPTIONS] NAME [ARGS...]   OPTIONS: --profile NAME, --native,
+//!                                    --chrome, --lightpanda, --ios
 //! sv2 [OPTIONS] NAME [ARGS...]        shorthand for sv2 run
 //! sv2 repair PATH | doctor
 //! sv2 agent new NAME [--from AGENT]
@@ -63,6 +64,8 @@ pub enum Cmd {
         native: bool,
         /// Start this browser in the sandbox for the session.
         browser: Option<Browser>,
+        /// Give the session an iOS simulator, run on the host.
+        ios: bool,
         agent: String,
         args: Vec<OsString>,
     },
@@ -163,6 +166,7 @@ fn parse_run(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
     let mut profile = DEFAULT_PROFILE.to_string();
     let mut native = false;
     let mut browser = None;
+    let mut ios = false;
     let mut i = 0;
     while i < args.len() {
         let Some(a) = args[i].to_str() else { break };
@@ -189,6 +193,8 @@ fn parse_run(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
                 return Err("--chrome and --lightpanda are two browsers: use one".into());
             }
             browser = Some(wanted);
+        } else if a == "--ios" {
+            ios = true;
         } else {
             return Err(format!("unknown option '{a}'"));
         }
@@ -212,6 +218,7 @@ fn parse_run(args: &[OsString], agents: &[&str]) -> Result<Cmd, String> {
         profile,
         native,
         browser,
+        ios,
         agent,
         args: args[i + 1..].to_vec(),
     })
@@ -402,6 +409,7 @@ mod tests {
             profile: "default".into(),
             native: false,
             browser: None,
+            ios: false,
             agent: agent.into(),
             args: vec![],
         }
@@ -412,6 +420,7 @@ mod tests {
             profile: profile.into(),
             native: false,
             browser: None,
+            ios: false,
             agent: "shell".into(),
             args: os(args),
         }
@@ -624,6 +633,7 @@ mod tests {
             profile: "default".into(),
             native: false,
             browser: Some(browser),
+            ios: false,
             agent: "shell".into(),
             args: vec![],
         };
@@ -644,11 +654,41 @@ mod tests {
     }
 
     #[test]
+    fn ios_is_an_option_before_the_agent() {
+        let with = |browser: Option<Browser>| Cmd::Run {
+            profile: "default".into(),
+            native: false,
+            browser,
+            ios: true,
+            agent: "shell".into(),
+            args: vec![],
+        };
+        assert_eq!(p(&["--ios", "shell"]), Ok(with(None)));
+        assert_eq!(p(&["run", "--ios", "--ios", "s"]), Ok(with(None)));
+        // With a browser, in either order.
+        assert_eq!(
+            p(&["--ios", "--chrome", "shell"]),
+            Ok(with(Some(Browser::Chrome)))
+        );
+        assert_eq!(
+            p(&["--lightpanda", "--ios", "shell"]),
+            Ok(with(Some(Browser::Lightpanda)))
+        );
+        // After the agent it is the agent's; it is not shortened, takes
+        // no value, and has no short form (v1's -i).
+        assert_eq!(p(&["shell", "--ios"]), Ok(run("default", &["--ios"])));
+        for bad in ["--io", "--ios=yes", "-i", "--ios-gui"] {
+            assert!(p(&[bad, "shell"]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn native_is_an_option_before_the_agent() {
         let native = |profile: &str| Cmd::Run {
             profile: profile.into(),
             native: true,
             browser: None,
+            ios: false,
             agent: "shell".into(),
             args: vec![],
         };
@@ -769,6 +809,7 @@ mod tests {
                 profile: "work".into(),
                 native: false,
                 browser: None,
+                ios: false,
                 agent: "pi".into(),
                 args: vec![]
             })
