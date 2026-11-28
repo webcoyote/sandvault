@@ -3,11 +3,11 @@ id: TASK-0027
 title: >-
   sv and sv2: a session can check the passwords of accounts on this Mac through
   opendirectoryd
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-28T05:30:09Z'
-updated_date: '2026-11-28T05:40:17Z'
+updated_date: '2026-11-28T06:10:29Z'
 labels:
   - sandbox-hardening
   - sv2
@@ -31,9 +31,9 @@ Both profiles allow every Mach service whose name starts with `com.apple.system.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 In a session of sv2 and in a session of sv, `dscl . -authonly` with a name that does not exist and `dscl . -read` of the host user both fail, and a probe that fails if either works is kept as a test
-- [ ] #2 Every Mach name under `com.apple.system.` that stays allowed names the probe that fails without it, measured as the sandbox user in a real session
-- [ ] #3 The probes for names (`id shows names`, `ssh-keygen`) and `defaults write and read` pass in a real session of each
+- [x] #1 In a session of sv2 and in a session of sv, `dscl . -authonly` with a name that does not exist and `dscl . -read` of the host user both fail, and a probe that fails if either works is kept as a test
+- [x] #2 Every Mach name under `com.apple.system.` that stays allowed names the probe that fails without it, measured as the sandbox user in a real session
+- [x] #3 The probes for names (`id shows names`, `ssh-keygen`) and `defaults write and read` pass in a real session of each
 - [x] #4 The profile version of each (`SANDBOX_PROFILE_VERSION`, `SV_SANDBOX_PROFILE_VERSION`) is raised so that installed profiles are written again
 <!-- AC:END -->
 
@@ -58,4 +58,20 @@ Verified as the current user: sv2 unit tests pass (12 and 48), profile_probes pa
 Not verified, no sudo in this session: the sv2 integration suite (skipped: "the installed helper is not this build", needs `sv2 install`) and scripts/tests for sv (stopped at its first sudo). So criteria 1 to 3 are unproven where they say "in a session" or "in a real session": the probes as a sandbox account, `defaults write and read` (skipped outside a session), and guest/home/configure, which runs `defaults write com.apple.dt.Xcode`. Criterion 4 is met.
 
 2026-11-28. Pat ran the integration suite on the first commit (d949e93): 53 probes ok, "defaults write and read" failed ("The domain/default pair of (com.sandvault2.probe, k) does not exist"). Cause, found by adding one name at a time as the current user with the real home: `defaults write` needs `com.apple.system.opendirectoryd.membership`, which answers whether a user is in a group and checks no password. With it added, `defaults` writes and reads, and both dscl probes are still refused (eServerError). notification_center, logger, the two DirectoryService names and opendirectoryd.api did not help. Both profiles now name libinfo and membership; versions 11 (sv2) and 9 (sv). A preferences test was added to scripts/tests for sv. Still to be confirmed by a real-session run: criteria 1 to 3.
+
+2026-11-28. Pat ran the sv2 integration suite on 355bb89 and e71bc89: 198 passed in 149s. That run has the probes in a real session as a sandbox account, so for sv2: the two dscl probes are refused, the name probes pass, and "defaults write and read" passes with the membership service. Still open for sv: scripts/tests has not been reported, so criteria 1 to 3, which each name both, stay unchecked.
+
+2026-11-28. Pat ran ./scripts/validate in full (sv2 tests and integration, scripts/tests for sv, tests/tests): everything passed. So in a real session of sv as well: the two dscl tests are refused, names resolve, and preferences are written and read.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Both profiles allowed every Mach service under `com.apple.system.`, which let a session test the password of any account of this Mac with `dscl . -authonly` and read its record. They now name two services: `com.apple.system.opendirectoryd.libinfo` (user and group names) and `com.apple.system.opendirectoryd.membership` (without it `defaults write` writes nothing and says nothing; found when the integration suite failed on the first attempt). Profile versions: sv2 9 to 11, sv 7 to 9, so installed profiles are written again.
+
+Tests: probes "check a password (dscl)" and "read an account's record (dscl)" in sv2/tests/profile-probes.sh; four tests in scripts/tests for sv (the two dscl ones, names, preferences). Both dscl checks get an answer from opendirectoryd under the old prefix.
+
+Verified by Pat on macOS 26.7.3: ./scripts/validate passes in full, the sv2 integration suite with 198 checks in real sessions. Commits d949e93 and 355bb89.
+
+Not measured: whether opendirectoryd slows or locks out repeated wrong passwords, and the notification_center and logger names agent-safehouse allows (no probe needs them).
+<!-- SECTION:FINAL_SUMMARY:END -->

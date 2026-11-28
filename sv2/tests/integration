@@ -15,6 +15,38 @@
 set -euo pipefail
 
 BIN_DIR="${1:?usage: integration DIR}"
+# The suite runs in a session of its own, with no terminal. No check reads
+# the terminal of whoever runs it: the ones about terminals make their own
+# (on_pty). With that terminal, sudo (use_pty) puts it in raw mode for every
+# session: Ctrl-C is then a character passed into the session and not an
+# interrupt, so the run cannot be stopped, and a run that is killed leaves
+# the terminal raw. Taking standard input away is not enough: sudo finds the
+# terminal as the controlling one. So the script starts itself again under a
+# small parent that stays with the terminal, waits, and on Ctrl-C (or TERM,
+# or a hangup) ends everything in the new session; the EXIT trap below then
+# removes the throwaway profile. A CI runner has no terminal here either.
+if [[ -z "${SV2_INTEGRATION_DETACHED:-}" ]]; then
+    SV2_INTEGRATION_DETACHED=1 exec /usr/bin/perl -e '
+        use POSIX qw(setsid);
+        my $pid = fork();
+        die "integration: fork: $!\n" unless defined $pid;
+        if ($pid == 0) {
+            setsid();
+            open(STDIN, "<", "/dev/null");
+            exec @ARGV or die "integration: exec $ARGV[0]: $!\n";
+        }
+        my $stopped = 0;
+        $SIG{INT} = $SIG{TERM} = $SIG{HUP} = sub {
+            print STDERR "\nintegration: stopping, and removing the throwaway profile\n" unless $stopped++;
+            kill "TERM", -$pid;
+        };
+        1 while waitpid($pid, 0) == -1 && $!{EINTR};
+        # Die of the interrupt itself, so that a script that ran this one
+        # stops too and does not go on to its next step.
+        if ($stopped) { $SIG{INT} = "DEFAULT"; kill "INT", $$; exit 130; }
+        exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+    ' "${BASH_SOURCE[0]}" "$@"
+fi
 # The sessions here are not given the configuration of whoever runs the
 # suite (~/.config/sandvault2/home): a .gitconfig or a .zshrc of theirs
 # would decide what the checks see.
@@ -63,8 +95,20 @@ SSHD_DROPIN="/etc/ssh/sshd_config.d/000-sandvault2.conf"
 
 PASSED=0
 FAILED=0
-pass() { PASSED=$((PASSED + 1)); [[ "${VERBOSE:-0}" == "0" ]] || echo -e "${GREEN}ok${NC}   $1"; }
-fail() { FAILED=$((FAILED + 1)); echo -e "${RED}FAIL${NC} $1"; [[ -z "${2:-}" ]] || echo "     $2"; }
+# Where the run is: the section and the last check that finished. The
+# watcher below reads it. Empty until the scratch directory exists.
+SECTION="start"
+PROGRESS=""
+progress() { [[ -z "$PROGRESS" ]] || printf '%s\n%s\n' "$SECTION" "$1" > "$PROGRESS"; }
+pass() { PASSED=$((PASSED + 1)); progress "$1"; [[ "${VERBOSE:-0}" == "0" ]] || echo -e "${GREEN}ok${NC}   $1"; }
+fail() { FAILED=$((FAILED + 1)); progress "$1"; echo -e "${RED}FAIL${NC} $1"; [[ -z "${2:-}" ]] || echo "     $2"; }
+# section NAME: said at every level of VERBOSE, with the time since the
+# start, so that a slow part of the suite can be seen while it runs.
+section() {
+    SECTION="$1"
+    progress "(none yet in this section)"
+    printf '[%4ss] %s\n' "$SECONDS" "$1"
+}
 # check NAME EXPECTED GOT
 check() { if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1" "expected [$2] got [$3]"; fi; }
 refused() { # NAME CMD...
@@ -77,9 +121,31 @@ security_of() { $STAT -f '%Sp %u %g' "$1"; /bin/ls -lde "$1" | /usr/bin/tail -n 
 
 # Host-only scratch (never the workspace).
 SCRATCH="$(/usr/bin/mktemp -d)"
+PROGRESS="$SCRATCH/progress"
+progress "(none yet)"
+
+# The watcher: when no check has finished for STALL_SECONDS, say where the
+# run is, and again at every further STALL_SECONDS. A step that hangs is the
+# one after the check it names. It stops when this shell is gone.
+STALL_SECONDS="${SV2_TESTS_STALL_SECONDS:-30}"
+[[ "$STALL_SECONDS" =~ ^[1-9][0-9]*$ ]] || STALL_SECONDS=30
+(
+    seen=""; since=0
+    while /bin/sleep 5 && kill -0 $$ 2>/dev/null; do
+        now="$(/bin/cat "$PROGRESS" 2>/dev/null)" || exit 0
+        if [[ "$now" != "$seen" ]]; then seen="$now"; since=0; continue; fi
+        since=$((since + 5))
+        if [[ $((since % STALL_SECONDS)) -eq 0 ]]; then
+            echo -e "${ORANGE}        ... ${since}s in \"${now%%$'\n'*}\" since the last check finished: ${now#*$'\n'}${NC}"
+        fi
+    done
+) &
+WATCHER=$!
 
 cleanup() {
     set +e
+    # wait: so that bash does not report the watcher as "Terminated".
+    kill "$WATCHER" 2>/dev/null; wait "$WATCHER" 2>/dev/null
     /bin/rm -rf "$SCRATCH"
     # Empty the throwaway workspace (find does not follow links), so that the
     # helper removes the directory too, whichever check the run stopped at.
@@ -97,6 +163,7 @@ account_exists() { /usr/bin/dscl . -read "/Users/$ACCOUNT" UniqueID >/dev/null 2
 ###############################################################################
 # profile add
 ###############################################################################
+section "profile add"
 "$SV2" profile add "$P" >/dev/null
 check "profile add: listed as active" "active" \
     "$("$SV2" profile list | /usr/bin/awk -v p="$P" '$1 == p {print $2}')"
@@ -168,6 +235,7 @@ check "profile add: repeat keeps the UID" "$SB_UID" \
 ###############################################################################
 # sessions
 ###############################################################################
+section "sessions"
 check "session: runs as the sandbox account" "$ACCOUNT" "$(sb /usr/bin/id -un)"
 check "session: no staff, no host groups" "" \
     "$(sb /usr/bin/id -Gn | /usr/bin/tr ' ' '\n' | /usr/bin/grep -xE 'staff|admin|wheel|sv2-users' || true)"
@@ -256,6 +324,7 @@ check "environment: TERM is forwarded" "sv2-test-term" "$(TERM=sv2-test-term sb 
 ###############################################################################
 # terminal
 ###############################################################################
+section "terminal"
 # The session must not share the host's terminal: a process holding the host's
 # tty can push keystrokes into its input queue (TIOCSTI), and the host shell
 # runs them after the session ends. sudo gives the session a pty of its own.
@@ -335,6 +404,7 @@ fi
 ###############################################################################
 # confinement (judged from the host side)
 ###############################################################################
+section "confinement (judged from the host side)"
 MARK="sv2-test-$$-$RANDOM"
 check "sandbox: cannot read the host home" "" "$(sb /bin/ls "$HOME" 2>/dev/null || true)"
 sb /usr/bin/touch "/Users/Shared/$MARK" 2>/dev/null || true
@@ -472,6 +542,7 @@ if [[ ! -x "$WS/host-file" ]]; then pass "workspace: new files are not executabl
 ###############################################################################
 # repair
 ###############################################################################
+section "repair"
 # Entries with no inherited ACL, as if moved in from elsewhere: host-owned,
 # private mode, so the sandbox has no way in.
 (
@@ -566,6 +637,7 @@ sb /bin/sh -c 'chflags nouchg locked'
 ###############################################################################
 # the helper refuses what it must
 ###############################################################################
+section "the helper refuses what it must"
 CALL=(/usr/bin/sudo -n -- "$HELPER" call "$VERSION")
 # sandbox-exec would read a leading -p as "use this profile instead".
 OUT="$("${CALL[@]}" launch "$P" -- -p '(version 1)(allow default)' /usr/bin/touch "/Users/Shared/$MARK" 2>&1 || true)"
@@ -600,6 +672,7 @@ fi
 ###############################################################################
 # agents
 ###############################################################################
+section "agents"
 # Built-in definitions are found beside sv2, and are refused where a sandbox
 # could write them, which includes a checkout in /Users/Shared. So the suite
 # runs agents from a copy of the build in host-only scratch, laid out as an
@@ -680,6 +753,7 @@ check "agent: the exit status is the agent's" "7" \
 ###############################################################################
 # browsers
 ###############################################################################
+section "browsers"
 # --lightpanda and --chrome: the launcher starts the browser in the sandbox,
 # the session finds it at SV_BROWSER_ENDPOINT, and nothing of it is left when
 # the session has ended. (That Chrome loads a page under the profile is the
@@ -724,6 +798,7 @@ fi
 ###############################################################################
 # iOS simulator
 ###############################################################################
+section "iOS simulator"
 # --ios: the helper opens the simulator's services in the session's sandbox
 # profile, and the session runs a simulator itself, as the sandbox account.
 # Nothing of it runs as the host user.
@@ -870,6 +945,7 @@ fi
 ###############################################################################
 # credentials
 ###############################################################################
+section "credentials"
 # A deploy key: made in the sandbox, read back as a public key and nothing
 # else, and offered to the user in a command that names the repository the
 # user asked for and a file the sandbox cannot write. (No key is added to any
@@ -1075,6 +1151,7 @@ check "helper: printing into a full pipe does not hold the lock" "first=blocked 
 ###############################################################################
 # profile remove
 ###############################################################################
+section "profile remove"
 # A detached process outlives the session, and removal kills it.
 sb /bin/sh -c '/usr/bin/nohup /bin/sleep 600 >/dev/null 2>&1 &'
 if /usr/bin/pgrep -u "$SB_UID" -x sleep >/dev/null; then
@@ -1201,7 +1278,7 @@ if [[ -e "$WS" ]]; then fail "remove: empty workspace is removed"; else pass "re
 
 echo
 if [[ "$FAILED" -ne 0 ]]; then
-    echo -e "${RED}sv2 integration: $FAILED failed, $PASSED passed${NC}"
+    echo -e "${RED}sv2 integration: $FAILED failed, $PASSED passed in ${SECONDS}s${NC}"
     exit 1
 fi
-echo -e "${GREEN}sv2 integration: $PASSED passed${NC}"
+echo -e "${GREEN}sv2 integration: $PASSED passed in ${SECONDS}s${NC}"
