@@ -3,10 +3,10 @@ id: TASK-0006
 title: >-
   sv2: verify what a simulator app can do on the host, and document what --ios
   grants
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-27T17:59:06Z'
-updated_date: '2026-11-27T23:42:00Z'
+updated_date: '2026-11-28T04:29:54Z'
 labels:
   - sv2
 dependencies: []

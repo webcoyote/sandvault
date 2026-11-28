@@ -1,9 +1,10 @@
 ---
 id: TASK-0017
 title: 'sv2: close the test gaps listed under "Not yet verified"'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-27T17:59:07Z'
+updated_date: '2026-11-28T05:22:53Z'
 labels:
   - sv2
 dependencies: []

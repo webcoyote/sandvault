@@ -262,15 +262,16 @@ separates user from profile unambiguously.
 ## Sandbox profile
 
 - Each sandvault profile has its own `sandbox-exec` profile file, so profiles
-  can later be given different capabilities, as defined by the host user.
+  can be given different rules by the host user. What the host user chooses
+  is a policy; see `docs/SANDVAULT2-POLICIES.md`, which is decided and not
+  yet built.
 - The files are root-owned and live outside the workspace and the sandbox
   home, for example `/Library/Application Support/sandvault2/profiles/<user>/<profile>.sb`.
   The helper writes one on `profile-add` and deletes it on `profile-remove`.
   The sandbox user cannot edit its own file.
 - Root never opens a host-owned file, so `sv2` sends the host user's
-  capability choices to the helper on stdin. The helper validates them and
-  renders the file from the embedded base profile. The input format is an open
-  item.
+  policy to the helper on stdin. The helper validates it and renders the
+  file from the policies embedded in it.
 - **Decided:** the first milestone ported v1's profile unchanged
   (allow-default with its deny list). It is default deny since 2026-11-26;
   see "Default deny" under "Milestone 1".
@@ -313,9 +314,17 @@ sv2 uninstall                     # asks for sudo; refuses while profiles exist
 sv2 uninstall --all-profiles      # asks for sudo; removes every profile too
 sv2 user allow USER               # asks for sudo
 sv2 user deny USER                # asks for sudo
-sv2 profile add NAME
+sv2 profile add NAME              # [--policy POLICY] is not built
 sv2 profile remove NAME
 sv2 profile list
+sv2 profile set NAME --policy POLICY    # not built; see SANDVAULT2-POLICIES.md
+sv2 policy list                         # not built, nor the six below
+sv2 policy show NAME [--expanded]
+sv2 policy new NAME [--from POLICY]
+sv2 policy edit NAME
+sv2 policy check NAME
+sv2 policy rename OLD NEW
+sv2 policy remove NAME
 sv2 run [OPTIONS] NAME [ARGS...]
 sv2 [OPTIONS] NAME [ARGS...]      # shorthand for sv2 run
 sv2 repair PATH
@@ -576,24 +585,6 @@ A checkout inside the workspace lets a sandboxed agent edit the source of the
 root helper (finding 7). A helper build must be reviewed, and built from a
 checkout the sandbox cannot write, before `sv2 install`.
 
-## Milestone 1
-
-Implemented in `sv2/` (a Cargo workspace): `sv2 install`, `uninstall`,
-`user allow|deny`, `profile add|remove|list`, `sv2 run shell`,
-`sv2 repair`, and the SSH lockdown, with v1's sandbox profile ported
-unchanged.
-
-| Crate | Binary | Runs as | Dependencies |
-|---|---|---|---|
-| `crates/common` | (library) | both | none |
-| `crates/helper` | `sv2-helper` | root | `libc` |
-| `crates/cli` | `sv2` | host user | `libc`, `serde`, `toml` |
-
-Build and test: `scripts/tests-sv2` (also run by `scripts/validate`). Unit
-tests need no privileges. `sv2/tests/integration` creates a throwaway profile
-and needs this build installed (`sv2/target/release/sv2 install`); without
-that it reports itself SKIPPED, and fails under `SV_TESTS_FAIL_ON_SKIP=1`.
-
 Decisions this milestone made:
 
 - **Helper modes.** See the sudoers line under "Privileged helper".
@@ -696,8 +687,6 @@ Decisions this milestone made:
       walk skips entries of the sandbox account that refused the host user,
       `sv2` runs the command through `launch` (as the sandbox user, under
       the profile) and walks once more. Nothing is launched when there is
-      no such entry.
-    - `profile remove`: the helper runs the command as the sandbox UID
       after the account's processes are killed and before the account is
       deleted (helper version 7). `sv2`'s ownership pass afterwards takes
       the entries over. After the account is gone nobody but root could.
@@ -1588,247 +1577,3 @@ Decisions this milestone made:
   of a host user called `users`. The rename bumped the helper and sudoers
   versions to 2 but has no upgrade path: the one machine that had sv2 was
   uninstalled first.
-
-## Remaining work
-
-What milestone 1 left undone, untested, or knowingly imperfect. Remove an item
-when it is fixed. Design questions still to be answered are under "Open
-items" below.
-
-### Priority order
-
-**Decided 2026-11-25, brought up to date 2026-11-27.** The sections below
-group items by kind; this is the order to do them in. (This section was
-dropped from the document by mistake in commit 9a52da3 and put back.)
-
-1. Done: the helper's group rename, `next-id` kept across `uninstall`, and
-   the helper's security gaps that do not concern launchd.
-2. Done: the guest-side launcher, agent definitions (seven built-ins),
-   quarantine handling, and `sv2 agent new`.
-3. Done: the safer `uninstall`, default deny, `sv2 doctor`, repository
-   credentials, and the verification that needed no push.
-4. Done 2026-11-27: a position on localhost and port 22 (see "Local port
-   22" under "Milestone 1"); the `sv2 repair` questions (open item 9), all
-   five decided; a deploy key and a token used for real; `--chrome` and
-   `--lightpanda`; definitions for muse and herdr, and wrapper scripts.
-   Done 2026-11-26: the leftover verification that needed root
-   (`use_pty`, the ACL checks), see `sv2/tests/mutation-checks` under "Not
-   yet verified"; copying the user's configuration into a sandbox home,
-   see "The user's configuration" under "Milestone 1".
-5. What is left is in the backlog, ordered by its priority. The move to a
-   launchd daemon (TASK-0022) is done last.
-
-### Not yet verified
-
-`sv2/tests/root-checks` makes the checks that need an administrator:
-uninstall with and without `--all-profiles`, the account that keeps the
-name `sv2` taken, and account IDs across a reinstall. It deletes every profile on
-the Mac, so it is run by hand: `sv2/tests/root-checks sv2/target/release
---delete-every-profile`. It was run on the development Mac on 2026-11-26
-and passed (33 of 33), all three "taken name" cases included (those
-cases went with `/Users/Shared/sv2` on 2026-11-27). That run
-still had a section for very large account IDs, since removed from the
-script: an account with ID 2147483000 was created, entered (in its own
-launchd domain) and removed, and the integration suite passed with IDs
-there (137 of 137).
-
-It was run again on 2026-11-26, after it began to set `SV2_NO_HOME_COPY`,
-and passed (26 of 26). The seven "taken name" checks were not run that
-time: a workspace with files in it kept `/Users/Shared/sv2` in place. The
-`default` profile made afterwards, a new account under the old name, was
-given the user's configuration again, as "The user's configuration" under
-"Milestone 1" says it should be.
-
-`sv2/tests/mutation-checks` shows that checks of the integration suite fail
-when the protection they are about is taken away. From a copy of the source
-it builds helpers that are each wrong in one way, installs them one after
-the other, runs the suite against each, and requires the checks named for
-that fault to fail. A faulty helper is installed while it runs, so it is run
-by hand: `sv2/tests/mutation-checks sv2/target/release
---install-faulty-helpers`. It installs this build again when it ends. It was
-run on the development Mac on 2026-11-26 (sudo 1.9.17p2) and passed (13 of
-13):
-
-- *`use_pty`.* With `Defaults !use_pty` in another sudoers file, this build
-  passed the whole suite. A helper whose sudoers file leaves the line out
-  then put the session on the host's terminal, and "the session has its own
-  tty" failed. So the line is what holds; no sudo older than 1.9.14 was
-  needed to show it.
-- *Workspace ACL.* Five faults, each caught: the sandbox may re-permission
-  the workspace directory ("cannot change the directory's mode, owner or
-  ACL"); may delete it ("cannot move the workspace away": it moved the
-  directory to `/private/tmp`); files inherit the right to execute (both
-  "not executable" checks); the host user has no access to what the sandbox
-  makes (read, write and remove); files below the first level inherit
-  nothing ("host can read a sandbox-private file").
-- *"Sandbox cannot rename the directory in place" does not depend on the
-  ACL*, and no fault is aimed at it. A new name beside the old one was
-  refused even when the sandbox owned the workspace directory and had
-  `delete` on it (measured by hand): the directory above is root's.
-- *Changes the first run led to.* The suite stopped, instead of reporting,
-  when the workspace had been moved away and when the host could not write
-  into a sandbox-private directory; it goes on at both places now. It also
-  checks that the workspace is there and empty before the sandbox tries to
-  remove it, since removing one that is not empty fails whatever the ACL.
-
-The integration suite was run on the development Mac on 2026-11-27 with
-helper version 7 installed, and passed (166 of 166). That run covers the
-hand-back at `profile remove` and in `sv2 repair`, and the three repair
-checks whose counts had been corrected. Before that, against helper
-version 6, the suite's new removal check failed as it should.
-
-- [ ] **Account changes need a macOS privacy permission.** Changing an
-  existing account's home directory, and deleting an account, make
-  `opendirectoryd` ask TCC for `kTCCServiceSystemPolicySysAdminFiles`
-  ("would like to administer your computer"). The permission belongs to the
-  app the command was started from (the terminal), not to `sv2`, the helper
-  or root. This affects `profile remove` and `uninstall`. A repeated
-  `profile add` no longer asks: the helper does not write an attribute that
-  already has the wanted value.
-
-  Since 2026-11-26 (helper version 6) the helper no longer waits as long as
-  macOS would, about 290 seconds with the registry lock held. Every write
-  to the directory (`dscl` and `dseditgroup`) is given 60 seconds. After 3
-  the helper says what it is waiting for and to answer "Allow". At 60 it
-  kills the tool and fails, naming the permission. A refusal
-  (`eDSPermissionError`) fails at once with the permission's name and
-  `tccutil reset SystemPolicySysAdminFiles`, which makes macOS ask again
-  (the service name was checked against `tccutil`). Either way the verb can
-  be run again. Unit tests cover the time limit, the notice, and telling a
-  refusal from other failures, against stand-ins for the tools.
-
-  Verified by hand on 2026-11-27, on the development Mac, with a throwaway
-  profile and `sv2 profile remove`:
-  - after `tccutil reset SystemPolicySysAdminFiles` macOS asked, and the
-    helper said what it was waiting for after about 3 seconds;
-  - "Don't Allow" failed the command at once with the refusal message, and
-    so did the next attempt, with no prompt;
-  - a second `tccutil reset` brought the prompt back, which is what the
-    refusal message promises;
-  - left unanswered, the command failed after about 60 seconds with the
-    other message;
-  - after "Allow", the removal run again succeeded.
-
-  The rest is open item 10.
-
-### Security gaps
-
-None recorded.
-
-### Functional gaps
-
-None recorded.
-
-### Features not in milestone 1
-
-- [x] `uninstall --all-profiles` stays. Removing it was considered and
-  decided against on 2026-11-26.
-- [x] Each install of an agent has its own list of paths (commit 1db821c),
-  and the help is one line a command (commit 0be3f72).
-- [x] The user's configuration in sandbox homes; see "The user's
-  configuration" under "Milestone 1".
-- [x] `sv2 doctor`; see "Doctor" under "Milestone 1".
-- [x] The guest-side launcher (open item 5); see "Guest launcher" under
-  "Milestone 1". There is no unpacked payload.
-- [x] Agent definitions: format, `install.sh`, Homebrew and native install,
-  `--native`; see "Agent definitions" under "Milestone 1". Built-ins:
-  `claude`, `codex`, `gemini`, `herdr`, `muse`, `opencode`, `pi`, and
-  `wrapper` scripts (2026-11-27).
-- [x] `sv2 agent new NAME [--from AGENT]` creates a definition in
-  `~/.config/sandvault2/agents`: from a template that shows every key, the
-  optional ones commented out, or as a copy of an existing definition (a
-  built-in, to change it). It never replaces a definition that is there.
-- [x] Quarantine handling for installed agent binaries (open item 1); see
-  "Quarantine" under "Milestone 1".
-- [x] Default deny; see "Default deny" under "Milestone 1".
-- [x] A position on localhost and port 22; see "Sandbox profile" and
-  "Local port 22" under "Milestone 1".
-- [x] Repository credentials: `sv2 deploy-key` and `sv2 gh-token`; see
-  "Repository credentials" under "Milestone 1".
-- [x] Browser support: `--chrome` and `--lightpanda`; see "Browsers" under
-  "Milestone 1".
-- [x] `system_prompt` in agent definitions: how an agent takes text for
-  its system prompt; see "Text for the system prompt" under "Agent
-  definitions". A flag (`claude`, `pi`) or a setting (`muse`; "Text as a
-  setting"). The first text is the browser's (next item).
-- [x] Telling an agent that its session has a browser; see "Telling the
-  agent" under "Browsers".
-- [x] The iOS simulator: `--ios`; see "iOS simulator" under "Milestone 1".
-
-## Open items
-
-1. **Quarantine.** Decided on 2026-11-26; see "Quarantine" under
-   "Milestone 1". sv2 neither runs a fresh program on the host, as v1 did,
-   nor removes the attribute.
-2. **Simulator trust.** Measured on 2026-11-27: a simulator app is an
-   unconfined process of whoever runs the simulator. In the host user's
-   simulator it read and wrote the host home, so the host bridge was
-   removed. The simulator now runs as the sandbox account, and `--ios`
-   grants code outside the sandbox profile, inside the account. The
-   measurements, with the macOS and Xcode versions, are under "iOS
-   simulator" in "Milestone 1". TASK-0006 is still open in the backlog.
-3. **Daemon follow-up.** Scope and timing of the move from the sudoers helper
-   to a launchd daemon.
-
-   In TASK-0022, scheduled last, after the measurement in TASK-0015.
-4. **Terminal.** Decided in milestone 1; see "Milestone 1".
-5. **Guest-side launcher.** Decided: a script compiled into `sv2` and
-   passed on the command line, which gets an agent's data and install
-   script as arguments; see "Guest launcher" and "Agent definitions" under
-   "Milestone 1". It was not to be the helper after it drops privileges:
-   that would put definition parsing into the binary that runs as root.
-6. **Registry format.** Decided in milestone 1; see "Milestone 1".
-7. **launchd as a route around the profile.** In TASK-0013, with what has
-   been measured. Apple's system agents (`distnoted`) that launchd starts
-   in the domain run as the sandbox user outside the profile; they are
-   Apple's code, reachable only through what the profile allows.
-8. **Per-profile capabilities.** In TASK-0005.
-9. **What `sv2 repair` should do.** Decided. On 2026-11-25: it runs
-   automatically after `profile add` and `profile remove`, and it makes the
-   host user the owner (see "Workspace permissions" and "`sv2 repair`" under
-   "Milestone 1"). On 2026-11-27, each as built:
-   - it replaces an entry's ACL and does not add to it. The sandbox can
-     write entries of its own, a deny for the host user among them, and the
-     result should not depend on them. An entry the host user added by hand
-     is lost;
-   - it changes neither mode bits nor the group. Measured that day: a file
-     and a directory of mode 000 are fully usable through an ACL entry
-     alone, so mode bits keep neither user out; they decide only execute,
-     which the workspace ACL leaves out on purpose;
-   - PATH is required. The whole-workspace cases run by themselves after
-     `profile add` and `profile remove`;
-   - entries it cannot take over are handed back by the sandbox account, in
-     `sv2 repair` and before the account is deleted;
-   - the automatic pass always runs, also on `profile add` of a profile
-     that is already active: it is the pass that picks up files moved in.
-     Its cost was measured and the slow comparison replaced.
-10. **The "administer your computer" permission.** `profile remove`, a
-    repeated `profile add` and `uninstall` depend on a TCC permission held by
-    the user's terminal app (see "Account changes need a macOS privacy
-    permission" under "Remaining work"). Decide what sv2 does about it.
-
-    What was observed on 2026-11-25, macOS 26.7, with `sv2` run from a
-    terminal app (cmux):
-    - Until 19:25 every request for `kTCCServiceSystemPolicySysAdminFiles`
-      was granted without a prompt. `tccd` checks
-      `kTCCServiceSystemPolicyAllFiles` (Full Disk Access) first.
-    - At 19:26:14 `tccd` logged `AUTHREQ_PROMPTING` for the terminal app.
-      With the prompt unanswered, `ODRecordSetValue` (re-setting
-      `NFSHomeDirectory`) ran 283 s and `ODRecordDelete` 294 s before
-      `opendirectoryd` forced `ODErrorPluginOperationTimeout`; `dscl` printed
-      `DS Error: -14987 (eUndefinedError)` and exited with status 139. A
-      later delete went through, and runs passed again until 20:02.
-    - At 20:02 the same requests were answered at once with `authValue=0,
-      authReason=2` (denied, set by the user); `dscl` printed
-      `DS Error: -14120 (eDSPermissionError)` and exited with status 40.
-    - `opendirectoryd` did not restart. Creating an account, and reads, were
-      never affected.
-
-    Done: the helper no longer re-sets an attribute that already has the
-    right value, which spares a repeated `profile add` (deleting an
-    account still asks, and that cannot be skipped); since 2026-11-26 the
-    helper detects `eDSPermissionError` and the long wait, names the
-    permission, and gives each write 60 seconds (see "Account changes need
-    a macOS privacy permission"), and `README-SV2.md` documents it. What is
-    left is in TASK-0015 (what asks, and whether a daemon is asked) and
-    TASK-0018 (the suite's failures, and the lock held while waiting).
