@@ -1,6 +1,10 @@
 #!/bin/bash
 # Use "system bash" (v3.2) to validate compatibility
 # Test the sv CLI and sandbox security
+# The tests are functions run by name (queue_test NAME), which shellcheck
+# cannot follow. It said nothing of them while the script could have been
+# sourced by another; the exit on the last line tells it that it is not.
+# shellcheck disable=SC2329
 set -Eeuo pipefail
 START_TIME=$(date +%s.%N)
 
@@ -3626,6 +3630,13 @@ print(mod["DEFAULT_SUBPATHS"].get(sys.argv[2], "<missing>"))
 ###############################################################################
 # Test setup
 ###############################################################################
+# From here to the end everything is in a function, called from the last
+# line: bash reads a script as it runs it, so a script that is saved while
+# it runs would go on from the same offset in other text. A function is read
+# whole before it starts. What is above is read in the first moments of a
+# run: it defines the tests and runs none.
+# The body is not indented, so that the change shows only where it is.
+main() {
 # Cannot build sandvault if already running inside sandvault
 if [[ -z "${SV_SESSION_ID:-}" ]]; then
     # --ssh: a plain build does not add the sandbox user to
@@ -3775,3 +3786,8 @@ ELAPSED_TIME=$(echo "$END_TIME - $START_TIME" | bc --mathlib | xargs printf "%.2
 if [[ "$VERBOSE" -ne 0 ]]; then
     echo -e "✅ Tests completed in $ELAPSED_TIME seconds!"
 fi
+}
+
+# In braces, so that the call and the exit are read together before main
+# starts and nothing is read from the file after it.
+{ main "$@"; exit $?; }
