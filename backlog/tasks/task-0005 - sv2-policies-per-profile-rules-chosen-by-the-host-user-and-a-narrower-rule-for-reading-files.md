@@ -3,20 +3,21 @@ id: TASK-0005
 title: >-
   sv2: policies: per-profile rules chosen by the host user, and a narrower rule
   for reading files
-status: In Progress
+status: To Do
 assignee:
   - '@claude'
 created_date: '2026-11-27T17:59:06Z'
-updated_date: '2026-11-28T05:15:12Z'
+updated_date: '2026-11-28T05:34:10Z'
 labels:
   - sv2
+  - deferred
 dependencies: []
 documentation:
   - docs/SANDVAULT2.md
   - docs/SANDVAULT2-POLICIES.md
 priority: high
 type: feature
-ordinal: 5000
+ordinal: 33000
 ---
 
 ## Description
@@ -49,4 +50,8 @@ Done through the subtasks, in dependency order: TASK-0005.01 (parser and built-i
 2026-11-27: at Pat's request the design is in its own file, docs/SANDVAULT2-POLICIES.md; docs/SANDVAULT2.md keeps a pointer under "Sandbox profile" and in open item 8.
 
 2026-11-27: at the request of Pat the build order and the unmeasured items were taken out of the design doc and are tracked here: six subtasks. The title, description and criteria were reworded from "capability" to "policy" to match the decision; what each criterion asks is unchanged.
+
+2026-11-27, from TASK-0002: "the last matching rule wins" holds only between rules of the same operation name. Measured as the current user under sandbox-exec, macOS 26.7.3 (25G342): after `(allow file-read-data (subpath "/Library"))`, a later `(deny file-read* (subpath "/Library/Keychains"))` does not stop a keychain being read (stat is refused, the data is read); after `(allow network-outbound (remote ip))`, a later `(deny network* (remote tcp "localhost:22"))` does not stop a connection to port 22. The reverse holds too: `(deny file-read-data ...)` followed by `(allow file-read* ...)` stays denied. A deny that names the same operation as the allow does win when it is later. So the denies the helper writes last ("the denies no policy may undo" in docs/SANDVAULT2-POLICIES.md) can be undone by a policy that names one operation where the deny has a wildcard, and the sections "What the helper writes around every policy" and "Order" say otherwise. Not changed here: the design doc and TASK-0005.02 need a decision, for example writing each last deny once for the wildcard and once for every operation under it, or refusing operation names more specific than those the last denies use.
+
+2026-11-28: deferred by Pat, with all six subtasks (label `deferred`). First a strong default policy in base.sb (TASK-0027, TASK-0028, TASK-0029); creating and choosing other policies comes later.
 <!-- SECTION:NOTES:END -->

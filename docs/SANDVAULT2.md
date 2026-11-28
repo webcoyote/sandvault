@@ -1389,8 +1389,11 @@ Decisions this milestone made:
   - *What is allowed*, each measured by taking it out: reading files,
     the network, signals, pseudo-terminals, ioctl on `/dev`, POSIX shared
     memory and semaphores, `sysctl` reads, starting programs, `/bin/ps`
-    outside the sandbox, the writable places as before, and five Mach
-    names: `com.apple.system.` (user and group names),
+    outside the sandbox, the writable places as before, and six Mach
+    names: `com.apple.system.opendirectoryd.libinfo` (user and group
+    names) and `com.apple.system.opendirectoryd.membership` (`defaults`
+    writes), not the `com.apple.system.` prefix, which let `dscl` test
+    account passwords,
     `TrustEvaluationAgent` (TLS for curl, git, python), `trustd.agent`
     (TLS for Go programs), `SecurityServer` (keychains), `FSEvents` (file
     watchers).

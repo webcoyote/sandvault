@@ -83,7 +83,17 @@ __SSH_PORT_RULES__
   ;; opendirectoryd's libinfo, which carries user and group names. Probes
   ;; "id shows names" (id prints a number) and "ssh-keygen" ("No user exists
   ;; for uid").
-  (global-name-prefix "com.apple.system.")
+  ;; This one name, not the com.apple.system. prefix: the prefix also
+  ;; admits com.apple.system.opendirectoryd.api, which dscl talks to, and
+  ;; through it a session could test the password of any account of this
+  ;; Mac (dscl . -authonly) and read its record. Probes "check a password
+  ;; (dscl)" and "read an account's record (dscl)".
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  ;; opendirectoryd's membership service, which answers whether a user is
+  ;; in a group; it checks no password. Probe "defaults write and read":
+  ;; without it defaults write reports nothing and writes nothing, and the
+  ;; read says "The domain/default pair ... does not exist".
+  (global-name "com.apple.system.opendirectoryd.membership")
   ;; TLS trust evaluation for curl, git and python. Probe "https with curl
   ;; (TLS trust)": (60) unable to get local issuer certificate; a dozen
   ;; other probes fail with it.

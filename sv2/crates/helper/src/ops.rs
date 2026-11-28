@@ -1167,7 +1167,7 @@ mod tests {
         let pinned = [
             ("sudoers", 2, 2_912_536_391_597_273_097u64),
             ("sshd drop-in", 1, 1_053_182_674_171_491_837),
-            ("sandbox profile", 9, 10_712_932_736_384_161_368),
+            ("sandbox profile", 11, 1_565_944_847_858_122_693),
         ];
         assert_eq!(
             now, pinned,

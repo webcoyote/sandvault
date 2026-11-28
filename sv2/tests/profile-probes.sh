@@ -155,6 +155,12 @@ else
 fi
 
 # --- reaching out of the sandbox
+# opendirectoryd's own service, which dscl talks to: it answers whether a
+# password is right, for any account. No real account is named: the answer
+# for a name that does not exist is "eDSAuthFailed" when the service is
+# reached, as it is for a wrong password, and "eServerError" when it is not.
+denied "check a password (dscl)" /bin/sh -c '/usr/bin/dscl . -authonly sv2-probe-no-such-user sv2-probe 2>&1 | /usr/bin/grep -q eDSAuth'
+denied "read an account's record (dscl)" /bin/sh -c '/usr/bin/dscl . -read /Users/root UniqueID 2>/dev/null | /usr/bin/grep -q UniqueID'
 denied "pasteboard" /bin/sh -c 'echo sv2-probe | pbcopy && test "$(pbpaste)" = sv2-probe'
 denied "AppleScript to Finder" /usr/bin/osascript -e 'tell application "Finder" to get name of startup disk'
 denied "open an application" /bin/sh -c '/usr/bin/open -a Calculator && sleep 1 && pgrep -x Calculator >/dev/null'
