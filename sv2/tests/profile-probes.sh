@@ -27,7 +27,7 @@ PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"; export PA
 # No probe runs longer than this: a denied service can make a tool wait
 # rather than fail. (alarm survives exec.)
 BOUNDED=(/usr/bin/perl -e 'alarm shift; exec @ARGV' 40)
-allowed() { local name="$1" out; shift; if out="$("${BOUNDED[@]}" "$@" 2>&1)"; then echo "ok $name"; else echo "FAIL $name: $(printf '%s' "$out" | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-200)"; fi; }
+allowed() { local name="$1" out; shift; if out="$("${BOUNDED[@]}" "$@" 2>&1)"; then echo "ok $name"; else echo "FAIL $name: $(printf '%s' "$out" | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-500)"; fi; }
 # denied NAME CMD...: CMD must fail.
 denied() { local name="$1" out; shift; if out="$("${BOUNDED[@]}" "$@" 2>&1)"; then echo "FAIL $name: it worked: $(printf '%s' "$out" | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-120)"; else echo "ok $name"; fi; }
 have() { command -v "$1" >/dev/null 2>&1 || { echo "skip $2: no $1"; return 1; }; }
@@ -139,7 +139,10 @@ done
 # profile allows.)
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 if [[ -x "$CHROME" ]]; then
+    # The shell's own messages go to a file: its notice of a crash names the
+    # whole command line, which would fill the report before Chrome's log.
     allowed "Google Chrome with a debugging port loads a page" /bin/sh -c "
+        exec 2>'$T/chrome-shell.err'
         '$CHROME' --headless --no-sandbox --disable-gpu --remote-debugging-port=0 --remote-debugging-address=127.0.0.1 --user-data-dir='$T/chrome' --no-first-run --no-default-browser-check --disable-extensions https://example.com > '$T/chrome.log' 2>&1 &
         pid=\$!; n=0; port=; found=1
         while [ \$n -lt 150 ]; do
@@ -149,7 +152,13 @@ if [[ -x "$CHROME" ]]; then
             sleep 0.2; n=\$((n+1))
         done
         kill \$pid 2>/dev/null
-        [ \$found -eq 0 ] || { tail -3 '$T/chrome.log'; exit 1; }"
+        wait \$pid; status=\$?
+        [ \$found -eq 0 ] && exit 0
+        # The status in place of the shell's notice: 133 is SIGTRAP, which
+        # is how Chrome ends when one of its checks fails.
+        echo \"Chrome ended with status \$status; its log:\"
+        grep -E 'FATAL|Check failed|ERROR' '$T/chrome.log' | tail -2 | grep . || tail -3 '$T/chrome.log'
+        exit 1"
 else
     echo "skip Google Chrome with a debugging port loads a page: no Google Chrome in /Applications"
 fi
