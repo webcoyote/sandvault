@@ -1056,6 +1056,19 @@ job_control() {
             /bin/sleep 0.02
             n=$((n + 1))
         done
+        # And only once sudo has put the shell's terminal in raw mode, so that
+        # ^Z goes to the pty sudo made for the command. sudo does that after
+        # the command has started, which is after the pattern can match; in
+        # between, ^Z still stops sv2 and sudo, and the job shows "Stopped"
+        # (seen on CI). The terminal is the interactive shell's.
+        local tty
+        tty="$(/bin/ps -o tty= -p "$(/usr/bin/pgrep -f "^/bin/bash --noprofile --rcfile $SCRATCH/no-rcfile" | /usr/bin/head -n 1)" 2>/dev/null | /usr/bin/tr -d ' ')"
+        n=0
+        until [[ -z "$tty" || "$n" -ge 100 ]] \
+            || /bin/stty -f "/dev/$tty" -a 2>/dev/null | /usr/bin/grep -qw -- '-isig'; do
+            /bin/sleep 0.02
+            n=$((n + 1))
+        done
         for _ in 1 2 3 4 5 6 7 8 9 10; do printf '\032'; /bin/sleep 0.03; done
         # Nothing more is typed until the process is gone, or stays stopped:
         # sudo passes what is typed on to the command, which would swallow
