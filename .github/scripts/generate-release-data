@@ -47,8 +47,10 @@ gh auth status >/dev/null 2>&1 || die "gh CLI is not authenticated — run 'gh a
 LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null)" \
     || die "No git tags found in the repository"
 
-VERSION="$(./sv --version 2>/dev/null | head -1)" \
-    || die "Could not determine version from ./sv --version"
+# Read the version from the file instead of running ./sv, which refuses to
+# run from a sandbox-writable checkout.
+VERSION="$(awk -F'"' '/^readonly VERSION="[0-9.]*"/ {print $2; exit}' ./sv)"
+[[ -n "$VERSION" ]] || die "Could not determine version from ./sv"
 
 DATE="$(date +%Y-%m-%d)"
 

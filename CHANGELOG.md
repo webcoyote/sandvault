@@ -2,6 +2,17 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [1.43.0] - 2026-11-27
+
+### Fixed
+
+- A sandboxed process can no longer test the password of any account on the Mac, or read its directory record, through `dscl` ([#403](https://github.com/webcoyote/sandvault/pull/403))
+- Lightpanda now loads HTTPS sites that it previously rejected with `PeerFailedVerification`, such as example.com ([#400](https://github.com/webcoyote/sandvault/pull/400))
+
+### Thanks to 1 contributor!
+
+- [@webcoyote](https://github.com/webcoyote)
+
 ## [1.42.0] - 2026-11-26
 
 ### Changed
