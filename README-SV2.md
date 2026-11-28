@@ -62,6 +62,7 @@ sv2 -p work claude                # in the profile "work"
 sv2 --lightpanda claude           # with a headless browser in the sandbox
 sv2 --ios claude                  # with an iOS simulator in the sandbox
 sv2 shell ls -la                  # one command, then back
+sv2 agy                           # Google's Antigravity CLI (Gemini 4 Neon)
 sv2 herdr                         # many agents in one terminal; reattaches
 ```
 

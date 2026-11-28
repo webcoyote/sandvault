@@ -850,6 +850,29 @@ Decisions this milestone made:
     Not run, for any agent: a Mac without Homebrew or with a prefix
     the user cannot write, and a user definition in
     `~/.config/sandvault2/agents` on a real machine.
+  - *agy (2026-11-28)*, the Antigravity CLI, is Google's CLI after
+    gemini's and the one that offers Gemini 4 Neon. Its definition was
+    written against agy 1.5.18, the build of Homebrew's
+    `antigravity-cli` cask (SHA-256 checked against the cask's), run
+    with a scratch `HOME`. No account was signed in, and it has not been
+    run from `sv2`. The definition names no model: agy makes Neon the
+    default for a plan that has it, and `--model` for one without it
+    would fail.
+    - `--dangerously-skip-permissions` is the flag; agy's own sandbox
+      (`--sandbox`) is off unless asked for. All 14 subcommands take the
+      flag in front (each `--help` is the same, `acp`'s shows it applied,
+      and `agy --dangerously-skip-permissions mcp list` lists servers), so
+      `no_inject` is empty.
+    - No `system_prompt`. agy has no option for the text, and its
+      `--settings` refuses a key it does not know; every name tried for
+      the text was refused. It reads `GEMINI.md` and `AGENTS.md` instead.
+    - Google's installer ends with `agy install`, which appends a `PATH`
+      line to `~/.zshrc` and `~/.zprofile` even when `~/.local/bin` is on
+      `PATH`, and the installer cannot pass on its `--skip-path`. So
+      `install.sh` runs it with `HOME` set to scratch (where those edits
+      and its staging land, and are removed) and `--dir ~/.local/bin`.
+      Run with umask 077 and GNU tools first on `PATH`, it installed
+      1.5.19 there and left both files unchanged.
   - *What a definition may say* is checked when it is read: binaries start
     with `~/`, `{brew}/` or `/` and are plain paths; a package is a plain
     name, or `user/repository/name` from a tap (opencode); a variable is
@@ -1194,8 +1217,8 @@ Decisions this milestone made:
     chooses between the headless shell and Google Chrome in the sandbox,
     after the command line is made. The text names the variable and not
     the address, which only the launcher knows. The banner says whether
-    the agent was told; when it was not (no `system_prompt`: codex,
-    gemini, opencode; or a subcommand in `no_inject` or `inject_last`), it
+    the agent was told; when it was not (no `system_prompt`: agy,
+    codex, gemini, opencode; or a subcommand in `no_inject` or `inject_last`), it
     says why and where the browser is. herdr refuses a browser anyway.
     Measured: Claude Code 2.1.326, run directly with the text of a
     Lightpanda session and asked without tools whether its system prompt

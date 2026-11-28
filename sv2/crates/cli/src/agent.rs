@@ -1732,6 +1732,18 @@ no_inject = ["update"]
                     assert_eq!(d.final_args(&os(&[sub]), Some("t"))[0], sub, "{sub}");
                 }
             }
+            if name == "agy" {
+                // Measured against agy 1.5.18: every subcommand takes the
+                // flag in front, and nothing takes text for the prompt.
+                assert_eq!(d.prompt, None);
+                for sub in ["hi", "mcp", "models", "plugin", "update"] {
+                    assert_eq!(
+                        d.final_args(&os(&[sub]), Some("t")),
+                        os(&["--dangerously-skip-permissions", sub]),
+                        "{sub}"
+                    );
+                }
+            }
             if name == "herdr" {
                 // A multiplexer: no system prompt of its own to add to.
                 assert_eq!(d.prompt, None);
@@ -1741,7 +1753,7 @@ no_inject = ["update"]
         seen.sort();
         assert_eq!(
             seen,
-            ["claude", "codex", "gemini", "herdr", "muse", "opencode", "pi"]
+            ["agy", "claude", "codex", "gemini", "herdr", "muse", "opencode", "pi"]
         );
     }
 
