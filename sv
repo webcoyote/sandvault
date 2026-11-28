@@ -139,7 +139,7 @@ readonly VERSION="1.42.0"
 
 # Bump when the sandbox policy changes: the profile is root owned, so the
 # version line it carries is how an installed machine learns it is stale.
-readonly SV_SANDBOX_PROFILE_VERSION="7"
+readonly SV_SANDBOX_PROFILE_VERSION="9"
 
 # Bump when the session launcher (SANDVAULT_LAUNCHER) changes, for the same
 # reason: it is root owned, so its version line is how a machine learns it
@@ -2021,8 +2021,14 @@ heredoc SANDBOX_PROFILE_CONTENT << EOF
   (global-name-prefix "com.apple.cfprefsd")
   ;; opendirectoryd's libinfo, which carries the prefs path and user and group
   ;; names: without it id -un and whoami print a uid, id loses group names,
-  ;; dscl fails with eServerError, and defaults writes do not persist.
-  (global-name-prefix "com.apple.system.")
+  ;; and with the membership service denied defaults writes do not persist.
+  ;; These two names, not the com.apple.system. prefix: the prefix also admits
+  ;; com.apple.system.opendirectoryd.api, which dscl talks to, and through it
+  ;; a session could test the password of any account of this Mac
+  ;; (dscl . -authonly) and read its record. With the two names dscl fails
+  ;; with eServerError.
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.system.opendirectoryd.membership")
   ;; DNS, and the sockets curl, git and node resolve through.
   (global-name-prefix "com.apple.dnssd")
   (global-name-prefix "com.apple.mDNSResponder")

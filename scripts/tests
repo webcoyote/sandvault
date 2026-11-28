@@ -1771,6 +1771,25 @@ STUB
         '[[ "$(launchctl manageruid)" == "$(id -u)" ]] && echo own-domain || echo "manageruid=$(launchctl manageruid) uid=$(id -u)"' \
         "own-domain"
 
+    # opendirectoryd's own service, which dscl talks to, answers whether a
+    # password is right, for any account of this Mac. A session must not
+    # reach it. No real account is named: for a name that does not exist the
+    # answer is eDSAuthFailed when the service is reached, as for a wrong
+    # password, and eServerError when it is not.
+    queue_test assert_sandbox_fails "session cannot check a password (dscl)" \
+        '/usr/bin/dscl . -authonly sv-probe-no-such-user sv-probe 2>&1 | /usr/bin/grep -q eDSAuth'
+    queue_test assert_sandbox_fails "session cannot read an account's record (dscl)" \
+        '/usr/bin/dscl . -read /Users/root UniqueID 2>/dev/null | /usr/bin/grep -q UniqueID'
+    # Names still resolve through opendirectoryd's libinfo.
+    # shellcheck disable=SC2016 # expanded by the sandbox shell
+    queue_test assert_sandbox_pipe_contains "session resolves user and group names" \
+        '[[ "$(id -un)" != "$(id -u)" && "$(id -gn)" != "$(id -g)" ]] && echo names-ok' "names-ok"
+    # Preferences still persist: a write that is silently dropped reads back
+    # as "does not exist".
+    queue_test assert_sandbox_pipe_contains "session writes and reads preferences (defaults)" \
+        'defaults write com.sandvault.probe k probe-value && defaults read com.sandvault.probe k; defaults delete com.sandvault.probe >/dev/null 2>&1' \
+        "probe-value"
+
     # Same contract as the sandbox profile: the launcher is root owned and
     # written only when stale, so a missing file or another version must
     # trigger a rewrite and the current version must not.
